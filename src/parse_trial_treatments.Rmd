@@ -1,0 +1,586 @@
+---
+title: "parse trial treatment interventions"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+params:
+  export: TRUE
+---
+
+Author comment:
+File description comment:
+The purpose of this script is to parse metadata on the trial interventions and immunotherapy dose schedules
+
+# Loading Packages
+```{r include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning = FALSE, message = FALSE, dpi = 300, error = TRUE,
+  root.dir = ".."
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# Install if necessary install.packages("BiocManager")
+# Install if necessary BiocManager::install("DESeq2")
+library(tidyverse)
+library(readxl)
+library(here)
+library(export)
+source("helper_functions.R")
+
+set.seed(42)
+select <- dplyr::select
+rename <- dplyr::rename
+```
+
+
+```{r}
+output_dir <- here("data", "processed", "metadata")
+
+trial_metadata <- read_excel(
+  here("data", "external", "pancan_neoadj_metadata.xlsx"))
+# str(CRC_data)
+trial_metadata <- trial_metadata %>%
+  mutate_at(vars(n_patients_enrolled, `n_patients_assessed(treated?)`,
+                 n_patients_pathology, pCR_rate, pCR_MPR_rate), as.numeric)
+
+trial_metadata <- trial_metadata %>%
+  filter(!DOI %in% c("10.1016/S1470-2045(19)30151-2",
+                     "10.1200/JCO.2022.40.16_suppl.3511"))
+
+nrow(trial_metadata)
+trial_metadata$DOI %>% n_distinct()
+
+trial_metadata %>%
+  select(n_patients_enrolled, `n_patients_assessed(treated?)`,
+         n_patients_pathology, pCR_rate, pCR_MPR_rate) %>%
+  mutate_if(is.character, as.factor) %>%
+  summary()
+
+sum(trial_metadata$n_patients_enrolled, na.rm = TRUE)
+sum(trial_metadata$`n_patients_assessed(treated?)`, na.rm = TRUE)
+sum(trial_metadata$n_patients_pathology, na.rm = TRUE)
+
+#Study_name,	Short_ref,
+trial_metadata_studies <- trial_metadata %>%
+  select(TI, DOI, Year, Trial_name, 
+         Clinicaltrials_gov_id, Phase,
+         Trial_status_addfinaldate, Countries, Cancer_type,
+         Cancer_subtype_stage, Primary_outcomes, Secondary_outcomes, Translational_analysis,
+         Data_availability_statement, Machine_readable_raw_source_data,
+         Patient_level_data, Ethics_statement,
+         Conflict_of_interest_statement) %>% unique()      
+
+trial_metadata_studies %>%
+  select(-c(TI, DOI)) %>%
+  mutate_if(is.character, as.factor) %>%
+  summary(maxsum = 8)
+
+histology_df <- data.frame(
+  Trial = c("BELLINI", "IMCISION", "NABUCCO", "NICHE-MSS", "NICHE-MSI",
+            "OpACIN_neo", "PRADO", "MATISSE"),
+  Histology = c("TBNC", "HNSCC", "Urothelial", "Colon", "Colon",
+                "LN_melanoma", "LN_melanoma", "CSCC"))
+
+```
+
+# Function definitions
+```{r}
+parse_intervention_ranges <- function(df, factor_levels = NULL) {
+
+  df <- df %>%
+    rbind(
+    df %>%
+      filter(Range %in% c("Start", "End")) %>%
+      mutate(Day = map2(df$Day[which(df$Range == "Start")],
+                        df$Day[which(df$Range == "End")], seq)) %>%
+      unnest(Day) %>%
+      mutate(Range = "Yes")
+    ) %>%
+    mutate(is_range = !is.na(Range))
+  
+  # Recode factor levels, if provided
+  if (!is.null(factor_levels)){
+    df$Treatment <- factor(df$Treatment, levels = factor_levels)
+  }
+  
+  df
+}
+```
+
+# Interventions
+```{r, fig.height = 3, fig.width = 4.5}
+interventions <- trial_metadata %>%
+  select(Trial_name,DOI, Cancer_type,
+         Cancer_subtype_stage, Intervention, Treatment_schedule,
+         Immune_agent, Immune_targets, pCR_rate)
+
+interventions <- interventions %>%
+  mutate(has_io = !is.na(Immune_agent) | Immune_targets != "NA",
+         has_chemo = str_detect(interventions$Intervention, c("CRT|FOLFOX|Chemo")),
+         has_io_only = has_io & !has_chemo)
+
+table(interventions$Immune_agent) %>% knitr::kable()
+table(interventions$Immune_targets) %>% knitr::kable()
+
+table(interventions$Cancer_type, interventions$has_chemo) %>% knitr::kable()
+table(interventions$Cancer_type, interventions$has_io_only) %>% knitr::kable()
+
+# measure total neoadjuvant treatment duration
+
+interventions_format_bellini <- read_excel(
+  here("data", "external", "pancan_neoadj_metadata.xlsx"), sheet = "BELLINI")
+interventions_format_imcision <- read_excel(
+  here("data", "external", "pancan_neoadj_metadata.xlsx"), sheet = "IMCISION") %>%
+  filter(!is.na(Treatment))
+interventions_format_nabucco <- read_excel(
+  here("data", "external", "pancan_neoadj_metadata.xlsx"), sheet = "NABUCCO")
+interventions_format_niche <- read_excel(
+  here("data", "external", "pancan_neoadj_metadata.xlsx"), sheet = "NICHE")
+interventions_format_opacin_neo <- read_excel(
+  here("data", "external", "pancan_neoadj_metadata.xlsx"), sheet = "OpACIN_neo")
+
+interventions_format_prado <- read_excel(
+  here("data", "external", "pancan_neoadj_metadata.xlsx"), sheet = "PRADO")
+interventions_format_matisse <- read_excel(
+  here("data", "external", "pancan_neoadj_metadata.xlsx"), sheet = "MATISSE")
+
+interventions_format_bellini <- parse_intervention_ranges(
+  interventions_format_bellini, factor_levels = c(
+    "Ipilimumab", "Nivolumab", "Neoadj. Chemo. or Surgery", "Surgery"))
+
+interventions_format_bellini_1b <- interventions_format_bellini %>%
+  filter(Arm %in% c("1B"))
+interventions_format_bellini_2b <- interventions_format_bellini %>%
+  filter(Arm %in% c("2B"))
+interventions_format_bellini_3b <- interventions_format_bellini %>%
+  filter(Arm %in% c("3B"))
+
+interventions_format_imcision <- parse_intervention_ranges(
+  interventions_format_imcision,
+  factor_levels = c("Ipilimumab", "Nivolumab", "Neoadj. Chemo. or Surgery"))
+
+interventions_format_imcision_a <- interventions_format_imcision %>%
+  filter(Arm %in% c("A"))
+interventions_format_imcision_b <- interventions_format_imcision %>%
+  filter(Arm %in% c("B"))
+
+interventions_format_nabucco <- parse_intervention_ranges(
+  interventions_format_nabucco,
+  factor_levels = c("Nivolumab", "Ipilimumab", "Surgery"))
+
+interventions_format_niche <- parse_intervention_ranges(
+  interventions_format_niche,
+  factor_levels = c("Nivolumab", "Ipilimumab", "Celecoxib", "Surgery"))
+
+interventions_format_niche_a <- interventions_format_niche %>%
+  filter(Arm %in% c("A - MSI", "A - MSS"))
+interventions_format_niche_b <- interventions_format_niche %>%
+  filter(Arm %in% c("B - MSS"))
+
+interventions_format_opacin_neo <- parse_intervention_ranges(
+  interventions_format_opacin_neo,
+  factor_levels = c("Nivolumab", "Ipilimumab", "Surgery"))
+
+interventions_format_opacin_neo_ab <- interventions_format_opacin_neo %>%
+  filter(Arm %in% c("A", "B"))
+interventions_format_opacin_neo_c <- interventions_format_opacin_neo %>%
+  filter(Arm %in% c("C"))
+
+interventions_format_prado <- parse_intervention_ranges(
+  interventions_format_prado,
+  factor_levels = c("Nivolumab", "Ipilimumab", "Surgery"))
+
+interventions_format_prado <- parse_intervention_ranges(
+  interventions_format_prado,
+  factor_levels = c("Nivolumab", "Ipilimumab", "Surgery"))
+
+interventions_format_matisse <- parse_intervention_ranges(
+  interventions_format_matisse,
+  factor_levels = c("Nivolumab", "Ipilimumab", "Surgery"))
+
+interventions_format_matisse_a <- interventions_format_matisse %>%
+  filter(Arm %in% c("A"))
+interventions_format_matisse_b <- interventions_format_matisse %>%
+  filter(Arm %in% c("B"))
+
+interventions_format_bellini_1b %>%
+  ggplot(aes(x = Day, y = fct_rev(Treatment),
+             fill = Treatment, alpha = is_range, height = 1, width = 1)) +
+  geom_tile(alpha = interventions_format_bellini_1b$Range == "Yes") +
+  theme_Publication() +
+  labs(title = "BELLINI 1B", y = "Treatment") +
+  guides(fill = FALSE) +
+  scale_alpha_manual(values = c(0.5, 0.1))
+
+interventions_format_bellini_2b %>%
+  ggplot(aes(x = Day, y = fct_rev(Treatment),
+             fill = Treatment, alpha = is_range, height = 1, width = 1)) +
+  geom_tile(alpha = interventions_format_bellini_2b$Range == "Yes") +
+  theme_Publication() +
+  labs(title = "BELLINI 2B", y = "Treatment") +
+  guides(fill = FALSE) +
+  scale_alpha_manual(values = c(0.5, 0.1))
+
+interventions_format_bellini_3b %>%
+  ggplot(aes(x = Day, y = fct_rev(Treatment),
+             fill = Treatment, alpha = is_range, height = 1, width = 1)) +
+  geom_tile(alpha = interventions_format_bellini_3b$Range == "Yes") +
+  theme_Publication() +
+  labs(title = "BELLINI 3B", y = "Treatment") +
+  guides(fill = FALSE) +
+  scale_alpha_manual(values = c(0.5, 0.1))
+#   guides(fill = guide_legend(nrow = 2,byrow = TRUE)) 
+
+interventions_format_imcision_a %>%
+  ggplot(aes(x = Day, y = fct_rev(Treatment),
+             fill = Treatment, height = 1, width = 1)) +
+  geom_tile() +
+  theme_Publication() +
+  labs(title = "IMCISION A", y = "Treatment") +
+  guides(fill = FALSE)
+
+interventions_format_imcision_b %>%
+  ggplot(aes(x = Day, y = fct_rev(Treatment),
+             fill = Treatment, height = 1, width = 1)) +
+  geom_tile() +
+  theme_Publication() +
+  labs(title = "IMCISION B", y = "Treatment") +
+  guides(fill = FALSE)
+
+interventions_format_nabucco %>%
+  filter(Cohort_id == "NABUCCO_1A") %>%
+  ggplot(aes(x = Day, y = fct_rev(Treatment),
+             fill = Treatment, height = 1, width = 1)) +
+  geom_tile() +
+  theme_Publication() +
+  labs(title = "NABUCCO 1A", y = "Treatment") +
+  guides(fill = FALSE) 
+
+interventions_format_nabucco %>%
+  filter(Cohort_id == "NABUCCO_2A") %>%
+  ggplot(aes(x = Day, y = fct_rev(Treatment),
+             fill = Treatment, height = 1, width = 1)) +
+  geom_tile() +
+  theme_Publication() +
+  labs(title = "NABUCCO 2A", y = "Treatment") +
+  guides(fill = FALSE) 
+  
+interventions_format_nabucco %>%
+  filter(Cohort_id == "NABUCCO_2B") %>%
+  ggplot(aes(x = Day, y = fct_rev(Treatment),
+             fill = Treatment, height = 1, width = 1)) +
+  geom_tile() +
+  theme_Publication() +
+  labs(title = "NABUCCO 2B", y = "Treatment") +
+  guides(fill = FALSE) 
+  
+interventions_format_niche_a %>%
+  ggplot(aes(x = Day, y = fct_rev(Treatment),
+             fill = Treatment, height = 1, width = 1)) +
+  geom_tile() +
+  theme_Publication() +
+  labs(title = "NICHE MSS/MSI A", y = "Treatment") +
+  guides(fill = FALSE) 
+
+interventions_format_niche_b %>%
+  ggplot(aes(x = Day, y = fct_rev(Treatment),
+             fill = Treatment, height = 1, width = 1)) +
+  geom_tile() +
+  theme_Publication() +
+  labs(title = "NICHE MSS B", y = "Treatment") +
+  guides(fill = FALSE)
+
+interventions_format_opacin_neo %>%
+  ggplot(aes(x = Day, y = fct_rev(Treatment),
+             fill = Treatment, height = 1, width = 1)) +
+  geom_tile() +
+  theme_Publication() +
+  labs(title = "opacin_neo ", y = "Treatment") +
+  guides(fill = FALSE) + facet_wrap(~Cohort_id)
+
+interventions_format_prado %>%
+  ggplot(aes(x = Day, y = fct_rev(Treatment),
+             fill = Treatment, height = 1, width = 1)) +
+  geom_tile() +
+  theme_Publication() +
+  labs(title = "PRADO ", y = "Treatment") +
+  guides(fill = FALSE)
+
+interventions_format_c <- interventions_format_bellini %>%
+  rbind(interventions_format_imcision) %>%
+  rbind(interventions_format_nabucco) %>%
+  rbind(interventions_format_niche) %>%
+  rbind(interventions_format_opacin_neo) %>%
+  rbind(interventions_format_prado) %>%
+  rbind(interventions_format_matisse) %>%
+  mutate(Day = as.numeric(Day))
+
+interventions_format_c %>%
+  write.csv2(here(output_dir, "interventions_format_c.csv"))
+
+interventions_format_c <- read.csv2(
+  here(metadata_dir, "interventions_format_c.csv"))
+```
+
+```{r, fig.height = 12, fig.width = 15}
+interventions_format_c %>%
+  ggplot(aes(x = Day, y = Treatment, fill = Treatment,
+             height = 1, width = 1)) +
+  geom_tile() +
+  theme_Publication() +
+  labs(title = "Neoadjuvant IO Treatment Schedules", y = "Treatment") +
+  guides(fill = FALSE) + facet_wrap(~Cohort_id, scales="free_y", ncol = 3)
+
+ggsave(here("data", "processed", "metadata",
+            "treatment_schedule_panorama_facet.png"),
+  height = 12, width = 14)
+```
+
+```{r, fig.height = 12, fig.width = 8}
+interventions_format_c %>% 
+  mutate(Dose = ifelse(is.na(Dose), Treatment, Dose)) %>%
+  ggplot(aes(x = Day, y = Cohort_id, fill = Treatment, shape = Dose))+
+  geom_tile() +
+  theme_Publication() +
+  labs(title = "Neoadjuvant IO Treatment Schedules", y = "Treatment")
+
+interventions_format_c$Treatment <- factor(
+  interventions_format_c$Treatment,
+  levels = c("Nivolumab", "Ipilimumab", "Celecoxib",
+             "Neoadj. Chemo. or Surgery", "Surgery"))
+
+interventions_format_p <- interventions_format_c %>% 
+  mutate(Group = Cohort_id) %>%
+  mutate(Group = as.numeric(as.factor(Group)))  %>% 
+  mutate(Dose = ifelse(is.na(Dose), as.character(Treatment), Dose))%>%
+  mutate(Treatment_dose = interaction(Treatment, Dose, sep = " ")) %>%
+  group_by(Group) %>%
+  mutate(Treatment_numeric = as.numeric(Treatment)) %>%
+  mutate(Treatment_Count = n_distinct(Treatment)) %>%
+  ungroup()
+
+encode_positions <- function(data) {
+  data %>%
+    group_by(Group) %>%
+    mutate(Position = seq(0, 1, length.out = n() + 2)[2:(n() + 1)]) %>%
+    ungroup()
+}
+
+# Encode positions
+encoded_positions <- encode_positions(
+  interventions_format_p %>%
+    select(Cohort_id, Treatment) %>%
+    unique() %>%
+    mutate(Group = Cohort_id)) %>%
+  select(-Group)
+
+interventions_format_p <- interventions_format_p %>%
+  left_join(encoded_positions %>% rename(Treatment_Pos = Position))
+
+# Dose c(`1 mg/kg` = 1, `3 mg/kg`, 2, `200mg` = 0, `240mg Flat Dose` = 5, `Neoadj. Chemo. or Surgery` = 3, `Surgery` = 4))
+# Shape order no fill         c(1, 0, 5, 2, 3, 4)
+# Filled versions of shapes   c(16, 15, 18, 17, 25, 23)
+interventions_format_p %>% 
+  mutate(Dose = ifelse(is.na(Dose), Treatment, Dose)) %>%
+  mutate(Group = as.numeric(as.factor(Group))) %>%
+  ggplot(aes(x = Day, y = Group, col = Treatment))  +
+  # geom_tile(aes(y = as.numeric(Group) + (as.numeric(Treatment) - 1) * 0.2, fill = Treatment)) +
+  geom_point(aes(y = as.numeric(Group) + (as.numeric(Treatment) - 1) * 0.2,
+                 col = Treatment, shape = as.factor(Dose)), size = 3) +
+  # scale_fill_manual(values = c("Treatment1" = "blue", "Treatment2" = "red")) +
+  scale_shape_manual(values = c(16, 15, 18, 17, 25, 23)) +
+  labs(title = "Neoadjuvant IO Treatment Schedules",
+       x = "Days",
+       y = "",
+       fill = "Treatment",
+       shape = "Dose") +
+  theme(panel.grid.major.y = element_blank())+
+  scale_y_continuous(breaks = interventions_format_p$Group,
+                     labels = interventions_format_p$Cohort_id) + 
+  scale_colour_manual(values = c(Celecoxib = "#FFC1CB", Ipilimumab = "#118DFF",
+                                 "Neoadj. Chemo. or Surgery" = "#744EC2",
+                                 Nivolumab = "#E66C37", Surgery = "#0AAC00"))+
+  theme(axis.title.y = element_blank()) +
+  theme_Publication() +
+  theme(legend.position = "right",
+        legend.direction = "vertical")
+
+interventions_format_p %>% 
+  mutate(Dose = ifelse(is.na(Dose), Treatment, Dose)) %>%
+  mutate(Group = as.numeric(as.factor(Group))) %>%
+  ggplot(aes(x = Day, y = Group, col = Treatment))  +
+  geom_point(aes(y = as.numeric(Group) + Treatment_Pos,
+                 col = Treatment, shape = as.factor(Dose)), size = 3) +
+  scale_shape_manual(values = c(16, 15, 18, 17, 25, 23)) +
+  labs(title = "Neoadjuvant IO Treatment Schedules",
+       x = "Days",
+       y = "",
+       fill = "Treatment",
+       shape = "Dose") +
+  theme(panel.grid.major.y = element_blank())+
+  scale_y_continuous(breaks = interventions_format_p$Group + 0.5,
+                     labels = interventions_format_p$Cohort_id) + 
+  scale_colour_manual(values = c(Celecoxib = "#FFC1CB", Ipilimumab = "#118DFF",
+                                 "Neoadj. Chemo. or Surgery" = "#744EC2",
+                                 Nivolumab = "#E66C37", Surgery = "#0AAC00"))+
+  theme(axis.title.y = element_blank()) +
+  theme_Publication() +
+  theme(legend.position = "right",
+        legend.direction = "vertical")
+
+
+ggsave(
+  here("data", "processed", "metadata", "treatment_schedule_panorama.png"),
+  height = 12, width = 8)
+
+interventions_format_p %>% 
+  mutate(Dose = ifelse(is.na(Dose), Treatment, Dose)) %>%
+  mutate(Group = as.numeric(as.factor(Group))) %>%
+  ggplot(aes(x = Day, y = Group, col = Treatment))  +
+  geom_point(aes(y = (as.numeric(Group) + Treatment_Pos),
+                 col = Treatment, shape = as.factor(Dose)), size = 3) +
+  scale_shape_manual(values = c(16, 15, 18, 17, 25, 23)) +
+  labs(title = "Neoadjuvant IO Treatment Schedules",
+       x = "Days",
+       y = "",
+       fill = "Treatment",
+       shape = "Dose") +
+  theme(panel.grid.major.y = element_blank()) +
+  scale_y_continuous(breaks = c(0:24))  +
+  scale_colour_manual(values = c(Celecoxib = "#FFC1CB", Ipilimumab = "#118DFF",
+                                 "Neoadj. Chemo. or Surgery" = "#744EC2",
+                                 Nivolumab = "#E66C37", Surgery = "#0AAC00"))+
+  theme(axis.title.y = element_blank()) +
+  theme_Publication() +
+  theme(legend.position = "right",
+        legend.direction = "vertical")
+
+interventions_format_p %>%
+  write_csv2(here("data", "processed", "metadata",
+                  "interventions_format_p.csv"))
+```
+
+
+```{r, fig.height = 12, fig.width = 15}
+interventions_format_p <-  read_excel(
+  here("data", "external", "pancan_neoadj_metadata.xlsx"),
+  sheet = "Combined_simplified")
+
+interventions_format_p$Treatment_label %>% unique()
+
+interventions_format_p$Treatment_label <- factor(
+  interventions_format_p$Treatment_label,
+  levels = c("± Ipilimumab 1mg/kg", "Ipilimumab 1mg/kg", "Ipilimumab 3mg/kg",
+             "Nivolumab 240mg", "Nivolumab 3mg/kg", "Nivolumab 1mg/kg",
+             "Nivolumab 1 > 3mg/kg", "Surgery", "Neoadj. Chemo. or Surgery",
+             "± Celecoxib 200mg"))
+      
+treatment_schedule_panorama_plot <- interventions_format_p %>%
+  mutate(Trial_name = ifelse(
+    Trial_name == "NICHE-1", "NICHE", Trial_name)) %>%
+  mutate(
+    Cohort = ifelse(!is.na(Arm),
+                    sprintf("%s %s", Trial_name, Arm), Trial_name)) %>% 
+  filter(!(Trial_name == "NABUCCO" & Day == 78)) %>%
+  ggplot(aes(x = Day, y = fct_rev(Treatment_label), fill = Treatment,
+             height = 1, width = 1)) +
+  geom_tile() +
+  theme_Publication() +
+  labs(title = "", y = "") +
+  labs(title = "Neoadjuvant IO Treatment Schedules", y = "")  +
+  guides(fill = FALSE) +
+  facet_wrap(~Cohort, scales="free_y", nrow = 4) +
+  expand_limits(x = 48) +
+  scale_fill_manual(
+    values = c("#FFC1CB", "#118DFF", "#744EC2", "#E66C37", "#0AAC00")) +
+  theme(axis.title.y = element_blank())
+
+treatment_schedule_panorama_plot
+
+graph2pdf(x = treatment_schedule_panorama_plot,
+          file = here(output_dir, "_treatment_schedule_panorama.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 7,
+          width = 11)
+```
+
+# Summarize number of IO doses, days of IO doses, distances
+```{r}
+IO_doses <- interventions_format_c %>%
+  select(Trial_name, Arm, Cohort_id, Treatment_schedule, Treatment, Day) %>%
+  mutate(IO_dose = Treatment %in% c("Nivolumab", "Ipilimumab"))
+
+Cohort_IO_doses <- IO_doses %>% select(Trial_name, Arm, Cohort_id) %>% unique()
+
+table(IO_doses$Cohort_id, IO_doses$IO_dose)
+
+# Add total number of IO doses
+Cohort_IO_doses <- Cohort_IO_doses %>% left_join(
+    IO_doses %>%
+      group_by(Cohort_id) %>%
+      summarize(total_IO_doses = sum(IO_dose))
+)
+
+# Add total number of days with IO doses
+Cohort_IO_doses <- Cohort_IO_doses %>%
+  left_join(
+    IO_doses %>% group_by(Cohort_id, Day) %>%
+  summarize(days_IO_doses = any(IO_dose)) %>%
+  group_by(Cohort_id) %>%
+  summarize(days_IO_doses = sum(days_IO_doses))
+  )
+
+# Get days of surgery and first/last IO dose
+Cohort_IO_doses <- Cohort_IO_doses %>%
+  left_join(
+    IO_doses %>%
+      filter(IO_dose) %>%
+      group_by(Cohort_id) %>%
+      summarize(First_IO_day = min(Day), Last_IO_day = max(Day))
+  ) %>%
+  left_join(
+    IO_doses %>%
+      filter(Treatment %in% c("Surgery", "Neoadj. Chemo. or Surgery")) %>%
+      group_by(Cohort_id) %>%
+      summarize(Surgery_0 = min(Day))) %>%
+  mutate(First_IO_day = as.numeric(First_IO_day),
+         Last_IO_day = as.numeric(Last_IO_day),
+         Surgery_0 = as.numeric(Surgery_0))
+
+Cohort_IO_doses <- Cohort_IO_doses %>%
+  mutate(Surgery_to_first_IO = Surgery_0 - First_IO_day,
+         Surgery_to_last_IO = Surgery_0 - Last_IO_day) 
+
+Cohort_IO_doses %>% summary()
+Cohort_IO_doses %>% summary() %>% unclass() %>% as.data.frame()
+
+do.call(cbind, lapply(Cohort_IO_doses, summary)) %>%
+  as.data.frame() %>%
+  select(-c(Trial_name, Arm)) %>%
+  mutate_all(as.numeric) %>%
+  round(2) %>%
+  rownames_to_column("Summary")
+
+Cohort_IO_doses %>%
+  write_csv2(here("data", "processed", "metadata", "Cohort_IO_doses.csv"))
+
+```
+
+
+
+# Lint script
+```{r}
+# lint("~/NKI_pancancer_neoadj_io/src/parse_trial_treatments.Rmd")
+lint(filename = "~/NKI_pancancer_neoadj_io/src/parse_trial_treatments.Rmd",
+  linters = unused_import_linter()
+)
+```
+
+# sessionInfo - Package Versions
+```{r sessionInfo}
+sessionInfo()
+```

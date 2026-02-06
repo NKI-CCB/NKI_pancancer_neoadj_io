@@ -1,0 +1,659 @@
+---
+title: "neoadjuvant pancancer TMB response regression"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+params:
+  export: TRUE
+  output_dir: "WES_analysis_TMB_response_regression"
+  metadata: ""
+  filter_and_parse_vcfs: FALSE
+  exclude_niche_msi: FALSE
+---
+
+Author comment: The purpose of this script is to perform a regression for response rates given median TMB, and compare results with regression model from Yarchoan et al. 2017, NEJM.
+
+# Loading Packages
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning = FALSE, message = FALSE, dpi = 300, error = TRUE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# Install if necessary install.packages("tidyverse")
+# Install if necessary BiocManager::install("DESeq2")
+library(tidyverse)
+source("helper_functions.R")
+library(VariantAnnotation)
+library(ggpubr)
+library(export)
+library(meta)
+library(export)
+library(scales)
+library("facetsSuite")
+library(lintr)
+
+MakeDataFrameFromVCF <- getFromNamespace("MakeDataFrameFromVCF", "ICAMS")
+
+set.seed(42)
+select <- dplyr::select
+rename <- dplyr::rename
+here <- here::here
+
+packageVersion("GSVA")
+```
+
+# Setup output folder
+
+```{r Setup output, echo = FALSE, include = FALSE}
+print(params)
+
+export <- params$export
+filter_and_parse_vcfs <- params$filter_and_parse_vcfs
+
+wes_dir <- here("data", "processed", "WES_analysis")
+metadata_dir <- here("data", "processed", "metadata")
+
+# generate output directory
+output_dir <- here("data", "processed", params$output_dir)
+print(output_dir)
+# if output_dir does not exist, create it
+if (!dir.exists(output_dir)) {
+    dir.create(output_dir)
+    dir.create(here(output_dir, "pathway_proportions"))
+    
+    } else {
+  print("Output folder already exists")
+}
+
+```
+
+# ----------
+
+# Load metadata
+
+```{r Load metadata}
+dna_metadata <- read_csv2(here(metadata_dir, "combined_dna_metadata.csv"))
+
+# WES target sizes
+WES_target_sizes <- data.frame(
+  Trial = c("IMCISION", "PRADO", "OpACIN_neo", "MATISSE",
+            "NICHE-MSI", "NICHE-MSS", "NABUCCO", "BELLINI"),
+  Kit = c(rep("Twist exome Refseq", 4), rep("Exome-IDT V1", 4)),
+  WES_target_size = c(rep(36.72, 4), rep(39.02, 4)))
+
+WES_target_sizes
+
+histology_df <- data.frame(
+  Trial = c("BELLINI", "IMCISION", "NABUCCO", "NICHE-MSS", "NICHE-MSI",
+            "OpACIN_neo", "PRADO", "MATISSE"),
+  Histology = c("TBNC", "HNSCC", "Urothelial", "Colon", "Colon",
+                "LN_melanoma", "LN_melanoma", "CSCC"))
+
+compare_r_nr_trials <- c("Combined", "BELLINI", "IMCISION", "MATISSE",
+                         "NABUCCO", "NICHE-MSS", "OpACIN_neo", "PRADO")
+
+trial_list <- c("Combined", "BELLINI", "IMCISION", "MATISSE", "NABUCCO", "NICHE-MSS",  "NICHE-MSI", "OpACIN_neo", "PRADO")
+
+trial_group_map <- data.frame(Trial = c(trial_list, trial_list, trial_list),
+           Group = c(trial_list, sprintf("%s_R", trial_list), sprintf("%s_NR", trial_list)),
+           Response = c(
+             rep("Combined", length(trial_list)),
+             rep("R", length(trial_list)),
+             rep("NR", length(trial_list)))
+)
+
+all_cohort_patient_metadata <- read_csv2(
+  here(metadata_dir, "all_cohort_patient_metadata.csv"))
+
+all_cohort_patient_metadata_excl_mono <- all_cohort_patient_metadata %>%
+  filter(Cohort %in% "Nivo_ipi")
+
+all_cohort_patient_metadata <- read_csv2(
+  here(metadata_dir, "all_cohort_patient_metadata.csv"))
+
+patient_metadata_combined <- read_csv2(here(metadata_dir, "patient_metadata_combined.csv"))
+
+```
+
+# Annotation color
+
+```{r}
+
+# Define colours for each group
+Color_NR <- "#F8766D"
+Color_R <- "#00BA38" # "#619CFF"
+Color_NA <- "#CD9600"
+Color_Pre <- "#619CFF"
+Color_Post <- "#F564E3"
+Color_Depleted <- "#7CAE00"
+Color_Fibrotic <- "#00BFC4"
+Color_Inflamed_fibrotic <- "#C77CFF"
+Color_Inflamed_non_fibrotic <- "#F8766D"
+Color_HNSCC <- "#009292"
+Color_CSCC <- "#CD9600"
+Color_Urothelial <- "#B66DFF"
+Color_LN_melanoma <- "#00BFC4"
+Color_Colon <- "#F8766D"
+Color_Colon_MSI <- "#B73A3A"
+Color_Colon_MSS <- "#23C26F"
+Color_TNBC <- "#FEB5DA"
+Color_BELLINI <- "#FEB5DA"
+Color_IMCISION <- "#009292"
+Color_MATISSE <- "#CD9600"
+Color_NABUCCO <- "#B66DFF"
+Color_BELLINI <- "#FEB5DA"
+Color_NICHE_MSS <- "#23C26F"
+Color_NICHE_MSI <- "#B73A3A"
+Color_OpACIN_neo <- "#00BFC4"
+Color_PRADO <- "#619CFF"
+
+annotation_color_list = list(
+  Response = c(NR = Color_NR, R = Color_R, R_NR = "#CD9600"),
+  Treatment = c(Pre = Color_Pre, Post = Color_Post),
+  Histology = c(LN_melanoma = Color_LN_melanoma, Urothelial = Color_Urothelial,
+                Colon = Color_Colon, HNSCC = Color_HNSCC, TBNC = Color_TNBC,
+                CSCC = Color_CSCC),
+  Trial = c(BELLINI = Color_BELLINI, IMCISION = Color_IMCISION,
+            MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
+            `NICHE-MSS` = Color_NICHE_MSS, `NICHE-MSI` = Color_NICHE_MSI,
+            OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO))
+
+trial_colors <- c(BELLINI = Color_BELLINI, IMCISION = Color_IMCISION,
+            MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
+            `NICHE-MSS` = Color_NICHE_MSS, `NICHE-MSI` = Color_NICHE_MSI,
+            OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO)
+
+trial_colors_combined <- c(Combined = "#999999", BELLINI = Color_BELLINI, IMCISION = Color_IMCISION,
+            MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
+            `NICHE-MSS` = Color_Colon_MSS, `NICHE-MSI` = Color_NICHE_MSI,
+            OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO)
+
+Bagaev_tme_colors <- c(Color_Depleted, Color_Fibrotic,
+                       Color_Inflamed_fibrotic, Color_Inflamed_non_fibrotic)
+
+histology_msi_mss_colors <- c(`Colon-MSI`= Color_Colon_MSI, `Colon-MSS`= Color_Colon_MSS,
+                              CSCC = Color_CSCC, HNSCC = Color_HNSCC, 
+                              LN_melanoma = Color_LN_melanoma, TBNC = Color_TNBC,
+                              Urothelial = Color_Urothelial)
+
+```
+
+# ----------
+
+```{r}
+response_rates <- read_csv2(here(metadata_dir, "Trial_response.csv"))
+response_rates_excl_mono <- read_csv2(here(metadata_dir, "Trial_response_excl_mono.csv"))
+
+response_rates %>% arrange(Response_rate) %>% pull(Response_rate) %>% round(2)
+
+n_variants_tmb <- read_csv2(here(wes_dir, "n_variants_tmb.csv"))
+
+tmb_group_trial_response <- read_csv2(here(wes_dir, "tmb_group_trial_response.csv"))
+n_variants_dp20_vaf_tmb <- read_csv2(here(wes_dir, "n_variants_dp20_vaf_tmb.csv"))
+tmb_response_rate <- read_csv2(here(wes_dir, "tmb_response_rate.csv"))
+
+tmb_response_rate_excl_mono <- read_csv2(here(wes_dir, "tmb_response_rate_excl_mono.csv"))
+
+```
+
+# Plot n_variants and filtered TMB
+
+```{r}
+table(n_variants_dp20_vaf_tmb$Trial, n_variants_dp20_vaf_tmb$Response)
+
+
+tmb_response_rate <- n_variants_dp20_vaf_tmb %>%
+  group_by(Trial, Histology, Histology_MSI_MSS) %>%
+  summarize(mean_TMB = mean(TMB), median_TMB = median(TMB)) %>%
+  ungroup()  %>%
+  left_join(response_rates %>% select(-Histology), by = c("Trial")) %>%
+  mutate(Yarchoan_lm_rr = ((10.8 * log(median_TMB)) - 0.7) / 100) %>%
+  arrange(median_TMB)
+
+tmb_response_rate %>%
+  ggplot(aes(x = median_TMB, y = Response_rate, col = Histology_MSI_MSS)) +
+  geom_point() +
+  expand_limits(x = 0, y = 0) +
+  theme_Publication() +
+  labs(x = "median_TMB (mutations/Mb)", col = "") +
+  scale_color_manual(values = histology_msi_mss_colors)
+
+# Compare with Yarchoan et al. 2017 plot and response linear regression
+tmb_response_rate %>%
+  ggplot(aes(x = median_TMB, y = Response_rate, col = Histology_MSI_MSS)) +
+  geom_point() +
+  expand_limits(x = 0, y = 0) +
+  theme_Publication() +
+  labs(x = "median_TMB (mutations/Mb)", col = "") +
+  scale_x_continuous(trans = "log", breaks = c(1, 10, 20, 30, 40, 50)) +
+  scale_color_manual(values = histology_msi_mss_colors)
+ggsave(here(output_dir, "median_TMB_response.png"), height = 5, width = 6)
+
+tmb_response_rate %>%
+  ggplot(aes(x = Yarchoan_lm_rr, y = Response_rate, col = Histology_MSI_MSS)) +
+  geom_point() +
+  expand_limits(x = 0, y = 0) +
+  theme_Publication() +
+  geom_abline(slope = 1, intercept = 0) +
+  labs(x = "Yarchoan et al. 2017\nLinear regression RR ~ TMB", col = "")+
+  scale_color_manual(values = histology_msi_mss_colors)
+ggsave(here(output_dir, "Yarchoan_TMB_RR.png"), height = 5, width = 6)
+
+n_variants_dp20_vaf_tmb %>%
+  ggplot(aes(x = factor(Histology_MSI_MSS,
+                        levels = unique(tmb_response_rate$Histology_MSI_MSS)),
+             y = TMB, fill = Histology)) +
+  geom_boxplot() + theme_Publication() +
+  guides(fill = FALSE) +
+  labs(x = "", y = "TMB (mutations/Mb)") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))+
+  scale_fill_manual(values = c("#B73A3A", "#CD9600", "#23C26F", "#00BFC4",
+                               "#009292", "#B66DFF", "#FEB5DA"))
+
+n_variants_dp20_vaf_tmb %>%
+  filter(!is.na(Response)) %>%
+  ggplot(aes(x = Response, y = TMB, fill = Histology_MSI_MSS)) +
+  geom_boxplot() + theme_Publication() +
+  labs(y = "TMB (mutations/Mb)") +
+  scale_fill_manual(values = histology_msi_mss_colors)
+ggsave(here(output_dir, "TMB_histology.png"), height = 5, width = 5)
+
+proportion_above_10 <- n_variants_dp20_vaf_tmb %>%
+  group_by(Histology_MSI_MSS) %>%
+  summarise(proportion = mean(TMB > 10))
+
+n_variants_dp20_vaf_tmb %>%
+  mutate(Histology_MSI_MSS = ifelse(Histology_MSI_MSS == "cSCC", "CSCC",
+                                    Histology_MSI_MSS)) %>%
+  ggplot(aes(x = factor(Histology_MSI_MSS,
+                        levels = unique(tmb_response_rate$Histology_MSI_MSS)),
+             y = TMB, fill = Histology_MSI_MSS)) + 
+  stat_boxplot(geom = "errorbar", width = 0.1) +
+  geom_boxplot() + theme_Publication() +
+  guides(fill = FALSE) +
+  labs(x = "", y = "TMB (mutations/Mb)") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))+
+  scale_fill_manual(values = histology_msi_mss_colors) + 
+  geom_hline(yintercept = 10, linetype = "dashed", alpha = 0.5) +
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.1)))+
+  geom_text(data = proportion_above_10,
+            aes(x = Histology_MSI_MSS, y = 165,
+                label = paste0(round(proportion * 100), "%")), vjust = -1.5)
+ 
+n_variants_dp20_vaf_tmb %>%
+  filter(!is.na(Response)) %>%
+  ggplot(aes(x = Response, y = TMB)) +
+  geom_boxplot(aes(fill = Response)) + theme_Publication() +
+  facet_grid(~Histology) +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  expand_limits(y = 0) +
+  labs(y = "TMB (mutations/Mb)") +
+  stat_compare_means(method = "wilcox.test", label = "p.format")
+ggsave(here(output_dir, "TMB_response_histology.png"), height = 5, width = 8)
+
+n_variants_dp20_vaf_tmb %>%
+  filter(!is.na(Response)) %>%
+  ggplot(aes(x = Response, y = TMB)) +
+  geom_boxplot(aes(fill = Response)) + theme_Publication() +
+  facet_grid(~Histology_MSI_MSS) +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  expand_limits(y = 0) +
+  labs(y = "TMB (mutations/Mb)") +
+  stat_compare_means(method = "wilcox.test", label = "p.format")
+ggsave(here(output_dir, "TMB_response_histology_MSI_MSS.png"),
+       height = 5, width = 9)
+
+n_variants_dp20_vaf_tmb %>%
+  filter(!is.na(Response)) %>%
+  ggplot(aes(x = Response, y = TMB, fill = Response)) +
+  geom_boxplot() + theme_Publication() +
+  facet_wrap(~Histology, scales = "free") +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  expand_limits(y = 0) +
+  labs(y = "TMB (mutations/Mb)")
+
+stat.test <- compare_means(formula = TMB ~ Response,
+                           method = "wilcox.test",
+                           data = n_variants_dp20_vaf_tmb, paired = FALSE)
+n_variants_dp20_vaf_tmb %>%
+  filter(!is.na(Response)) %>%
+  ggplot(aes(x = Response, y = TMB)) +
+  geom_boxplot(aes(fill = Response)) +
+  theme_Publication()  +
+  stat_pvalue_manual(stat.test, y.position = 150,
+                     label = "wilcoxon, p = {p.format}") +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  expand_limits(y = 0) +
+  labs(y = "TMB (mutations/Mb)")
+ggsave(here(output_dir, "TMB_response.png"), height = 5, width = 4)
+
+n_variants_dp20_vaf_tmb %>%
+  filter(!is.na(Response)) %>%
+  ggplot(aes(x = factor(Trial, levels = c(unique(tmb_response_rate$Trial))),
+             y = TMB, fill = Response)) +
+  geom_boxplot() + theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  expand_limits(y = 0) +
+  labs(x = "Trial", y = "TMB (mutations/Mb)") +
+  geom_hline(yintercept = 10, linetype = "dashed") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+n_variants_dp20_vaf_tmb_group <- n_variants_dp20_vaf_tmb %>%
+  mutate(TMB_group = ifelse(TMB > 10, "TMB-H", "TMB-L")) %>%
+  filter(!is.na(Response))
+
+table(n_variants_dp20_vaf_tmb_group$TMB_group)
+table(n_variants_dp20_vaf_tmb_group$Trial,
+      n_variants_dp20_vaf_tmb_group$TMB_group)
+
+table(n_variants_dp20_vaf_tmb_group$TMB_group,
+      n_variants_dp20_vaf_tmb_group$Response)
+
+table(n_variants_dp20_vaf_tmb_group$TMB_group,
+      n_variants_dp20_vaf_tmb_group$Response) %>%
+  as.data.frame() %>% setNames(c("TMB_group", "Response", "Freq")) %>%
+  pivot_wider(names_from = Response, values_from = Freq) %>%
+  mutate(Total = R + NR, Proportion = R / Total)
+
+tmb_group_response <- table(n_variants_dp20_vaf_tmb_group$TMB_group,
+                            n_variants_dp20_vaf_tmb_group$Response) %>%
+  as.data.frame() %>% setNames(c("TMB_group", "Response", "Freq")) %>%
+  pivot_wider(names_from = Response, values_from = Freq) %>%
+  mutate(Total = R + NR, Proportion = R / Total)
+
+tmb_group_response
+
+tmb_group_response %>%
+  ggplot(aes(x = TMB_group, y = Proportion)) + geom_col() +
+  theme_Publication() + labs(x = "TMB group (cutoff at 10 Mut/Mb)",
+                             y = "Response rate") +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.25))
+ggsave(here(output_dir, "TMB_group_response.png"), height = 5, width = 6)
+
+
+tmb_group_trial_response <- table(n_variants_dp20_vaf_tmb_group$TMB_group,
+                            n_variants_dp20_vaf_tmb_group$Response,
+                            n_variants_dp20_vaf_tmb_group$Trial) %>%
+  as.data.frame() %>% setNames(c("TMB_group", "Response", "Trial", "Freq")) %>%
+  pivot_wider(names_from = Response, values_from = Freq) %>%
+  mutate(Total = R + NR, Proportion = R / Total,
+         Trial_TMB_group = sprintf("%s (%s)", Trial, Total))
+
+tmb_group_trial_response$TMB_group <- factor(
+  tmb_group_trial_response$TMB_group, levels = c("TMB-L", "TMB-H"))
+tmb_group_trial_response$Trial <- factor(
+  tmb_group_trial_response$Trial,
+  levels = c(unique(tmb_response_rate$Trial)))
+
+tmb_group_trial_response %>%
+  ggplot(aes(x = TMB_group, y = Proportion)) + geom_col() +
+  theme_Publication() + labs(x = "TMB group (cutoff at 10 Mut/Mb)",
+                             y = "Response rate") +
+scale_y_continuous(breaks = seq(0, 1, by = 0.25))  + facet_wrap(~Trial)
+
+tmb_group_trial_response %>%
+  ggplot(aes(x = factor(Trial, levels = c(unique(tmb_response_rate$Trial))),
+             y = Proportion,fill = TMB_group)) +
+  geom_col(position = "dodge2") +
+  theme_Publication() +
+  labs(x = "TMB group (cutoff at 10 Mut/Mb)",
+                             y = "Response rate") +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.25)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  scale_fill_manual(values = c("#00BA38", "#619CFF"))
+
+tmb_group_trial_response %>%
+  select(Trial, TMB_group, Proportion) %>%
+  mutate(Proportion = round(Proportion, 2)) %>%
+  pivot_wider(names_from = TMB_group, values_from = Proportion) %>%
+  left_join(response_rates) %>%
+  view()
+
+tmb_group_trial_response %>%
+  ggplot(aes(x = reorder(Trial_TMB_group, Proportion),
+             y = Proportion,fill = TMB_group)) +
+  geom_col(position = "dodge2") +
+  theme_Publication() +
+  labs(x = "TMB group (cutoff at 10 Mut/Mb)",
+                             y = "Response rate") +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.25)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  scale_fill_manual(values = c("#00BA38", "#619CFF")) +
+  facet_wrap(~TMB_group, scales = "free_x")
+```
+
+# median TMB Linear regression
+```{r}
+# Fit with percentage
+model <- lm(Response_rate * 100 ~ log(median_TMB), data = tmb_response_rate)
+summary(model)
+coef(model) %>% round(1)
+
+model_pseudocount <- lm(Response_rate * 100  ~ log(median_TMB + 1), data = tmb_response_rate)
+summary(model_pseudocount)
+coef(model_pseudocount) %>% round(1)
+
+# Add CI
+# Function to calculate proportion and CI
+get_prop_ci <- function(x, n) {
+  result <- prop.test(x, n, correct = FALSE)
+  proportion <- (x / n)
+  ci <- result$conf.int
+  return(c(proportion, ci[1], ci[2]))
+}
+
+# Function to calculate percentage and CI
+get_ci <- function(x, n) {
+  result <- prop.test(x, n, correct = FALSE)
+  percentage <- (x / n) * 100
+  ci <- result$conf.int * 100
+  return(c(percentage, ci[1], ci[2]))
+}
+
+ci_prop_results <- t(mapply(get_prop_ci, tmb_response_rate$R, tmb_response_rate$Total_n))
+tmb_response_rate$CI_lower_prop <- ci_prop_results[,2]
+tmb_response_rate$CI_lower_prop <- ci_prop_results[,3]
+
+ci_results <- t(mapply(get_ci, tmb_response_rate$R, tmb_response_rate$Total_n))
+tmb_response_rate$CI_lower <- ci_results[,2]
+tmb_response_rate$CI_upper <- ci_results[,3]
+
+min(tmb_response_rate$median_TMB)
+max(tmb_response_rate$median_TMB)
+tmb_range <- seq(min(tmb_response_rate$median_TMB),
+                 max(tmb_response_rate$median_TMB), length.out = 100)
+tmb_range <- seq(1.5, 51, length.out = 100)
+
+lm_rr_prediction <- data.frame(median_TMB = tmb_range)
+
+lm_rr_prediction$Response_rate <- predict(model, lm_rr_prediction)
+
+yarchoan_rr_prediction <-  data.frame(median_TMB = tmb_range) %>%
+  mutate(Response_rate = (10.8 * log(median_TMB) - 0.7),
+         Response_rate_prop = (10.8 * log(median_TMB) - 0.7)/100)
+
+ggplot(
+  tmb_response_rate, aes(x = median_TMB,
+                         y = Response_rate * 100,
+                         col = Histology_MSI_MSS)) +
+ geom_point()  +
+ scale_x_continuous(trans = log_trans(base = exp(1)),
+                    breaks = c(1, 5, 10, 20, 30, 40, 50)) +
+  expand_limits(y = 0) +
+  scale_color_manual(values = histology_msi_mss_colors) +
+  theme_Publication() +
+  geom_line(data = lm_rr_prediction,
+            aes(x = median_TMB, y = Response_rate),
+            linetype = "dashed", color = "black")  +
+  geom_line(data = yarchoan_rr_prediction,
+            aes(x = median_TMB, y = Response_rate),
+            linetype = "dashed", color = "gray") +
+  labs(x = "median TMB (mutations/Mb)",
+       y = "Response rate (%)", col = "") +
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper),
+                width = 0.02, alpha = 0.5)+
+  geom_text(aes(x = 32, y = 20, label = "Yarchoan et al. 2017"),
+            col = "gray", vjust = -1.5) +
+  scale_color_manual(values = histology_msi_mss_colors)
+
+# log(x+1) fit pseudocount
+tmb_range <- seq(0.5, 51, length.out = 100)
+
+lm_rr_prediction <- data.frame(median_TMB = tmb_range)
+
+lm_rr_prediction$Response_rate <- predict(model_pseudocount, lm_rr_prediction)
+
+yarchoan_rr_prediction <-  data.frame(median_TMB = tmb_range + 1) %>%
+  mutate(Response_rate = (10.8 * log(median_TMB) - 0.7),
+         Response_rate_prop = (10.8 * log(median_TMB) - 0.7)/100)
+
+ggplot(tmb_response_rate, aes(x = median_TMB,
+                              y = Response_rate * 100,
+                              col = Histology_MSI_MSS)) +
+ geom_point()  +
+ scale_x_continuous(trans = log_trans(base = exp(1)), 
+                  breaks = c(1, 5, 10, 20, 30, 40, 50)) +
+  expand_limits(y = 0) +
+  scale_color_manual(values = histology_msi_mss_colors) +
+  theme_Publication() +
+  geom_line(data = lm_rr_prediction, aes(x = median_TMB, y = Response_rate),
+            linetype = "dashed", color = "black")  +
+  geom_line(data = yarchoan_rr_prediction,
+            aes(x = median_TMB, y = Response_rate),
+            linetype = "dashed", color = "gray") +
+  labs(x = "median TMB (mutations/Mb)", y = "Response rate (%)", col = "") +
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper),
+                width = 0.02, alpha = 0.5)+
+  geom_text(aes(x = 32, y = 20, label = "Yarchoan et al. 2017"),
+            col = "gray", vjust = -1.5)
+```
+
+## Test model boundaries
+```{r}
+# Define range, mode resolution near 0 and 1
+tmb_range <- seq(0, 50, length.out = 201)
+tmb_range <- tmb_range[!tmb_range <= 1]
+tmb_range <- c(seq(0, 1, length.out = 41), tmb_range)
+test_boundaries <- data.frame(tmb_range) 
+test_boundaries$Response_rate <- predict(model,
+                                         data.frame(median_TMB = tmb_range))
+test_boundaries$Response_rate_model_pseudocount <- predict(
+  model_pseudocount, data.frame(median_TMB = tmb_range))
+test_boundaries <- test_boundaries %>%
+  mutate(Response_rate_yarchoan_perc = (10.8 * log(tmb_range) - 0.7))
+
+test_boundaries_l <- test_boundaries %>%
+  melt(id.vars = "tmb_range") %>%
+  setNames(c("median_TMB", "Model", "Predicted_Response_Rate")) 
+
+# Tumor type with lowest TMB
+median_tmb_uveal_melanoma <- 0.64
+
+test_boundaries_l %>%
+  ggplot(aes(x = median_TMB, y = Predicted_Response_Rate, col = Model)) +
+  geom_point() + theme_Publication() +
+  geom_vline(xintercept = median_tmb_uveal_melanoma,
+             linetype = "dashed", col = "gray") +
+  geom_hline(yintercept = 0, col = "gray", linetype = "dashed")
+
+test_boundaries_l %>%
+  filter(median_TMB < 10) %>%
+  ggplot(aes(x = median_TMB, y = Predicted_Response_Rate, col = Model)) +
+  geom_point() + theme_Publication() +
+  geom_vline(xintercept = median_tmb_uveal_melanoma,
+             linetype = "dashed", col = "gray") +
+  geom_hline(yintercept = 0, col = "gray", linetype = "dashed")
+
+test_boundaries_l %>%
+  ggplot(aes(x = log(median_TMB), y = Predicted_Response_Rate, col = Model)) +
+  geom_point() + theme_Publication() +
+  geom_vline(xintercept = log(median_tmb_uveal_melanoma),
+             linetype = "dashed", col = "gray") +
+  geom_hline(yintercept = 0, col = "gray", linetype = "dashed")
+
+test_boundaries_l %>%
+  ggplot(aes(x = log(median_TMB + 1),
+             y = Predicted_Response_Rate, col = Model)) + geom_point() +
+  theme_Publication() +
+  geom_vline(xintercept = log(median_tmb_uveal_melanoma + 1), 
+             linetype = "dashed", col = "gray") +
+  geom_hline(yintercept = 0, col = "gray", linetype = "dashed")
+
+# Checking model bounds
+# Yarchoan
+# 0 = -0.7 + 10.8 * log(X)
+# log(X) = 0.7/10.8
+yarchoan_tmb_0_rr <- exp(0.7/10.8) # Minimum valid prediction is for median TMB ~= 1.067
+yarchoan_tmb_0_rr
+# 100 = -0.7 + 10.8 * log(X)
+# log(X) = 100.7/10.8
+exp(100.7/10.8) # Maximum valid prediction is for median TMB >11000
+
+
+# 0 = 16 + 19.8 * log(X)
+# log(X) = -16/19.8
+model_tmb_0_rr <- exp(-16/19.8) # Minimum valid prediction is for median TMB ~= 0.445
+model_tmb_0_rr
+# 100 = 16 + 19.8 * log(X)
+# log(X) = (100-16)/19.8
+exp((100-16)/19.8) # Maximum valid prediction is for median TMB ~= 69.5
+
+tmb_range <- seq(0, 2, length.out = 100)
+test_boundaries <- data.frame(tmb_range) 
+test_boundaries$Response_rate <- predict(model, data.frame(median_TMB = tmb_range))
+test_boundaries$Response_rate_model_pseudocount <- predict(model_pseudocount, data.frame(median_TMB = tmb_range))
+test_boundaries <- test_boundaries %>%
+  mutate(Response_rate_yarchoan_perc = (10.8 * log(tmb_range) - 0.7))
+
+test_boundaries_l <- test_boundaries %>%
+  melt(id.vars = "tmb_range") %>%
+  setNames(c("median_TMB", "Model", "Predicted_Response_Rate")) 
+
+test_boundaries_l %>%
+  ggplot(aes(x = median_TMB, y = Predicted_Response_Rate, col = Model)) + geom_point() + theme_Publication() +
+  geom_vline(xintercept = median_tmb_uveal_melanoma, linetype = "dashed", col = "gray") +
+  geom_text(aes(x = median_tmb_uveal_melanoma, y = 25, label = "Uveal melanoma"), col = "black")+
+  geom_vline(xintercept = model_tmb_0_rr, linetype = "dashed", col = "gray") +
+  geom_vline(xintercept = yarchoan_tmb_0_rr, linetype = "dashed", col = "gray")+
+  geom_hline(yintercept = 0, col = "gray", linetype = "dashed")
+
+test_boundaries_l %>%
+  ggplot(aes(x = log(median_TMB), y = Predicted_Response_Rate, col = Model)) +
+  geom_point() + theme_Publication() +
+  geom_vline(xintercept = log(median_tmb_uveal_melanoma), linetype = "dashed", col = "gray") +
+  geom_vline(xintercept = log(model_tmb_0_rr), linetype = "dashed", col = "gray") +
+  geom_vline(xintercept = log(yarchoan_tmb_0_rr), linetype = "dashed", col = "gray") +
+  geom_hline(yintercept = 0, col = "gray", linetype = "dashed") +
+  geom_text(aes(x = log(median_tmb_uveal_melanoma), y = -25, hjust = 0, label = "Uveal melanoma"), col = "black") +
+  geom_text(aes(x = log(model_tmb_0_rr), y = -30, hjust = 0, label = "Breakpoint LR"), col = "gray") +
+  geom_text(aes(x = log(yarchoan_tmb_0_rr), y = -35, hjust = 0, label = "Breakpoint Yarchoan"), col = "gray")
+
+test_boundaries_l %>%
+  ggplot(aes(x = log(median_TMB + 1), y = Predicted_Response_Rate, col = Model)) +
+  geom_point() + theme_Publication() +
+  geom_vline(xintercept = log(1 + median_tmb_uveal_melanoma), linetype = "dashed", col = "gray") +
+  geom_vline(xintercept = log(1 + model_tmb_0_rr), linetype = "dashed", col = "gray") +
+  geom_vline(xintercept = log(1 + yarchoan_tmb_0_rr), linetype = "dashed", col = "gray") + 
+  geom_hline(yintercept = 0, col = "gray", linetype = "dashed")
+```
+
+# ----------
+# Lint script
+```{r}
+# lint("~/NKI_pancancer_neoadj_io/src/pancan_TMB_response_rate_regression.Rmd")
+lint(filename = "~/NKI_pancancer_neoadj_io/src/pancan_TMB_response_rate_regression.Rmd",
+  linters = unused_import_linter()
+)
+```
+
+# ----------
+# sessionInfo - Package Versions
+
+```{r sessionInfo}
+sessionInfo()
+```

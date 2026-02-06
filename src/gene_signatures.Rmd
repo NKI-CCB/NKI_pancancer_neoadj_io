@@ -1,0 +1,777 @@
+---
+title: "gene signature scores"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+params:
+  export: TRUE
+  output_dir: "gene_signatures"
+  metadata: "combined_rna_metadata.csv"
+  analyze_specific_trial: ""
+---
+
+Author comment:
+File description comment:
+The purpose of this script is to calculate signature scores and compare between responders and non-responders
+
+It receives the individual signatures, RNA molecular count data
+and outputs statistics on comparisons of signature expression.
+RPM expression is used for single genes, and ssGSEA scores larger signatures.
+Analysis is done on all combined cohorts if analyze_specific_trial is set to "", or restricted to specific cohorts
+
+# Loading Packages
+```{r, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning = FALSE, message = FALSE, dpi = 300, error = TRUE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+# Install if necessary install.packages("BiocManager")
+# Install if necessary BiocManager::install("gsva")
+BiocManager::version()
+
+library(tidyverse)
+library(ggrepel)
+library(here)
+library(pheatmap)
+library(GSVA)
+library(DESeq2)
+library(paletteer)
+library(ggpubr)
+source("helper_functions.R")
+# BiocManager::install("GSVA", version = "2.2")
+packageVersion("GSVA")
+
+# Downgrade matrixStats, compatibility with GSVA
+# remotes::install_version("matrixStats", version="1.1.0") 
+# Got solved after GSVA 2.2 and Bioconductor 3.2, but needs R 4.5
+set.seed(42)
+select <- dplyr::select
+rename <- dplyr::rename
+here <- here::here
+
+```
+
+# ----------
+# Function definitions
+```{r}
+calc_stat_r_vs_nr <- function(data, treatment,
+                              contrast, current_gene_signature) {
+
+  timepoint_r <- data[data$Treatment == treatment &
+                              data$Response == "R",
+                              current_gene_signature]
+
+  mean_r <- mean(timepoint_r)
+  sd_r <- sd(timepoint_r)
+  median_r <- median(timepoint_r)
+  n_r <- length(timepoint_r)
+
+  timepoint_nr <- data[data$Treatment == treatment &
+                              data$Response == "NR",
+                              current_gene_signature]
+
+  mean_nr <- mean(timepoint_nr)
+  sd_nr <- sd(timepoint_nr)
+  median_nr <- median(timepoint_nr)
+  n_nr <- length(timepoint_nr)
+
+  wilcoxon_test <- wilcox.test(timepoint_r, timepoint_nr,
+                               alternative = "two.sided")
+  n_total <- n_r + n_nr
+
+  stat_df <- wilcoxon_test %>%
+    broom::tidy() %>%
+    mutate(
+    "contrast" = contrast,
+    "signature" = current_gene_signature,
+    "n" = n_total,
+    "mean_responders" = mean_r,
+    "sd_responders" = sd_r,
+    "median_responders" = median_r,
+    "n_responders" = n_r,
+    "mean_nresponders" = mean_nr,
+    "sd_nresponders" = sd_nr,
+    "median_nresponders" = median_nr,
+    "n_nresponders" = n_nr)
+
+  return(stat_df)
+}
+
+# Function to extract correlation coefficient and p-values
+corr_func <- function(var1, var2, data) {
+  res <- cor.test(data[, var1], data[, var2])
+  tidy(res) %>% mutate(var1 = var1, var2 = var2)
+}
+
+```
+
+# ----------
+# Setup output folder
+```{r Setup, echo = FALSE, include = FALSE}
+export <- params$export
+analyze_specific_trial <- params$analyze_specific_trial
+
+# generate output directory
+output_dir <- here("data", "processed", params$output_dir)
+output_dir_plots <- here(output_dir, "plots")
+print(output_dir)
+
+run_r_vs_nr <- !analyze_specific_trial %in% c("NICHE-MSI")
+has_post_data <- !analyze_specific_trial %in% c("PRADO", "OpACIN_neo",
+                                                "MATISSE")
+run_pre_vs_post <- !analyze_specific_trial %in% c("PRADO", "OpACIN_neo",
+                                                "MATISSE")
+print(analyze_specific_trial)
+print(run_r_vs_nr)
+print(run_pre_vs_post)
+
+# if output_dir does not exist, create it
+if (!dir.exists(output_dir)) {
+    dir.create(output_dir)
+    dir.create(output_dir_plots)
+} else {
+  print("Output folder already exists")
+}
+
+```
+
+# ----------
+# Load RNAseq data
+```{r load rnaseq data, include = TRUE}
+df_counts <- read_csv2(here("data", "processed", "rnaseq_data",
+                             "combined_rnaseq_counts_p.csv")) %>%
+  column_to_rownames("gene")
+
+rpm_counts <- read_csv2(here("data", "processed", "rnaseq_data",
+                             "combined_rnaseq_rpm.csv")) %>%
+  column_to_rownames("gene")
+ 
+# tpm_counts <- read_csv2(here("data", "processed", "rnaseq_data",
+#                              "rnaseq_tpm.csv"))
+# tpm_counts <- tpm_counts %>% column_to_rownames("gene")
+
+metadata <- read_csv2(
+  here("data", "processed", "metadata", params$metadata))
+
+if (analyze_specific_trial != ""){
+  metadata <- metadata %>% filter(Trial == analyze_specific_trial)
+}
+
+metadata <- metadata %>%
+  mutate(
+      Treatment = factor(Treatment, levels = c("Pre", "Post")),
+      CF_sample = as.factor(CF_sample),
+      Trial = as.factor(Trial),
+      Response = as.factor(Response),
+      Response_detail = as.factor(Response_detail)) 
+
+metadata %>% mutate_if(is.character, as.factor) %>% summary()
+
+# Remove genes with all zero counts, might be detected in specific trials only
+df_counts <- df_counts[, colnames(df_counts) %in%
+                          metadata$CF_sample]
+df_counts <- df_counts[rowSums(df_counts) != 0, ]
+
+rpm_counts <- rpm_counts[, colnames(rpm_counts) %in%
+                          metadata$CF_sample]
+rpm_counts <- rpm_counts[rowSums(rpm_counts) != 0, ]
+
+ncol(df_counts)
+  
+# Z norm
+sample_names <- colnames(rpm_counts)
+z_norm <- t(apply(
+  as.matrix(rpm_counts), 1,
+                  function(x) scale(x, center = TRUE, scale = TRUE)))
+
+colnames(z_norm) <- sample_names
+
+unique_patient_id <- metadata %>% select(Trial, Patient) %>% unique()
+```
+
+# Load gene sets
+```{r Load gene sets, echo = FALSE}
+gene_signatures <- read_csv2(
+  here("data", "processed", "signatures", "gene_signatures.csv"))
+
+gene_signatures <- gene_signatures %>% filter(!is.na(Gene))
+
+gene_signatures_l <- split(
+  gene_signatures$Gene, gene_signatures$Signature)
+gene_signatures_l <- gene_signatures_l[gene_signatures$Signature %>% unique()]
+
+print(knitr::kable(gene_signatures %>%
+        select(Signature, Class, Geneset_size) %>%
+        unique()), n = n_distinct(gene_signatures$Signature))
+
+gene_signatures %>% filter(is.na(Ref)) %>% select(Signature) %>% unique()
+
+# gene_signatures %>% select(-c(Gene, Description)) %>% unique() %>% view()
+```
+
+# ----------
+# GSVA
+```{r gsva, echo = TRUE, out.height= "1000px", out.width= "1000px"}
+# Create a `DESeqDataSet` object
+dds <- DESeqDataSetFromMatrix(
+  countData = df_counts,
+  colData = metadata %>% filter(CF_sample %in% colnames(df_counts)),
+  design = ~1
+)
+
+# Normalize and transform the data in the `DESeqDataSet` object using `vst()`
+dds_norm <- vst(dds)
+
+vst_data <- assay(dds_norm)
+
+gsva_results <- GSVA::gsva(
+  vst_data,
+  gene_signatures_l,
+  method = "gsva",
+  # Appropriate for vst transformed data
+  kcdf = "Gaussian",
+  # Minimum gene set size
+  min.sz = 1,
+  # Compute Gaussian-distributed scores
+  mx.diff = TRUE,
+  # Don't print out the progress bar
+  verbose = FALSE
+)
+
+gsva_results %>%
+  as.data.frame() %>%
+  rownames_to_column("Signature") %>%
+  write_csv(here(output_dir, "gsva_results.csv"))
+
+annot_df <- metadata %>%
+  filter(CF_sample %in% colnames(df_counts)) %>%
+  tibble::column_to_rownames("CF_sample") %>%
+  select(Response, Treatment, Trial)
+
+pathway_heatmap <- pheatmap::pheatmap(gsva_results,
+  annotation_col = annot_df,
+  show_colnames = FALSE, # Don't show sample labels
+  fontsize_row = 6
+)
+
+save_pheatmap_pdf(x = pathway_heatmap,
+                  filename = here(output_dir_plots, "GSVA_pheatmap.pdf"),
+                  width = 11, height = 12)
+
+knitr::include_graphics(here(output_dir_plots, "GSVA_pheatmap.pdf"))
+```
+
+# ssGSEA
+```{r ssgsea, echo = TRUE, fig.height = 30, fig.width = 30}
+gene_signatures_ssgsea <- gene_signatures %>% filter(use_ssgsea)
+
+gene_signatures_ssgsea_l <- split(
+  gene_signatures_ssgsea$Gene, gene_signatures_ssgsea$Signature)
+
+ssgsea_results <- gsva(
+  vst_data,
+  gene_signatures_ssgsea_l,
+  method = "ssgsea",
+  # Appropriate for vst transformed data
+  kcdf = "Gaussian",
+  # Minimum gene set size
+  min.sz = 1,
+  # Compute Gaussian-distributed scores
+  mx.diff = TRUE,
+  # Don't print out the progress bar
+  verbose = FALSE
+)
+
+ssgsea_results %>%
+  as.data.frame() %>%
+  rownames_to_column("Signature") %>%
+  write_csv2(here(output_dir, "ssgsea_results.csv"))
+
+ssgsea_results <- read_csv2(here(output_dir, "ssgsea_results.csv"))
+ssgsea_results <- ssgsea_results %>% column_to_rownames("Signature")
+
+ssgsea_results_df <- ssgsea_results %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("CF_sample") %>%
+  left_join(metadata)
+
+```
+
+```{r}
+# Compare variance of R and NR groups, larger in NR? Multiple resistance mechanisms?
+sig_sd <- ssgsea_results_df %>%
+  group_by(Response) %>%
+  summarize_at(vars(gene_signatures_ssgsea$Signature), .funs = sd)
+
+sig_sd %>%
+  column_to_rownames("Response") %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("Signature") %>%
+  ggplot(aes(x = R, y = NR)) + 
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0) +
+  labs(title = "SD of signatures")
+```
+
+# ----------
+# Compare ssGSEA signature scores
+```{r compare_ssgsea, echo = FALSE, results = "asis"}
+signature_response_ssgsea <- data.frame(matrix(nrow = 0, ncol = 15)) %>%
+    setNames(c("statistic", "p.value", "method", "alternative", "contrast",
+               "signature", "n", "mean_responders", "sd_responders",
+               "median_responders", "n_responders", "mean_nresponders",
+               "sd_nresponders", "median_nresponders", "n_nresponders"))
+
+current_gene_signature <- names(gene_signatures_ssgsea_l)[1]
+for (current_gene_signature in names(gene_signatures_ssgsea_l)) {
+
+  cat(current_gene_signature, "  \n")
+  cat(gene_signatures_ssgsea_l[current_gene_signature][[1]], "  \n")
+
+  signature_data <- ssgsea_results_df %>%
+    select(c("CF_sample", "Treatment", "Response", "Response_detail",
+             "Trial", "Patient",
+             current_gene_signature))
+  
+  plot <- signature_data %>% ggplot(
+      aes_string(x = "Treatment", y = current_gene_signature, col = "Response")
+      ) + geom_boxplot() +
+    geom_point(position = position_jitterdodge(jitter.width = 0.25),
+               aes(group = Response, shape = Response,
+                   col = Response), size = 2.5) +
+      labs(col = "Response") +
+      # expand_limits(y = 0) +
+      scale_x_discrete(limits = c("Pre", "Post")) +
+      labs(x = "", y = sprintf("%s\n ssGSEA score", current_gene_signature)) +
+      theme_Publication() +
+      theme(legend.spacing.x = unit(0.3, "cm")) +
+    scale_color_manual(values = c("#F8766D", "#00BA38"))   
+  
+    print(plot)
+
+  if (run_r_vs_nr){
+    t1 <- calc_stat_r_vs_nr(
+      signature_data, "Pre", "Pre R x NR", current_gene_signature)
+    response_ssgsea <- t1 
+    
+    if (has_post_data){
+      t2 <- calc_stat_r_vs_nr(
+        signature_data, "Post", "Post R x NR", current_gene_signature)
+      response_ssgsea <- response_ssgsea %>% rbind(t2)
+    }
+  
+    signature_response_ssgsea <- signature_response_ssgsea %>%
+      rbind(response_ssgsea)
+  
+    print("Comparison of responders and non-responders (Unpaired wilcoxon)  \n")
+    cat("  \n")
+  
+    print(response_ssgsea[1, ] %>%
+            mutate(p.value = FormatDecimals(p.value),
+                   "n [R/NR]" = sprintf("%s [%s/%s]",
+                                        n, n_responders, n_nresponders),
+                   "Mean (SD) R" = sprintf(
+                     "%s (%s)", FormatDecimals(mean_responders),
+                     FormatDecimals(sd_responders)),
+                   "Median R" = FormatDecimals(median_responders),
+                   "Mean (SD) NR" = sprintf(
+                     "%s (%s)", FormatDecimals(mean_nresponders),
+                     FormatDecimals(sd_nresponders)),
+                   "Median NR" = FormatDecimals(
+                     median_nresponders)) %>%
+            select(c("statistic", "p.value", "contrast", "n [R/NR]",
+                     "Mean (SD) R", "Mean (SD) NR",
+                     "Median R", "Median NR")) %>%
+            knitr::kable())
+    cat("  \n")
+
+    if (has_post_data){
+      print(response_ssgsea[2, ] %>%
+            mutate(p.value = FormatDecimals(p.value),
+                   "n [R/NR]" = sprintf("%s [%s/%s]",
+                                        n, n_responders, n_nresponders),
+                   "Mean (SD) R" = sprintf(
+                     "%s (%s)", FormatDecimals(mean_responders),
+                     FormatDecimals(sd_responders)),
+                   "Median R" = FormatDecimals(median_responders),
+                   "Mean (SD) NR" = sprintf(
+                     "%s (%s)", FormatDecimals(mean_nresponders),
+                     FormatDecimals(sd_nresponders)),
+                   "Median NR" = FormatDecimals(
+                     median_nresponders)) %>%
+            select(c("statistic", "p.value", "contrast", "n [R/NR]",
+                     "Mean (SD) R", "Mean (SD) NR",
+                     "Median R", "Median NR"))  %>%
+            knitr::kable())
+     cat("  \n")
+
+      responder_timepoint_ssgsea <- responder_timepoint_ssgsea %>%
+        mutate(p.value = FormatDecimals(p.value),
+               mean_delta = FormatDecimals(mean_delta),
+               sd_delta = FormatDecimals(sd_delta))
+      nresponder_timepoint_ssgsea <- nresponder_timepoint_ssgsea %>%
+        mutate(p.value = FormatDecimals(p.value),
+               mean_delta = FormatDecimals(mean_delta),
+               sd_delta = FormatDecimals(sd_delta))
+    
+      print(responder_timepoint_ssgsea %>%
+        rbind(nresponder_timepoint_ssgsea) %>%
+          select(p.value, contrast, response) %>%
+          pivot_wider(values_from = p.value, names_from = response) %>%
+          setNames(c("contrast", "p.value R", "p.value NR")) %>%
+          left_join(responder_timepoint_ssgsea %>%
+                      select(contrast, n, mean_delta, sd_delta) %>%
+                      setNames(c("contrast", "n R",
+                                 "mean_delta R", "sd_delta R"))) %>%
+          left_join(nresponder_timepoint_ssgsea %>%
+                      select(contrast, n, mean_delta, sd_delta) %>%
+                      setNames(c("contrast", "n NR",
+                                 "mean_delta NR", "sd_delta NR"))) %>%
+              knitr::kable())
+       cat("  \n")
+      }
+    
+    cat("  \n")
+  }
+}
+
+signature_response_ssgsea %>%
+  write_csv2(here(output_dir, "signature_response_ssgsea.csv"))
+```
+
+# ----------
+# Compare mean log2 RPM expression
+```{r compare_rpm, echo = TRUE, results = "asis"}
+gene_signatures_rpm <- gene_signatures %>% filter(!use_ssgsea)
+
+signature_rpm_data <- data.frame(colnames(rpm_counts)) %>%
+  setNames("CF_sample")
+
+signature_response_expression <- data.frame(matrix(nrow = 0, ncol = 15)) %>%
+    setNames(c("statistic", "p.value", "method", "alternative", "contrast",
+               "signature", "n", "mean_responders", "sd_responders",
+               "median_responders", "n_responders", "mean_nresponders",
+               "sd_nresponders", "median_nresponders", "n_nresponders"))
+
+current_gene_signature <- names(gene_signatures_l)[1]
+for (current_gene_signature in names(gene_signatures_l)) {
+
+  print_output <- current_gene_signature %in% gene_signatures_rpm$Signature
+  if (print_output) {
+    cat(current_gene_signature, "  \n")
+    cat(gene_signatures_l[current_gene_signature][[1]], "  \n")
+  }
+
+    signature_rpm_counts <- rpm_counts[
+    rownames(rpm_counts) %in%
+      gene_signatures_l[current_gene_signature][[1]], ]
+
+  pseudolog2_rpm_counts <- log2(signature_rpm_counts + 1)
+
+  sig_mean_plog2_rpm_counts <- colMeans(pseudolog2_rpm_counts)
+
+  signature_expdata <- sig_mean_plog2_rpm_counts %>%
+    as.data.frame() %>%
+    setNames(current_gene_signature) %>%
+    rownames_to_column("CF_sample") %>%
+    left_join(metadata)
+
+  signature_rpm_data <- signature_rpm_data %>% left_join(signature_expdata)
+  
+  signature_rpm_data_paired <- signature_rpm_data %>%
+    filter(Patient %in% paired_samples$Patient)
+  
+  if (run_r_vs_nr){
+    t1 <- calc_stat_r_vs_nr(
+      signature_expdata, "Pre", "Pre R x NR", current_gene_signature)
+    signature_response <- t1
+    
+    signature_response_expression <- signature_response_expression %>%
+      rbind(signature_response)
+  
+    if (print_output) {
+      print("Comparison of responders and non-responders (Unpaired wilcoxon)  \n")
+  
+    print(signature_response[1, ] %>%
+            mutate(p.value = FormatDecimals(p.value),
+                   "n [R/NR]" = sprintf("%s [%s/%s]",
+                                        n, n_responders, n_nresponders),
+                   "Mean (SD) R" = sprintf(
+                     "%s (%s)", FormatDecimals(mean_responders),
+                     FormatDecimals(sd_responders)),
+                   "Median R" = FormatDecimals(median_responders),
+                   "Mean (SD) NR" = sprintf(
+                     "%s (%s)", FormatDecimals(mean_nresponders),
+                     FormatDecimals(sd_nresponders)),
+                   "Median NR" = FormatDecimals(
+                     median_nresponders)) %>%
+            select(c("statistic", "p.value", "contrast", "n [R/NR]",
+                     "Mean (SD) R", "Mean (SD) NR",
+                     "Median R", "Median NR")) %>%
+            knitr::kable())
+    cat("  \n")
+    }
+  }
+  cat("  \n")
+}
+
+signature_rpm_data %>%
+  write_csv2(here(output_dir, "signature_rpm_data.csv"))
+
+signature_response_expression %>%
+  write_csv2(here(output_dir, "signature_response_rpm_expression.csv"))
+```
+
+# ----------
+# Volcano Plots
+## ssgsea
+```{r load data ssgsea volcanos}
+signature_response_ssgsea <- read_csv2(
+  here(output_dir, "signature_response_ssgsea.csv"))
+
+signature_response_ssgsea <- signature_response_ssgsea %>%
+  mutate(mean_delta = mean_responders - mean_nresponders,
+         pooled_sd = sqrt((sd_responders^2 + sd_nresponders^2) / 2),
+         effect_size = mean_delta / pooled_sd)
+
+# FDRq
+signature_response_ssgsea_fdrq <- signature_response_ssgsea %>%
+  filter(contrast == "Pre R x NR") %>%
+  mutate(padj = p.adjust(p.value, method = "fdr"))
+
+```
+
+```{r ssgsea volcanos}
+p_thresh <- 0.05
+
+signature_response_ssgsea_fdrq %>%
+  ggplot(aes(x = effect_size, y = -log10(p.value), col = contrast)) +
+  geom_point() +
+  geom_text_repel(aes(x = effect_size, y = -log10(p.value), label = signature),
+    data = signature_response_ssgsea_fdrq %>% filter(p.value < 0.05),
+    colour = "grey20",
+    min.segment.length = 0, force = 3, force_pull = 2,
+    max.overlaps = 10) +
+  theme(plot.title = element_text(hjust = 0.7)) +
+  labs(title = "Response signatures ssGSEA",
+    x = "R x NR Effect Size",
+    y = "-log10(p-value)") +
+  geom_hline(yintercept = -log10(p_thresh), alpha = 0.5, col = "red") +
+  facet_wrap(~contrast) +
+  theme_Publication() +
+  scale_color_manual(values = c("#F564E3", "#619CFF"))   
+
+ggsave(here(output_dir_plots, "signature_response_ssgsea.png"),
+    height = 8, width = 15)
+
+signature_response_ssgsea_fdrq %>%
+  ggplot(aes(x = effect_size, y = -log10(padj), col = contrast)) +
+  geom_point() +
+  geom_text_repel(aes(x = effect_size, y = -log10(padj), label = signature),
+    data = signature_response_ssgsea_fdrq, colour = "grey20",
+    min.segment.length = 0) +
+  theme(plot.title = element_text(hjust = 0.7)) +
+  labs(title = "Response signatures ssGSEA",
+    x = "R x NR Effect Size",
+    y = "-log10(FDRq)") +
+  geom_hline(yintercept = -log10(p_thresh), alpha = 0.5, col = "red") +
+  facet_wrap(~contrast) +
+  theme_Publication() +
+  scale_color_manual(values = c("#F564E3", "#619CFF")) 
+
+ggsave(here(output_dir_plots, "signature_response_ssgsea_fdrq.png"),
+    height = 8, width = 15)
+```
+## RPM
+```{r load data rpm volcanos}
+signature_response_expression <- read_csv2(
+  here(output_dir, "signature_response_rpm_expression.csv"))
+
+signature_response_expression <- signature_response_expression %>%
+  mutate(mean_delta = mean_responders - mean_nresponders,
+         pooled_sd = sqrt((sd_responders^2 + sd_nresponders^2) / 2),
+         effect_size = mean_delta / pooled_sd)
+
+# FDRq
+signature_response_expression_fdrq <- signature_response_expression %>%
+  filter(contrast == "Pre R x NR") %>%
+  mutate(padj = p.adjust(p.value, method = "fdr"))
+```
+
+```{r rpm volcanos}
+signature_response_expression_fdrq %>%
+  ggplot(aes(x = effect_size, y = -log10(p.value), col = contrast)) +
+  geom_point() +
+  geom_text_repel(aes(x = effect_size, y = -log10(p.value), label = signature),
+    data = signature_response_expression_fdrq %>% filter(p.value < 0.05),
+    colour = "grey20", min.segment.length = 0) +
+  geom_hline(yintercept = -log10(p_thresh), alpha = 0.5, col = "red") +
+  theme(plot.title = element_text(hjust = 0.7)) +
+  labs(title = "Response signatures RPM",
+    x = "R x NR Effect Size",
+    y = "-log10(p-value)") +
+  guides(col = FALSE) +
+  facet_wrap(~contrast) +
+  theme_Publication() +
+  scale_color_manual(values = c("#F564E3", "#619CFF")) 
+
+ggsave(here(output_dir_plots, "signature_response_expression.png"),
+    height = 4, width = 7)
+
+signature_response_expression_fdrq %>%
+  ggplot(aes(x = effect_size, y = -log10(padj), col = contrast)) +
+  geom_point() +
+  geom_text_repel(aes(x = effect_size, y = -log10(padj), label = signature),
+    data = signature_response_expression_fdrq, colour = "grey20",
+    min.segment.length = 0) +
+  geom_hline(yintercept = -log10(p_thresh), alpha = 0.5, col = "red") +
+  theme(plot.title = element_text(hjust = 0.7)) +
+  labs(title = "Response signatures RPM",
+    x = "R x NR Effect Size",
+    y = "-log10(FDRq)")  +
+  guides(col = FALSE) +
+  facet_wrap(~contrast) +
+  theme_Publication() +
+  scale_color_manual(values = c("#F564E3", "#619CFF")) 
+
+ggsave(here(output_dir_plots, "signature_response_expression_fdrq.png"),
+    height = 4, width = 7)
+
+```
+
+# R x NR Signature effect sizes
+```{r}
+signature_response <- signature_response_ssgsea %>%
+  mutate(signature_score = "ssgsea") %>%
+  rbind(signature_response_expression %>%
+  filter(!signature %in% signature_response_ssgsea$signature) %>%
+    mutate(signature_score = "log(RPM+1)"))
+
+# FDRq
+signature_response_fdrq <- signature_response %>%
+  filter(contrast == "Pre R x NR") %>%
+  mutate(padj = p.adjust(p.value, method = "fdr"))
+p_thresh <- 0.05
+
+signatures_to_label <- c("Matrix", "H_EMT", "H_Glycolysis", "End_TBRS",
+                         "H_E2F_Targets", "H_G2M_Checkpoint",
+                         "Cancer_associated_fibroblasts", "Stem.Sig",
+                         "CD276", "IL8", "Matrix_remodeling",
+                         "Tumor_proliferation_rate",
+                         "NK_cell_receptor_ligand",
+                         "H_MYC_Targets_V2", "H_MYC_Targets_V1"
+                         )
+
+signature_response_fdrq %>%
+  ggplot(aes(x = effect_size, y = -log10(p.value), col = contrast,
+             shape = signature_score)) +
+  geom_point() +
+  geom_text_repel(aes(x = effect_size, y = -log10(p.value), label = signature),
+    data = signature_response_fdrq %>%
+      filter(signature %in% signatures_to_label), colour = "grey20",
+    min.segment.length = 0, force = 6, force_pull = 6) +
+  geom_hline(yintercept = -log10(p_thresh), alpha = 0.5, col = "red") +
+  theme(plot.title = element_text(hjust = 0.7)) +
+  labs(title = "",
+    x = "R x NR Effect Size",
+    y = "-log10(p-value)")  +
+  guides(col = FALSE) +
+  facet_wrap(~contrast) +
+  theme_Publication() + scale_color_manual(values = c("#F8766D", "#00BA38")) 
+
+ggsave(here(output_dir_plots, "signature_response.png"),
+    height = 5, width = 8)
+
+```
+
+# Compare ssGSEA and RPM ES
+```{r}
+gene_set_sizes <- gene_signatures %>%
+              select(Signature, Geneset_size) %>%
+              rename(signature = Signature)
+
+signature_response_ssgsea_fdrq %>%
+  select(-c(method, alternative, n, n_responders, n_nresponders)) %>%
+  left_join(signature_response_expression_fdrq,
+            by = c("signature", "contrast"), suffix = c("_ssgsea", "_rpm")) %>%
+  left_join(gene_set_sizes) %>%
+  ggplot(aes(x = effect_size_rpm, y = effect_size_ssgsea, col = Geneset_size)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0) +
+  stat_cor()
+
+signature_response_expression_fdrq %>%
+  left_join(gene_set_sizes) %>%
+  ggplot(aes(x = Geneset_size, y = pooled_sd)) + geom_point()
+```
+
+# ----------
+# Bagaev Clustering on ssGSEA scores
+```{r}
+bagaev_signatures <- gene_signatures %>% filter(Ref == "Bagaev et al. 2021")
+
+bagaev_ssgsea <- ssgsea_results_df %>%
+  select(all_of(c("CF_sample", unique(bagaev_signatures$Signature))))
+
+bagaev_ssgsea_m <- bagaev_ssgsea %>%
+  column_to_rownames("CF_sample") %>%
+  mutate_if(is.character, as.numeric) %>%
+  as.matrix() %>%
+  t()
+matrix_colnames <- colnames(bagaev_ssgsea_m)
+bagaev_ssgsea_m <- t(apply(
+  bagaev_ssgsea_m, 1, function(x) scale(x, center = TRUE, scale = TRUE)))
+
+colnames(bagaev_ssgsea_m) <- matrix_colnames
+
+annot_df <- ssgsea_results_df %>%
+  tibble::column_to_rownames("CF_sample") %>%
+  select(Response, Treatment) %>%
+  mutate_if(is.numeric, as.factor)
+
+mat_breaks <- quantile_breaks(bagaev_ssgsea_m, n = 11)
+
+bagaev_heatmap <- pheatmap::pheatmap(bagaev_ssgsea_m,
+  annotation_col = annot_df,
+  col = paletteer_d(palette = "RColorBrewer::RdYlBu",
+                    n = length(mat_breaks) - 1, direction = -1),
+  show_colnames = FALSE,
+  fontsize_row = 6,
+  breaks = mat_breaks,
+)
+
+annot_df <- ssgsea_results_df %>%
+  tibble::column_to_rownames("CF_sample") %>%
+  select(Response, Treatment) %>%
+  mutate_if(is.numeric, as.factor) %>%
+  filter(Treatment == "Pre")
+
+bagaev_heatmap_pre <- pheatmap::pheatmap(bagaev_ssgsea_m[, rownames(annot_df)],
+  annotation_col = annot_df,
+  col = paletteer_d(palette = "RColorBrewer::RdYlBu",
+                    n = length(mat_breaks) - 1, direction = -1),
+  show_colnames = FALSE,
+  fontsize_row = 6,
+  breaks = mat_breaks,
+)
+```
+
+# ----------
+# Lint script
+```{r}
+# lint("~/NKI_pancancer_neoadj_io/src/gene_signatures.Rmd")
+lint(filename = "~/NKI_pancancer_neoadj_io/src/gene_signatures.Rmd",
+  linters = unused_import_linter()
+)
+```
+
+# ----------
+# sessionInfo - Package Versions
+```{r sessionInfo}
+sessionInfo()
+```

@@ -1,0 +1,1152 @@
+---
+title: "neoadjuvant pancancer GLMer"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+params:
+  export: TRUE
+  output_dir: "GLMM_analysis"
+  metadata: ""
+  filter_and_parse_vcfs: FALSE
+  exclude_niche_msi: TRUE
+  run_meta_analysis: TRUE
+
+---
+
+Author comment:
+File description comment:
+The purpose of this script is to run generalized linear mixed models (GLMM) and sensitivity analysis and adjusting for tumor type by fitting trials as random effects, also using different data subsets.
+
+# Loading Packages
+```{r, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning = FALSE, message = FALSE, dpi = 300, error = TRUE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+library(tidyverse)
+source("helper_functions.R")
+source("oncomatrix.R")
+library(VariantAnnotation)
+library(ggpubr)
+library(corrplot)
+library(export)
+library(lme4)
+library(export)
+
+MakeDataFrameFromVCF <- getFromNamespace("MakeDataFrameFromVCF", "ICAMS")
+
+set.seed(42)
+select <- dplyr::select
+rename <- dplyr::rename
+here <- here::here
+```
+
+# Setup output folder
+
+```{r Setup output, echo = FALSE, include = FALSE}
+export <- params$export
+filter_and_parse_vcfs <- params$filter_and_parse_vcfs
+
+# generate output directory
+wes_dir <- here("data", "processed", "WES_analysis")
+metadata_dir <- here("data", "processed", "metadata")
+output_dir <- here("data", "processed", params$output_dir)
+wes_meta_dir <- here("data", "processed", "WES_analysis_meta")
+wes_rna_dir <- here("data", "processed", "WES_RNA_integration")
+
+print(output_dir)
+
+# if output_dir does not exist, create it
+if (!dir.exists(output_dir)) {
+    dir.create(output_dir)
+
+    } else {
+  print("Output folder already exists")
+}
+
+```
+
+# ----------
+# Load metadata
+
+```{r Load metadata}
+dna_metadata <- read_csv2(here(metadata_dir, "combined_dna_metadata.csv"))
+
+# WES target sizes
+WES_target_sizes <- data.frame(
+  Trial = c("IMCISION", "PRADO", "OpACIN_neo", "MATISSE",
+            "NICHE-MSI", "NICHE-MSS", "NABUCCO", "BELLINI"),
+  Kit = c(rep("Twist exome Refseq", 4), rep("Exome-IDT V1", 4)),
+  WES_target_size = c(rep(36.72, 4), rep(39.02, 4)))
+
+WES_target_sizes
+
+histology_df <- data.frame(
+  Trial = c("BELLINI", "IMCISION", "NABUCCO", "NICHE-MSS", "NICHE-MSI",
+            "OpACIN_neo", "PRADO", "MATISSE"),
+  Histology = c("TBNC", "HNSCC", "Urothelial", "Colon", "Colon",
+                "LN_melanoma", "LN_melanoma", "CSCC"))
+
+```
+
+# Annotation color
+```{r}
+
+# Define colours for each group
+Color_NR <- "#F8766D"
+Color_R <- "#00BA38" # "#619CFF"
+Color_NA <- "#CD9600"
+Color_Pre <- "#619CFF"
+Color_Post <- "#F564E3"
+Color_Depleted <- "#7CAE00"
+Color_Fibrotic <- "#00BFC4"
+Color_Inflamed_fibrotic <- "#C77CFF"
+Color_Inflamed_non_fibrotic <- "#F8766D"
+Color_HNSCC <- "#009292"
+Color_CSCC <- "#CD9600"
+Color_Urothelial <- "#B66DFF"
+Color_LN_melanoma <- "#00BFC4"
+Color_Colon <- "#F8766D"
+Color_Colon_MSI <- "#B73A3A"
+Color_Colon_MSS <- "#23C26F"
+Color_TNBC <- "#FEB5DA"
+Color_BELLINI <- "#FEB5DA"
+Color_IMCISION <- "#009292"
+Color_MATISSE <- "#CD9600"
+Color_NABUCCO <- "#B66DFF"
+Color_BELLINI <- "#FEB5DA"
+Color_NICHE_MSS <- "#23C26F"
+Color_NICHE_MSI <- "#B73A3A"
+Color_OpACIN_neo <- "#00BFC4"
+Color_PRADO <- "#619CFF"
+
+annotation_color_list = list(
+  Response = c(NR = Color_NR, R = Color_R),
+  Treatment = c(Pre = Color_Pre, Post = Color_Post),
+  Histology = c(LN_melanoma = Color_LN_melanoma, Urothelial = Color_Urothelial,
+                Colon = Color_Colon, HNSCC = Color_HNSCC, TBNC = Color_TNBC,
+                CSCC = Color_CSCC),
+  Trial = c(BELLINI = Color_BELLINI, IMCISION = Color_IMCISION,
+            MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
+            `NICHE-MSS` = Color_NICHE_MSS, `NICHE-MSI` = Color_NICHE_MSI,
+            OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO))
+
+trial_colors <- c(BELLINI = Color_BELLINI, IMCISION = Color_IMCISION,
+            MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
+            `NICHE-MSS` = Color_NICHE_MSS, `NICHE-MSI` = Color_NICHE_MSI,
+            OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO)
+
+trial_colors_combined <- c(Combined = "#999999", BELLINI = Color_BELLINI,
+                           IMCISION = Color_IMCISION,
+            MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
+            `NICHE-MSS` = Color_Colon_MSS, `NICHE-MSI` = Color_NICHE_MSI,
+            OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO)
+
+Bagaev_tme_colors <- c(Color_Depleted, Color_Fibrotic,
+                       Color_Inflamed_fibrotic, Color_Inflamed_non_fibrotic)
+
+histology_msi_mss_colors <- c(`Colon-MSI`= Color_Colon_MSI,
+                              `Colon-MSS`= Color_Colon_MSS,
+                              CSCC = Color_CSCC, HNSCC = Color_HNSCC, 
+                              LN_melanoma = Color_LN_melanoma,
+                              TBNC = Color_TNBC,
+                              Urothelial = Color_Urothelial)
+
+```
+
+# ----------
+# Load data
+
+```{r}
+n_variants_tmb <- read_csv2(here(wes_dir, "n_variants_dp20_vaf_tmb.csv"))
+
+wes_features_df <- read_csv2(here(wes_dir, "wes_features_df.csv"))
+wes_features_df <- wes_features_df %>%
+  filter(!(Trial %in% "NICHE-MSI" & Tumor_nr == "Tumor_2"))
+
+pathway_level_mutation_df <- read_csv2(here(wes_dir,
+                                            "pathway_level_mutation_df.csv"))
+pathway_level_mutation_df <- pathway_level_mutation_df %>%
+  filter(!(Trial %in% "NICHE-MSI" & Tumor_nr == "Tumor_2"))
+
+facets_data_metrics <- read_csv2(here(wes_dir, "facets_data_metrics.csv"))
+facets_data_metrics <- facets_data_metrics %>%
+  filter(Tumor_Sample_Barcode %in% wes_features_df$Tumor_Sample_Barcode)
+
+facets_aneuploidy_score_df <- read_csv2(
+  here(wes_dir, "facets_aneuploidy_score_df.csv"))
+facets_aneuploidy_score_df <- facets_aneuploidy_score_df %>%
+  filter(CF_sample_tumor %in% wes_features_df$CF_sample_tumor)
+
+combined_wes_smd <- read_csv2(here(wes_meta_dir, "combined_wes_smd.csv"))
+trial_odds_ratio_df <- read_csv2(here(wes_meta_dir, "trial_odds_ratio_df.csv"))
+
+meta_studies_results_smd_all <- read_csv2(
+  here(wes_meta_dir, "meta_studies_results_smd_all.csv"))
+
+meta_studies_results_or_all <- read_csv2(
+  here(wes_meta_dir, "meta_studies_results_or_all.csv"))
+
+```
+
+# ----------
+
+```{r}
+wes_features_df <- wes_features_df %>%
+  mutate(Response_n = ifelse(
+    Response == "R",
+    1, ifelse(
+      Response == "NR", 0, NA))) %>%
+  mutate(TMB_scaled = scale(TMB),
+         UV_scaled = scale(UV_abs),
+         APOBEC_scaled = scale(APOBEC_abs)) 
+
+table(wes_features_df$Response)
+wes_features_df$Response_n %>% mean() %>% round(2)
+
+wes_features_df$TMB_scaled %>% summary()
+mean(wes_features_df$TMB_scaled)
+sd(wes_features_df$TMB_scaled)
+
+wes_features_df_excl_dMMR <- wes_features_df %>%
+  filter(!Trial %in% c("NICHE-MSI"))
+wes_features_df_excl_dMMR_UV <- wes_features_df %>%
+  filter(!Trial %in% c("NICHE-MSI",  "PRADO", "OpACIN_neo", "MATISSE"))
+
+```
+
+```{r}
+percentage_above_TMB_10 <- wes_features_df %>%
+  group_by(Trial) %>%
+  summarise(proportion = mean(TMB > 10)) %>%
+  mutate(percentage = round(proportion * 100))
+
+tmb_trial_plot <- wes_features_df %>%
+  ggplot(aes(x = factor(Trial,
+                        levels = c("BELLINI", "NICHE-MSS", "IMCISION",
+                                   "NABUCCO", "OpACIN_neo", "PRADO",
+                                   "MATISSE", "NICHE-MSI")),
+             y = TMB, fill = Response)) +
+  geom_boxplot() + theme_Publication() +
+  # guides(fill = FALSE) +
+  labs(x = "", y = "TMB (mutations/Mb)") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) + 
+  geom_hline(yintercept = 10, linetype = "dashed", alpha = 0.5) +
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.1))) +
+  geom_text(data = percentage_above_TMB_10 %>%
+              mutate(Response = "NR"),
+            aes(x = Trial, y = 168, label = paste0(percentage, "%")),
+            vjust = -1.5) +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+tmb_trial_plot
+graph2pdf(x = tmb_trial_plot,
+          file = here(output_dir, "_TMB_trial_response_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 5,
+          width = 5.5)
+
+wes_features_df %>%
+  ggplot(aes(x = factor(Trial,
+                        levels = c("BELLINI", "NICHE-MSS", "IMCISION",
+                                   "NABUCCO","OpACIN_neo", "PRADO",
+                                   "MATISSE", "NICHE-MSI")),
+             y = TMB, fill = Response)) +
+  geom_boxplot() + theme_Publication() +
+  # guides(fill = FALSE) +
+  labs(x = "", y = "TMB (mutations/Mb)") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) + 
+  geom_hline(yintercept = 10, linetype = "dashed", alpha = 0.5) +
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.1))) +
+  geom_text(data = percentage_above_TMB_10 %>% mutate(Response = "NR"),
+            aes(x = Trial, y = 168, label = paste0(percentage, "%")),
+            vjust = -1.5) +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  scale_y_continuous(transform = "log2", n.breaks = 6)
+
+```
+
+# GLMer TMB tumour type
+
+```{r}
+tmb_trial_cor <- wes_features_df %>%
+  select(Patient, TMB_scaled, Trial) %>% mutate(dummy = 1) %>%
+  pivot_wider(names_from = "Trial", values_from = "dummy") %>%
+  select(-Patient) %>%
+  as.matrix()
+tmb_trial_cor[is.na(tmb_trial_cor)] <- 0
+tmb_trial_cor %>% cor()
+tmb_trial_cor %>% cor() %>% corrplot()
+
+tmb_trial_cor <- wes_features_df_excl_dMMR %>%
+  select(Patient, TMB_scaled, Trial) %>%
+  mutate(dummy = 1) %>%
+  pivot_wider(names_from = "Trial", values_from = "dummy") %>%
+  select(-Patient) %>%
+  as.matrix()
+tmb_trial_cor[is.na(tmb_trial_cor)] <- 0
+tmb_trial_cor %>% cor()
+tmb_trial_cor %>% cor() %>% corrplot()
+
+tmb_trial_cor <- wes_features_df_excl_dMMR %>%
+  filter(!Trial %in% c("MATISSE")) %>%
+  select(Patient, TMB_scaled, Trial) %>%
+  mutate(dummy = 1) %>%
+  pivot_wider(names_from = "Trial", values_from = "dummy") %>%
+  select(-Patient) %>% as.matrix()
+tmb_trial_cor[is.na(tmb_trial_cor)] <- 0
+tmb_trial_cor %>% cor()
+tmb_trial_cor %>% cor() %>% corrplot()
+```
+
+
+```{r}
+# Mixed-effects linear model, treating trial as a random effect
+tmb_mixed_effects_model <- glmer(Response_n ~ TMB_scaled + (1 | Trial),
+                                 data = wes_features_df, family = binomial)
+summary(tmb_mixed_effects_model)
+
+tmb_mixed_effects_model_excl_dmmr <- glmer(
+  Response_n ~ TMB_scaled + (1 | Trial),
+  data = wes_features_df_excl_dMMR, family = binomial)
+summary(tmb_mixed_effects_model_excl_dmmr)
+
+```
+
+## Fitting trials
+```{r}
+TMB_model <- glm(Response_n ~ TMB_scaled,
+                 data = wes_features_df, family = binomial)
+summary(TMB_model)
+        
+Trial_model <- glmer(Response_n ~ (1 | Trial),
+                     data = wes_features_df, family = binomial)
+summary(Trial_model)
+
+TMB_trial_model <- glmer(Response_n ~ TMB_scaled + (1 | Trial),
+                         data = wes_features_df, family = binomial)
+summary(TMB_trial_model)
+
+trial_predictions <- predict(Trial_model, type = "response")
+tmb_predictions <- predict(TMB_model, type = "response")
+tmb_trial_predictions <- predict(TMB_trial_model, type = "response")
+```
+
+## Likelihood ratio test
+```{r}
+anova(TMB_trial_model, Trial_model) # These are nested
+# anova(TMB_trial_model, TMB_model) # This comparison is not valid, not nested
+AIC(TMB_trial_model, TMB_model)
+BIC(TMB_trial_model, TMB_model)
+```
+
+## Excl dMMR
+```{r}
+TMB_model <- glm(Response_n ~ TMB_scaled,
+                 data = wes_features_df_excl_dMMR, family = binomial)
+summary(TMB_model)
+        
+Trial_model <- glmer(Response_n ~ (1 | Trial),
+                     data = wes_features_df_excl_dMMR, family = binomial)
+summary(Trial_model)
+
+TMB_trial_model <- glmer(Response_n ~ TMB_scaled + (1 | Trial),
+                         data = wes_features_df_excl_dMMR, family = binomial)
+summary(TMB_trial_model)
+
+```
+
+
+## Likelihood ratio test
+```{r}
+anova(TMB_trial_model, Trial_model) # These are nested
+# anova(TMB_trial_model, TMB_model) # This comparison is not valid, not nested
+AIC(TMB_trial_model, TMB_model)
+BIC(TMB_trial_model, TMB_model)
+```
+
+# ----------
+# UV vs TMB
+## Visualizations
+```{r}
+wes_features_df %>%
+  ggplot(aes(x = Trial, y = log2(UV_abs + 1), fill = Response)) +
+  geom_boxplot(outlier.shape = NA) + theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))  +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+wes_features_df %>%
+  ggplot(aes(x = Response, y = UV_abs)) +
+  geom_boxplot(outlier.shape = NA) + geom_point(aes(col = Trial)) + 
+  theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  stat_compare_means(method = "wilcox") +
+  scale_color_manual(values = trial_colors)
+
+wes_features_df_excl_dMMR %>%
+  ggplot(aes(x = Response, y = UV_abs)) +
+  geom_boxplot(outlier.shape = NA)  + geom_point(aes(col = Trial)) +
+  theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  stat_compare_means(method = "wilcox") +
+  labs(title = "Excl. dMMR") +
+  scale_color_manual(values = trial_colors)
+
+wes_features_df %>%
+  filter(TMB < 10) %>%
+  ggplot(aes(x = Response, y = UV_abs)) +
+  geom_boxplot(outlier.shape = NA)  + geom_point(aes(col = Trial)) +
+  theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  stat_compare_means(method = "wilcox") +
+  labs(title = "TMB < 10 mut/Mb") +
+  scale_color_manual(values = trial_colors)
+
+wes_features_df_excl_dMMR_UV %>%
+  filter(!Trial %in% c("NICHE-MSI", "PRADO", "OpACIN_neo", "MATISSE")) %>%
+  ggplot(aes(x = Response, y = UV_abs)) +
+  geom_boxplot(outlier.shape = NA) + geom_point(aes(col = Trial)) +
+  theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  stat_compare_means(method = "wilcox") +
+  labs(title = "Excl. dMMR and UV cohorts") +
+  scale_color_manual(values = trial_colors)
+
+wes_features_df_excl_dMMR_UV %>%
+  filter(TMB < 10) %>%
+  ggplot(aes(x = Response, y = UV_abs)) +
+  geom_boxplot(outlier.shape = NA) + geom_point(aes(col = Trial)) +
+  theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  stat_compare_means(method = "wilcox") +
+  labs(title = "Excl. dMMR and UV cohorts and TMB > 10") +
+  scale_color_manual(values = trial_colors)
+```
+
+```{r}
+# Check collinearity
+cor(wes_features_df$TMB, wes_features_df$UV_abs)
+cor(wes_features_df_excl_dMMR$TMB, wes_features_df_excl_dMMR$UV_abs)
+cor(wes_features_df_excl_dMMR_UV$TMB, wes_features_df_excl_dMMR_UV$UV_abs)
+
+wes_features_df_sensitivity <- wes_features_df %>%
+  mutate(cohorts = "Pooled") %>%
+  rbind(wes_features_df_excl_dMMR %>%
+          mutate(cohorts = "Pooled excl. dMMR")) %>%
+  rbind(wes_features_df_excl_dMMR_UV %>%
+          mutate(cohorts = "Pooled excl. dMMR & UV"))
+
+wes_features_df_sensitivity %>%
+  ggplot(aes(x = TMB, y = UV_abs)) +
+  geom_point(aes(col = Trial)) +
+  theme_Publication() + facet_wrap(~cohorts, scales = "free") + stat_cor() +
+  scale_color_manual(values = trial_colors)
+```
+
+## Models
+```{r}
+# Mixed-effects linear model, treating trial as a random effect
+model4 <- glmer(Response_n ~ TMB_scaled + (1 | Trial),
+                data = wes_features_df, family = binomial)
+summary(model4)
+
+model5 <- glmer(Response_n ~ UV_scaled + (1 | Trial),
+                data = wes_features_df, family = binomial)
+summary(model5)
+
+model6 <- glmer(Response_n ~ TMB_scaled + UV_scaled + (1 | Trial),
+                data = wes_features_df, family = binomial)
+summary(model6)
+
+# Likelihood ratio test
+anova(model5, model6)
+anova(model4, model6)
+```
+
+
+```{r}
+# Excluding dMMR
+model4 <- glmer(Response_n ~ TMB_scaled + (1 | Trial),
+                data = wes_features_df_excl_dMMR, family = binomial)
+summary(model4)
+
+model5 <- glmer(Response_n ~ UV_scaled + (1 | Trial),
+                data = wes_features_df_excl_dMMR, family = binomial)
+summary(model5)
+
+model6 <- glmer(Response_n ~ TMB_scaled + UV_scaled + (1 | Trial),
+                data = wes_features_df_excl_dMMR, family = binomial)
+summary(model6)
+
+anova(model5, model6)
+
+```
+
+## Excl dMMR and UV
+```{r}
+model4 <- glmer(Response_n ~ TMB_scaled + (1 | Trial),
+                data = wes_features_df_excl_dMMR_UV, family = binomial)
+summary(model4)
+
+model5 <- glmer(Response_n ~ UV_scaled + (1 | Trial),
+                data = wes_features_df_excl_dMMR_UV, family = binomial)
+summary(model5)
+
+model6 <- glmer(Response_n ~ TMB_scaled + UV_scaled + (1 | Trial),
+                data = wes_features_df_excl_dMMR_UV, family = binomial)
+summary(model6)
+
+anova(model5, model6)
+```
+
+## TMB low histologies
+```{r}
+wes_features_df_excl_dMMR %>%
+  filter(Trial %in% c("BELLINI", "IMCISION", "NICHE-MSS")) %>%
+  pull(Trial) %>%
+  table()
+
+model4 <- glmer(Response_n ~ TMB_scaled + (1 | Trial),
+                data = wes_features_df_excl_dMMR %>%
+                  filter(Trial %in% c("BELLINI", "IMCISION", "NICHE-MSS")),
+                family = binomial)
+summary(model4)
+
+model5 <- glmer(Response_n ~ UV_scaled + (1 | Trial),
+                data = wes_features_df_excl_dMMR %>%
+                  filter(Trial %in% c("BELLINI", "IMCISION", "NICHE-MSS")),
+                family = binomial)
+summary(model5)
+model6 <- glmer(Response_n ~ TMB_scaled + UV_scaled + (1 | Trial),
+                data = wes_features_df_excl_dMMR %>%
+                  filter(Trial %in% c("BELLINI", "IMCISION", "NICHE-MSS")),
+                family = binomial)
+summary(model6)
+
+# Likelihood ratio tests
+anova(model5, model6)
+anova(model4, model6)
+```
+
+# ----------
+# APOBEC vs TMB
+## Visualizations
+```{r}
+wes_features_df %>%
+  ggplot(aes(x = Response, y = log2(APOBEC_abs + 1))) +
+  geom_boxplot(outlier.shape = NA) + geom_point(aes(col = Trial)) + 
+  theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  stat_compare_means(method = "wilcox") +
+  scale_color_manual(values = trial_colors)
+
+wes_features_df_excl_dMMR %>%
+  ggplot(aes(x = Response, y = log2(APOBEC_abs + 1))) +
+  geom_boxplot(outlier.shape = NA) + geom_point(aes(col = Trial)) + 
+  theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  stat_compare_means(method = "wilcox") +
+  scale_color_manual(values = trial_colors)
+
+wes_features_df %>%
+  ggplot(aes(x = Trial, y = log2(APOBEC_abs + 1), fill = Response)) +
+  geom_boxplot(outlier.shape = NA) + theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+```
+
+## Models
+```{r}
+# Mixed effect model with Trial as a random effect
+model4 <- glmer(Response_n ~ TMB_scaled + (1 | Trial),
+                data = wes_features_df, family = binomial)
+summary(model4)
+
+model5 <- glmer(Response_n ~ APOBEC_scaled + (1 | Trial),
+                data = wes_features_df, family = binomial)
+summary(model5)
+
+model6 <- glmer(Response_n ~ TMB_scaled + APOBEC_scaled + (1 | Trial),
+                data = wes_features_df, family = binomial)
+summary(model6)
+
+# Likelihood ratio tests
+anova(model5, model6)
+anova(model4, model6)
+```
+
+
+```{r}
+# Excluding dMMR
+model4 <- glmer(Response_n ~ TMB_scaled + (1 | Trial),
+                data = wes_features_df_excl_dMMR, family = binomial)
+summary(model4)
+model5 <- glmer(Response_n ~ APOBEC_scaled + (1 | Trial),
+                data = wes_features_df_excl_dMMR, family = binomial)
+summary(model5)
+model6 <- glmer(Response_n ~ TMB_scaled + APOBEC_scaled + (1 | Trial),
+                data = wes_features_df_excl_dMMR, family = binomial)
+summary(model6)
+
+# Likelihood ratio tests
+anova(model5, model6)
+anova(model4, model6)
+```
+
+## Excl dMMR and UV
+```{r}
+model4 <- glmer(Response_n ~ TMB_scaled + (1 | Trial),
+                data = wes_features_df_excl_dMMR_UV, family = binomial)
+summary(model4)
+model5 <- glmer(Response_n ~ APOBEC_scaled + (1 | Trial),
+                data = wes_features_df_excl_dMMR_UV, family = binomial)
+summary(model5)
+model6 <- glmer(Response_n ~ TMB_scaled + APOBEC_scaled + (1 | Trial),
+                data = wes_features_df_excl_dMMR_UV, family = binomial)
+summary(model6)
+
+anova(model5, model6)
+```
+
+## TMB low histologies
+```{r}
+wes_features_df_excl_dMMR %>%
+                  filter(Trial %in% c("BELLINI", "IMCISION", "NICHE-MSS")) %>%
+  pull(Trial) %>%
+  table()
+
+model4 <- glmer(Response_n ~ TMB_scaled + (1 | Trial),
+                data = wes_features_df_excl_dMMR %>%
+                  filter(Trial %in% c("BELLINI", "IMCISION", "NICHE-MSS")),
+                family = binomial)
+summary(model4)
+model5 <- glmer(Response_n ~ APOBEC_scaled + (1 | Trial),
+                data = wes_features_df_excl_dMMR %>%
+                  filter(Trial %in% c("BELLINI", "IMCISION", "NICHE-MSS")),
+                family = binomial)
+summary(model5)
+model6 <- glmer(Response_n ~ TMB_scaled + APOBEC_scaled + (1 | Trial),
+                data = wes_features_df_excl_dMMR %>%
+                  filter(Trial %in% c("BELLINI", "IMCISION", "NICHE-MSS")),
+                family = binomial)
+summary(model6)
+
+# Likelihood ratio tests
+anova(model5, model6)
+anova(model4, model6)
+```
+
+# dMMR and frameshift
+```{r}
+# dMMR and Frameshift
+model4 <- glmer(Response_n ~ TMB_frameshift_scaled + (1 | Trial), data = wes_features_df %>% mutate(TMB_frameshift_scaled = scale(TMB_frameshift)), family = binomial)
+summary(model4)
+
+model4 <- glmer(Response_n ~ TMB_frameshift_scaled + (1 | Trial), data = wes_features_df_excl_dMMR %>% mutate(TMB_frameshift_scaled = scale(TMB_frameshift)), family = binomial)
+summary(model4)
+
+model4 <- glmer(Response_n ~ dMMR_scaled + (1 | Trial), data = wes_features_df %>% mutate(dMMR_scaled = scale(dMMR_abs)), family = binomial)
+summary(model4)
+```
+
+# ----------
+# WES RNA
+```{r}
+wes_rna_features_df <- read_csv2(here(wes_rna_dir, "wes_rna_features_df.csv"))
+
+wes_rna_features_df <- wes_rna_features_df %>%
+  mutate(Response_n = ifelse(
+    Response == "R",
+    1, ifelse(
+      Response == "NR", 0, NA))) %>%
+  mutate(TMB_scaled = scale(TMB),
+         UV_scaled = scale(UV_abs),
+         APOBEC_scaled = scale(APOBEC_abs),
+         TIL_score_scaled = scale(TIL_score),
+         Proliferation_scaled = scale(Tumor_proliferation_rate),
+         B_cat_scaled = scale(B_catenin_signature_Luke_et_al))
+
+wes_rna_features_df_pre <- wes_rna_features_df %>%
+  filter(Treatment == "Pre")
+
+wes_rna_features_df_pre_f <- wes_rna_features_df_pre %>% filter(!is.na(TMB)) 
+wes_rna_features_df_pre_f %>% dim()
+```
+
+# ----------
+# Quadrant plots TMB TIL score
+```{r}
+median_til_score_pre <- median(
+  wes_rna_features_df_pre$TIL_score)
+median_til_score_pre
+
+wes_rna_features_df_pre_f %>% 
+  ggplot(aes(x = TMB, y = TIL_score, shape = Response, col = Trial)) +
+  geom_point() + theme_Publication() +
+  geom_vline(xintercept = 10, linetype = "dashed") +
+  geom_hline(yintercept = median_til_score_pre, linetype = "dashed") +
+  scale_x_continuous(trans = "log2") +
+  scale_color_manual(values = trial_colors) +
+  guides(col = guide_legend(nrow = 3))
+
+TMB_TIL_quadrant_trial_plot <- wes_rna_features_df_pre_f %>% 
+  ggplot(aes(x = TMB, y = TIL_score, shape = Response, col = Trial)) +
+  geom_point() + theme_Publication() + facet_wrap(~Response) +
+  geom_vline(xintercept = 10, linetype = "dashed") +
+  geom_hline(yintercept = median_til_score_pre, linetype = "dashed")  +
+  scale_x_continuous(trans = "log2") +
+  scale_color_manual(values = trial_colors) +
+  guides(col = guide_legend(nrow = 3))
+
+TMB_TIL_quadrant_trial_plot
+
+graph2pdf(x = TMB_TIL_quadrant_trial_plot,
+          file = here(output_dir, "_TMB_TIL_quadrant_trial_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 5,
+          width = 7)
+
+quadrant_response_proportions
+
+# Quadrant RR
+table(wes_rna_features_df_pre_f$TMB >= 10,
+      wes_rna_features_df_pre_f$TIL_score >= median_til_score_pre) %>%
+  `rownames<-`(c("TMB-L", "TMB-H")) %>%
+  `colnames<-`( c("mTIL_low", "mTIL_high"))
+
+```
+
+```{r}
+wes_rna_features_df_pre_f %>%
+  ggplot(aes(x = log2(TMB), y = TIL_score, shape = Response, col = Trial)) +
+  geom_point() + theme_Publication()
+
+# Quadrant RR
+table(wes_rna_features_df_pre_f$TMB >= 10,
+      wes_rna_features_df_pre_f$TIL_score >= median_til_score_pre) %>%
+  `rownames<-`(c("TMB-L", "TMB-H")) %>%
+  `colnames<-`( c("mTIL_low", "mTIL_high"))
+
+quadrant_response_proportions <- table(
+  wes_rna_features_df_pre_f$TMB >= 10,
+  wes_rna_features_df_pre_f$TIL_score > median_til_score_pre,
+  wes_rna_features_df_pre_f$Response) %>%
+  as.data.frame() %>%
+  setNames(c("TMB", "mTIL_group", "Response", "Freq")) %>%
+  mutate(TMB_group = ifelse(TMB == TRUE, "TMB_high", "TMB_low")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  mutate(quadrant = paste0(TMB_group, "_", mTIL_group))  %>%
+  group_by(quadrant) %>% add_count(quadrant, wt = Freq, name = "Total") %>%
+  mutate(quadrant_prop = round(Freq / Total, 2))
+
+quadrant_response_proportions %>%
+  write_csv2(here(output_dir, "quadrant_response_proportions_tmb_til.csv"))
+
+quadrant_response_proportions %>%
+  filter(Response == "R") %>%
+  rename(Response_rate = quadrant_prop) %>%
+  ggplot(aes(x = quadrant, y = Response_rate)) + geom_col() +
+  theme_Publication() + labs(x = "") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+quadrant_response_proportions
+
+quadrant_response_proportions %>%
+  select(quadrant, Response, Freq) %>%
+  pivot_wider(names_from = Response, values_from = Freq) %>%
+  column_to_rownames("quadrant") %>%
+  as.matrix() %>%
+  chisq.test()
+
+trial_quadrant_proportions <- table(
+  wes_rna_features_df_pre_f$TMB >= 10,
+  wes_rna_features_df_pre_f$TIL_score > median_til_score_pre,
+  wes_rna_features_df_pre_f$Trial) %>%
+  as.data.frame() %>%
+  setNames(c("TMB_group", "mTIL_group", "Trial", "Freq")) %>%
+  mutate(TMB_group = ifelse(TMB_group == TRUE, "TMB-H", "TMB-L")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  group_by(Trial) %>% add_count(Trial, wt = Freq, name = "Total") %>%
+  mutate(quadrant = paste0(TMB_group, "_", mTIL_group),
+         quadrant_prop = Freq / Total)
+  
+trial_quadrant_proportions %>%
+  select(quadrant, quadrant_prop, Trial) %>%
+  ggplot(aes(x = Trial, y = quadrant_prop, fill = quadrant)) +
+  geom_col() +
+  theme_Publication() +
+  coord_flip() +
+  labs(x = "", y = "", col = "") +
+  guides(fill = guide_legend(nrow = 2))
+
+quadrant_trial_proportions <- table(
+  wes_rna_features_df_pre_f$TMB >= 10,
+  wes_rna_features_df_pre_f$TIL_score > median_til_score_pre,
+  wes_rna_features_df_pre_f$Trial) %>%
+  as.data.frame() %>%
+  setNames(c("TMB_group", "mTIL_group", "Trial", "Freq")) %>%
+  mutate(TMB_group = ifelse(TMB_group == TRUE, "TMB-H", "TMB-L")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  mutate(quadrant = paste0(TMB_group, "_", mTIL_group)) %>%
+  group_by(quadrant) %>% add_count(quadrant, wt = Freq, name = "Total") %>%
+  mutate(quadrant_prop = Freq / Total)
+
+TMB_TIL_quadrant_trial_proportions_plot <- quadrant_trial_proportions %>%
+  ggplot(aes(x = quadrant, y = quadrant_prop, fill = Trial)) + geom_col() +
+  scale_fill_manual(values = trial_colors) +
+  theme_Publication() +
+  labs(x = "", y = "", col = "") +
+  guides(fill = guide_legend(nrow = 3)) +
+  coord_flip()
+
+graph2pdf(x = TMB_TIL_quadrant_trial_proportions_plot,
+          file = here(
+            output_dir, "_TMB_TIL_quadrant_trial_proportions_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 4,
+          width = 6)
+
+
+table(wes_rna_features_df_pre_f$Response)
+
+wes_rna_features_df_pre_f %>%
+  mutate(Response = ifelse(Response == "R",
+                           1, ifelse(Response == "NR", 0, NA))) %>%
+  pull(Response) %>% sum()
+
+```
+
+# TMB TIL score GLMer
+```{r, fig.height = 8, fig.width = 8}
+cor.test(wes_rna_features_df_pre_f$TMB,
+         wes_rna_features_df_pre_f$TIL_score)
+
+wes_rna_features_df_pre_f %>%
+  ggplot(aes(x = TMB_scaled, y = TIL_score_scaled)) +
+  geom_point() + theme_Publication() + stat_cor()
+
+wes_rna_features_df_pre_f %>%
+  ggplot(aes(x = TMB_scaled, y = TIL_score_scaled)) +
+  geom_point() + theme_Publication() +
+  stat_cor() + facet_wrap(~Trial, scales = "free")
+```
+
+# TIL score vs other signatures corr
+```{r, fig.height = 8, fig.width = 8}
+wes_rna_features_df_pre_f %>%
+  ggplot(aes(x = Ayers_T_cell_inflamed, y = TIL_score)) +
+  geom_point() + theme_Publication() + stat_cor()
+
+wes_rna_features_df_pre_f %>%
+  ggplot(aes(x = Ayers_T_cell_inflamed, y = TIL_score)) +
+  geom_point() + theme_Publication() +
+  stat_cor() + facet_wrap(~Trial, scales = "free")
+
+wes_rna_features_df_pre_f %>%
+  ggplot(aes(x = CXCL9, y = TIL_score)) +
+  geom_point() + theme_Publication() + stat_cor()
+
+wes_rna_features_df_pre_f %>%
+  ggplot(aes(x = CXCL9, y = TIL_score)) +
+  geom_point() + theme_Publication() +
+  stat_cor() + facet_wrap(~Trial, scales = "free")
+
+wes_rna_features_df_pre_f %>%
+  ggplot(aes(x = Immunologic_constant_of_rejection, y = TIL_score)) +
+  geom_point() + theme_Publication() + stat_cor()
+
+wes_rna_features_df_pre_f %>%
+  ggplot(aes(x = Immunologic_constant_of_rejection, y = TIL_score)) +
+  geom_point() + theme_Publication() +
+  stat_cor() + facet_wrap(~Trial, scales = "free")
+```
+
+## Fitting trials as random effects
+```{r}
+Trial_model <- glmer(Response_n ~ (1 | Trial),
+                     data = wes_rna_features_df_pre_f, family = binomial)
+summary(Trial_model)
+
+TMB_model <- glmer(Response_n ~ TMB_scaled +  (1 | Trial),
+                   data = wes_rna_features_df_pre_f, family = binomial)
+summary(TMB_model)
+        
+TIL_model <- glmer(Response_n ~ TIL_score_scaled +  (1 | Trial),
+                   data = wes_rna_features_df_pre_f, family = binomial)
+summary(TIL_model)
+TMB_TIL_score_model <- glmer(
+  Response_n ~ TMB_scaled + TIL_score_scaled + (1 | Trial),
+  data = wes_rna_features_df_pre_f, family = binomial)
+summary(TMB_TIL_score_model)
+
+TMB_TIL_int_score_model <- glmer(
+  Response_n ~ TMB_scaled * TIL_score_scaled + (1 | Trial),
+  data = wes_rna_features_df_pre_f, family = binomial)
+summary(TMB_TIL_int_score_model)
+
+summary(TMB_TIL_int_score_model)$coefficients %>% round(2)
+summary(TMB_TIL_int_score_model)$coefficients[, 4] %>% round(4)
+ranef(TMB_TIL_int_score_model)
+
+```
+
+# Likelihood ratio tests
+```{r}
+anova(TMB_TIL_score_model, TMB_TIL_int_score_model)
+anova(TMB_TIL_score_model, TMB_TIL_int_score_model, TMB_model)
+anova(TMB_TIL_score_model, TMB_TIL_int_score_model, TIL_model)
+```
+
+# ----------
+# Quadrant plots Proliferation TIL score
+
+```{r}
+# Not filtering for TMB paired samples
+median_Tumor_proliferation_rate_pre <- wes_rna_features_df_pre %>%
+  filter(Treatment == "Pre") %>%
+  pull(Tumor_proliferation_rate) %>%
+  median()
+median_Tumor_proliferation_rate_pre
+
+wes_rna_features_df_pre %>%
+  filter(Treatment == "Pre") %>% 
+  ggplot(aes(x = Tumor_proliferation_rate, y = TIL_score,
+             shape = Response, col = Trial)) +
+  geom_point() + theme_Publication() +
+  geom_vline(xintercept = median_Tumor_proliferation_rate_pre,
+             linetype = "dashed") +
+  geom_hline(yintercept = median_til_score_pre, linetype = "dashed") +
+  scale_color_manual(values = trial_colors) +
+  guides(col = guide_legend(nrow = 3))
+
+prolif_TIL_quadrant_trial_plot <- wes_rna_features_df_pre %>%
+  ggplot(aes(x = Tumor_proliferation_rate, y = TIL_score,
+             shape = Response, col = Trial)) +
+  geom_point() + theme_Publication() +
+  geom_vline(xintercept = median_Tumor_proliferation_rate_pre,
+             linetype = "dashed") +
+  geom_hline(yintercept = median_til_score_pre, linetype = "dashed") +
+  scale_color_manual(values = trial_colors) +
+  guides(col = guide_legend(nrow = 3)) + facet_wrap(~Response) +
+  scale_color_manual(values = trial_colors)
+
+prolif_TIL_quadrant_trial_plot
+
+trial_quadrant_proportions <- table(
+  wes_rna_features_df_pre$Tumor_proliferation_rate > median_Tumor_proliferation_rate_pre, 
+  wes_rna_features_df_pre$TIL_score > median_til_score_pre,
+  wes_rna_features_df_pre$Trial) %>%
+  as.data.frame() %>%
+  setNames(c("Prolif_group", "mTIL_group", "Trial", "Freq")) %>%
+  mutate(Prolif_group = ifelse(Prolif_group == TRUE,
+                               "Prolif_high", "Prolif_low")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  group_by(Trial) %>% add_count(Trial, wt = Freq, name = "Total") %>%
+  mutate(quadrant = paste0(Prolif_group, "_", mTIL_group),
+         quadrant_prop = Freq / Total)
+  
+dim(wes_rna_features_df_pre)
+table(wes_rna_features_df_pre$Response)
+
+quadrant_response_proportions <- table(
+  wes_rna_features_df_pre$Tumor_proliferation_rate > median_Tumor_proliferation_rate_pre,
+  wes_rna_features_df_pre$TIL_score > median_til_score_pre,
+  wes_rna_features_df_pre$Response) %>%
+  as.data.frame() %>%
+  setNames(c("Prolif_group", "mTIL_group", "Response", "Freq")) %>%
+  mutate(Prolif_group = ifelse(Prolif_group == TRUE,
+                               "Prolif_high", "Prolif_low")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  mutate(quadrant = paste0(Prolif_group, "_", mTIL_group))  %>%
+  group_by(quadrant) %>% add_count(quadrant, wt = Freq, name = "Total") %>%
+  mutate(quadrant_prop = round(Freq / Total, 2))
+
+quadrant_response_proportions
+
+quadrant_response_proportions %>%
+  select(quadrant, Response, Freq) %>%
+  pivot_wider(names_from = Response, values_from = Freq) %>%
+  column_to_rownames("quadrant") %>%
+  as.matrix() %>%
+  chisq.test()
+
+quadrant_response_proportions %>%
+  filter(Response == "R") %>%
+  rename(Response_rate = quadrant_prop) %>%
+  ggplot(aes(x = quadrant, y = Response_rate)) + geom_col() +
+  theme_Publication() + labs(x = "") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+```
+
+```{r}
+wes_rna_features_df_pre %>%
+  filter(TIL_score < median_til_score_pre) %>%
+  n_distinct()
+
+wes_rna_features_df_pre %>%
+  filter(TIL_score >= median_til_score_pre) %>%
+  n_distinct()
+
+table(
+  wes_rna_features_df_pre$Tumor_proliferation_rate > median_Tumor_proliferation_rate_pre,
+  wes_rna_features_df_pre$TIL_score > median_til_score_pre)
+
+trial_quadrant_proportions <- table(
+  wes_rna_features_df_pre$Tumor_proliferation_rate > median_Tumor_proliferation_rate_pre,
+  wes_rna_features_df_pre$TIL_score > median_til_score_pre,
+  wes_rna_features_df_pre$Trial) %>%
+  as.data.frame() %>%
+  setNames(c("Prolif_group", "mTIL_group", "Trial", "Freq")) %>%
+  mutate(Prolif_group = ifelse(Prolif_group == TRUE,
+                               "Prolif_high", "Prolif_low")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  group_by(Trial) %>% add_count(Trial, wt = Freq, name = "Total") %>%
+  mutate(quadrant = paste0(Prolif_group, "_", mTIL_group),
+         quadrant_prop = Freq / Total)
+  
+trial_quadrant_proportions
+
+trial_quadrant_proportions %>% select(quadrant, quadrant_prop, Trial) %>%
+  ggplot(aes(x = Trial, y = quadrant_prop, fill = quadrant)) +
+  geom_col() +
+  theme_Publication() +
+  coord_flip() +
+  labs(x = "", y = "", col = "") +
+  guides(fill = guide_legend(nrow = 2))
+
+quadrant_trial_proportions <- table(
+  wes_rna_features_df_pre$Tumor_proliferation_rate > median_Tumor_proliferation_rate_pre,
+  wes_rna_features_df_pre$TIL_score > median_til_score_pre,
+  wes_rna_features_df_pre$Trial) %>%
+  as.data.frame() %>%
+  setNames(c("Prolif_group", "mTIL_group", "Trial", "Freq")) %>%
+  mutate(Prolif_group = ifelse(Prolif_group == TRUE,
+                               "Prolif_high", "Prolif_low")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  mutate(quadrant = paste0(Prolif_group, "_", mTIL_group))  %>%
+  group_by(quadrant) %>% add_count(quadrant, wt = Freq, name = "Total") %>%
+  mutate(quadrant_prop = Freq / Total)
+
+quadrant_response_proportions <- table(
+  wes_rna_features_df_pre$Tumor_proliferation_rate > median_Tumor_proliferation_rate_pre,
+  wes_rna_features_df_pre$TIL_score > median_til_score_pre,
+  wes_rna_features_df_pre$Response) %>%
+  as.data.frame() %>%
+  setNames(c("Prolif_group", "mTIL_group", "Response", "Freq")) %>%
+  mutate(Prolif_group = ifelse(Prolif_group == TRUE,
+                               "Prolif_high", "Prolif_low")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  mutate(quadrant = paste0(Prolif_group, "_", mTIL_group))  %>%
+  group_by(quadrant) %>% add_count(quadrant, wt = Freq, name = "Total") %>%
+  mutate(quadrant_prop = round(Freq / Total, 2))
+
+quadrant_response_proportions
+
+quadrant_response_proportions %>%
+  write_csv2(here(output_dir, "quadrant_response_proportions_prolif_til.csv"))
+
+prolif_TIL_quadrant_trial_proportions_plot <- quadrant_trial_proportions %>%
+  ggplot(aes(x = quadrant, y = quadrant_prop, fill = Trial)) + geom_col() +
+  scale_fill_manual(values = trial_colors) + theme_Publication() +
+  labs(x = "", y = "", col = "") +
+  guides(fill = guide_legend(nrow = 3)) +
+  coord_flip()
+  
+graph2pdf(x = prolif_TIL_quadrant_trial_proportions_plot,
+          file = here(
+            output_dir, "_prolif_TIL_quadrant_trial_proportions_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 4,
+          width = 6)
+
+trial_quadrant_proportions %>%
+  select(quadrant, quadrant_prop, Trial) %>%
+  ggplot(aes(x = Trial, y = quadrant_prop, fill = quadrant)) +
+  geom_col() +
+  theme_Publication() +
+  coord_flip() +
+  labs(x = "", y = "", col = "") +
+  guides(fill = guide_legend(nrow = 2))
+
+wes_rna_features_df_pre %>% 
+  ggplot(aes(x = Tumor_proliferation_rate, y = TIL_score,
+             shape = Response, col = Trial)) +
+  geom_point() + theme_Publication() + facet_wrap(~Response) +
+  scale_color_manual(values = trial_colors)
+
+wes_rna_features_df_pre %>% 
+  ggplot(aes(x = Tumor_proliferation_rate, y = TIL_score,
+             shape = Response, col = Trial)) +
+  geom_point() + theme_Publication() + facet_wrap(~Response) +
+  scale_color_manual(values = trial_colors)
+
+wes_rna_features_df_pre %>%
+  ggplot(aes(x = TIL_score, y = Ayers_T_cell_inflamed)) +
+  geom_point() + theme_Publication()
+
+
+```
+
+# Prolif TIL score GLMer
+## Fitting trials as random effects
+```{r}
+Trial_model <- glmer(Response_n ~ (1 | Trial),
+                     data = wes_rna_features_df_pre, family = binomial)
+summary(Trial_model)
+ranef(Trial_model)
+
+Proliferation_model <- glmer(Response_n ~ Proliferation_scaled + (1 | Trial),
+                             data = wes_rna_features_df_pre, family = binomial)
+summary(Proliferation_model)
+        
+TIL_model <- glmer(Response_n ~ TIL_score_scaled + (1 | Trial),
+                   data = wes_rna_features_df_pre, family = binomial)
+summary(TIL_model)
+
+Proliferation_TIL_score_model <- glmer(
+  Response_n ~ Proliferation_scaled + TIL_score_scaled + (1 | Trial),
+  data = wes_rna_features_df_pre, family = binomial)
+summary(Proliferation_TIL_score_model)
+
+ranef(Proliferation_TIL_score_model)
+summary(Proliferation_TIL_score_model)$coefficients %>% round(2)
+summary(Proliferation_TIL_score_model)$coefficients[, 4] %>% round(4)
+
+Proliferation_TIL_int_score_model <- glmer(
+  Response_n ~ Proliferation_scaled * TIL_score_scaled + (1 | Trial),
+  data = wes_rna_features_df_pre, family = binomial)
+summary(Proliferation_TIL_int_score_model)
+ranef(Proliferation_TIL_int_score_model)
+```
+
+## Likelihood ratio tests - nested models
+```{r}
+anova(Proliferation_TIL_int_score_model, Proliferation_TIL_score_model,
+      Proliferation_model)
+anova(Proliferation_TIL_int_score_model, Proliferation_TIL_score_model,
+      TIL_model)
+```
+
+# ----------
+# Lint script
+```{r}
+# lint("~/NKI_pancancer_neoadj_io/src/pancan_glmer_sensitivity.Rmd")
+lint(filename = "~/NKI_pancancer_neoadj_io/src/pancan_glmer_sensitivity.Rmd",
+  linters = unused_import_linter()
+)
+```
+
+# ----------
+# sessionInfo - Package Versions
+```{r sessionInfo}
+sessionInfo()
+```

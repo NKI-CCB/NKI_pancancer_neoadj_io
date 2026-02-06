@@ -1,0 +1,1008 @@
+---
+title: "Pancan WES RNA integration"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+params:
+  export: TRUE
+  output_dir: "WES_RNA_integration"
+  metadata: "combined_rna_metadata.csv"
+---
+
+Author comment:
+File description comment:
+The purpose of this script is to integrate genomics and transcriptomic features, and explore correlations
+
+# Loading Packages
+```{r, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning = FALSE, message = FALSE, dpi = 300, error = TRUE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# Install if necessary install.packages("BiocManager")
+# Install if necessary BiocManager::install("fgsea")
+source("helper_functions.R")
+using_packages("caret", "fmsb", "ggExtra", "rpart.plot")
+using_bioconductor_packages("ReactomeContentService4R")
+
+library(Matrix)
+library(tidyverse)
+library(ggrepel)
+library(here)
+library(pheatmap)
+library(DESeq2)
+library(paletteer)
+library(ggpubr)
+library(rstatix)
+library(corrplot)
+library(ggalluvial)
+library(biomaRt)
+library(plotly)
+
+set.seed(42)
+select <- dplyr::select
+rename <- dplyr::rename
+here <- here::here
+```
+
+# Function definitions
+```{r}
+# Function to extract correlation coefficient and p-values
+corr_func <- function(var1, var2, data) {
+  res = cor.test(data[,var1], data[,var2])
+  tidy(res) %>% mutate(var1 = var1, var2 = var2)
+}
+
+# Volcano plot function with nominal p-values
+make_volcano_plot <- function(
+  dataset, output_filename, alpha_threshold = 0.01, log2fcthresh = 1,
+  export = TRUE, width = 6, height = 4) {
+
+   dataset <- dataset %>% mutate(
+  within_threshold = (pvalue < alpha_threshold &
+                        abs(log2FoldChange) > log2fcthresh))
+
+  plot <- dataset %>% ggplot(
+  aes(x = log2FoldChange, y = -log10(pvalue + 1e-300), shape = pvalue > 0.01)) +
+  geom_point(alpha = 0.8) +
+  geom_vline(xintercept = 0, col = "black") +
+  geom_vline(xintercept = c(-log2fcthresh, log2fcthresh), col = "red") +
+    geom_hline(yintercept = -log10(alpha_threshold), colour = "red") +
+  geom_text_repel(
+  aes(x = log2FoldChange, y = -log10(pvalue + 1e-300), label = gene),
+  data = dataset %>% filter(within_threshold), colour = "grey20",
+  min.segment.length = 0) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(
+    title = "Volcano plot Deseq2 Wald",
+    x = "Effect size: log2 (fold-change)",
+    y = "-log10 (p-value)",
+    shape = "p-value > 0.01"
+  )  +
+    scale_color_gradient2(low = "red", mid = "gray",
+                          high = "blue", midpoint = 1) +
+    theme_Publication()
+
+  print(plot)
+
+  if (export) {
+  ggsave(plot = plot, file = here(output_dir, output_filename),
+         width = width, height = height, dpi = 300)
+  }
+}
+
+get_filter_uniprot_id <- function(genes, uniprot_map) {
+  gene_df <- as.data.frame(genes) %>% setNames("gene")
+  
+  gene_df <- gene_df %>%
+    select(gene) %>%
+    filter(str_detect(gene, "ENSG")) %>%
+    left_join(uniprot_map %>% rename(gene = ensembl_gene_id) %>%
+              select(-hgnc_symbol)) %>%
+  rbind(
+gene_df %>%
+  select(gene) %>%
+  filter(!str_detect(gene, "ENSG")) %>%
+  left_join(uniprot_map %>% rename(gene = hgnc_symbol) %>%
+              select(-ensembl_gene_id))) %>%
+  unique()
+
+duplicates <- table(gene_df$gene) %>%
+  as.data.frame() %>%
+  filter(Freq > 1)
+
+gene_df <- gene_df %>%
+  filter(!is.na(uniprotswissprot) | ! gene %in% duplicates$Var1)
+
+gene_df
+
+}
+
+calc_stat_mut <- function(data, treatment,
+                              contrast, current_gene_signature) {
+
+  timepoint_mut <- data[data$Treatment == treatment &
+                              data$Mutation == TRUE,
+                              current_gene_signature]
+
+  mean_mut <- mean(timepoint_mut)
+  sd_mut <- sd(timepoint_mut)
+  median_mut <- median(timepoint_mut)
+  n_mut <- length(timepoint_mut)
+
+  timepoint_wt <- data[data$Treatment == treatment &
+                              data$Mutation == FALSE,
+                              current_gene_signature]
+
+  mean_wt <- mean(timepoint_wt)
+  sd_wt <- sd(timepoint_wt)
+  median_wt <- median(timepoint_wt)
+  n_wt <- length(timepoint_wt)
+
+  wilcoxon_test <- wilcox.test(timepoint_mut, timepoint_wt,
+                               alternative = "two.sided")
+  n_total <- n_mut + n_wt
+
+  stat_df <- wilcoxon_test %>%
+    broom::tidy() %>%
+    mutate(
+    "contrast" = contrast,
+    "signature" = current_gene_signature,
+    "n" = n_total,
+    "mean_mut" = mean_mut,
+    "sd_mut" = sd_mut,
+    "median_mut" = median_mut,
+    "n_mut" = n_mut,
+    "mean_wt" = mean_wt,
+    "sd_wt" = sd_wt,
+    "median_wt" = median_wt,
+    "n_wt" = n_wt)
+
+  return(stat_df)
+}
+
+calc_stat_groups <- function(data, treatment, column, group1, group2,
+                              contrast, current_gene_signature) {
+
+  timepoint_group1 <- data[data$Treatment == treatment &
+                              data[, column] == group1,
+                              current_gene_signature, drop = TRUE]
+
+  mean_group1 <- mean(timepoint_group1)
+  sd_group1 <- sd(timepoint_group1)
+  median_group1 <- median(timepoint_group1)
+  n_group1 <- length(timepoint_group1)
+  
+  timepoint_group2 <- data[data$Treatment == treatment &
+                              data[, column] == group2,
+                              current_gene_signature, drop = TRUE]
+
+  mean_group2 <- mean(timepoint_group2)
+  sd_group2 <- sd(timepoint_group2)
+  median_group2 <- median(timepoint_group2)
+  n_group2 <- length(timepoint_group2)
+  
+  wilcoxon_test <- wilcox.test(timepoint_group1, timepoint_group2,
+                               alternative = "two.sided")
+  n_total <- n_group1 + n_group2
+
+  stat_df <- wilcoxon_test %>%
+    broom::tidy() %>%
+    mutate(
+    "contrast" = contrast,
+    "group1" = group1,
+    "group2" = group2,
+    "signature" = current_gene_signature,
+    "n" = n_total,
+    "mean_group1" = mean_group1,
+    "sd_group1" = sd_group1,
+    "median_group1" = median_group1,
+    "n_group1" = n_group1,
+    "mean_group2" = mean_group2,
+    "sd_group2" = sd_group2,
+    "median_group2" = median_group2,
+    "n_group2" = n_group2)
+
+  return(stat_df)
+}
+
+print_stat_groups <- function(data){
+  print(data[1, ] %>%
+          mutate(p.value = FormatDecimals(p.value),
+                 "n [group1/2]" = sprintf("%s [%s/%s]",
+                                      n, n_group1, n_group2),
+                 "Mean (SD) group1" = sprintf(
+                   "%s (%s)", FormatDecimals(mean_group1),
+                   FormatDecimals(sd_group1)),
+                 "Median group1" = FormatDecimals(median_group1),
+                 "Mean (SD) group2" = sprintf(
+                   "%s (%s)", FormatDecimals(mean_group2),
+                   FormatDecimals(sd_group2)),
+                 "Median group2" = FormatDecimals(
+                   median_group2)) %>%
+          select(c("statistic", "p.value", "contrast", "n [group1/2]",
+                   "Mean (SD) group1", "Mean (SD) group2",
+                   "Median group1", "Median group2")) %>%
+          rbind(
+            data[2, ] %>%
+          mutate(p.value = FormatDecimals(p.value),
+                 "n [group1/2]" = sprintf("%s [%s/%s]",
+                                      n, n_group1, n_group2),
+                 "Mean (SD) group1" = sprintf(
+                   "%s (%s)", FormatDecimals(mean_group1),
+                   FormatDecimals(sd_group1)),
+                 "Median group1" = FormatDecimals(median_group1),
+                 "Mean (SD) group2" = sprintf(
+                   "%s (%s)", FormatDecimals(mean_group2),
+                   FormatDecimals(sd_group2)),
+                 "Median group2" = FormatDecimals(
+                   median_group2)) %>%
+          select(c("statistic", "p.value", "contrast", "n [group1/2]",
+                   "Mean (SD) group1", "Mean (SD) group2",
+                   "Median group1", "Median group2"))
+          ) %>%
+          knitr::kable())
+}
+  
+```
+
+# Setup output folder
+```{r Setup, echo = FALSE, include = FALSE}
+export <- params$export
+
+# generate output directory
+output_dir <- here("data", "processed", params$output_dir)
+print(output_dir)
+
+signature_dir <- here("data", "processed", "gene_signatures")
+wes_dir <- here("data", "processed", "WES_analysis")
+wes_rna_dir <- here("data", "processed", "WES_RNA_integration")
+
+# if output_dir does not exist, create it
+if (!dir.exists(output_dir)) {
+    dir.create(output_dir)
+} else {
+  print("Output folder already exists")
+}
+
+```
+
+# ----------
+# Load RNAseq data
+```{r}
+rna_metadata <- read_csv2(
+  here("data", "processed", "metadata", params$metadata))
+
+analyze_specific_trial <- ""
+if (analyze_specific_trial != ""){
+  rna_metadata <- rna_metadata %>% filter(Trial == analyze_specific_trial)
+}
+
+rna_metadata <- rna_metadata %>%
+  mutate(
+      Treatment = factor(Treatment, levels = c("Pre", "Post")),
+      CF_sample = as.factor(CF_sample),
+      Trial = as.factor(Trial),
+      Response = as.factor(Response),
+      Response_detail = as.factor(Response_detail),
+      MSI_MSS = as.factor(MSI_MSS),
+      BRAF = as.factor(BRAF))
+
+rna_metadata %>% mutate_if(is.character, as.factor) %>% summary()
+
+df_counts <- read_csv2(here("data", "processed", "rnaseq_data",
+                             "combined_rnaseq_counts_p.csv")) %>%
+  column_to_rownames("gene")
+
+# Remove genes with all zero counts, might be detected in specific trials only
+df_counts <- df_counts[, colnames(df_counts) %in%
+                          rna_metadata$CF_sample]
+df_counts <- df_counts[rowSums(df_counts) != 0, ]
+ 
+rpm_counts <- read_csv2(here("data", "processed", "rnaseq_data",
+                             "combined_rnaseq_rpm.csv")) %>%
+  column_to_rownames("gene")
+
+unique_patient_id <- rna_metadata %>% select(Trial, Patient) %>% unique()
+ 
+paired_samples <- table(rna_metadata$Patient, rna_metadata$Treatment) %>%
+  as.data.frame() %>%
+  setNames(c("Patient", "Treatment", "Freq")) %>%
+  pivot_wider(values_from = Freq, names_from = Treatment) %>%
+  filter(Pre == 1 & Post == 1) %>%
+  left_join(unique_patient_id)
+
+histology_df <- data.frame(
+  Trial = c("BELLINI", "IMCISION", "NABUCCO", "NICHE-MSS", "NICHE-MSI",
+            "OpACIN_neo", "PRADO", "MATISSE"),
+  Histology = c("TBNC", "HNSCC", "Urothelial", "Colon", "Colon",
+                "LN_melanoma", "LN_melanoma", "cSCC"))
+
+# Triple Negative Breast cancer, Head and Neck Squamous Cell Carcinoma,
+# Urothelial Carcinoma (UC), Colon cancer (CC), 
+# cutaneous squamous cell carcinoma (CSCC) 
+
+annot_df <- rna_metadata %>%
+  tibble::column_to_rownames("CF_sample") %>%
+  select(Treatment, Response) %>%
+  mutate_if(is.numeric, as.factor)
+
+# create colours for each group
+annotation_color = list(
+  Response = c(NR = "#F8766D", R = "#00BA38"),
+  Treatment = c(Pre = "#F564E3", Post = "#619CFF"),
+  Histology = c(LN_melanoma = "#00BFC4", Urothelial = "#F564E3",
+                Colon = "#F8766D", HNSCC = "#00BA38", TBNC = "#619CFF",
+                cSCC = "#CD9600"))
+  
+df_counts <- df_counts[, colnames(df_counts) %in%
+                          rna_metadata$CF_sample]
+
+sample_names <- colnames(rpm_counts)
+z_norm <- t(apply(
+  as.matrix(rpm_counts), 1,
+                  function(x) scale(x, center = TRUE, scale = TRUE)))
+
+colnames(z_norm) <- sample_names
+
+
+dds <- DESeqDataSetFromMatrix(
+  countData = df_counts[, colnames(df_counts) %in%
+                          rna_metadata$CF_sample],
+  colData = rna_metadata %>% filter(CF_sample %in% colnames(df_counts)),
+  design = ~1
+)
+
+vsd <- vst(dds, blind = FALSE)
+
+```
+
+# Annotation color
+```{r}
+
+# Define colours for each group
+Color_NR <- "#F8766D"
+Color_R <- "#00BA38" # "#619CFF"
+Color_NA <- "#CD9600"
+Color_Pre <- "#619CFF"
+Color_Post <- "#F564E3"
+Color_Depleted <- "#7CAE00"
+Color_Fibrotic <- "#00BFC4"
+Color_Inflamed_fibrotic <- "#C77CFF"
+Color_Inflamed_non_fibrotic <- "#F8766D"
+Color_HNSCC <- "#009292"
+Color_CSCC <- "#CD9600"
+Color_Urothelial <- "#B66DFF"
+Color_LN_melanoma <- "#00BFC4"
+Color_Colon <- "#F8766D"
+Color_Colon_MSI <- "#B73A3A"
+Color_Colon_MSS <- "#23C26F"
+Color_TNBC <- "#FEB5DA"
+Color_BELLINI <- "#FEB5DA"
+Color_IMCISION <- "#009292"
+Color_MATISSE <- "#CD9600"
+Color_NABUCCO <- "#B66DFF"
+Color_BELLINI <- "#FEB5DA"
+Color_NICHE_MSS <- "#23C26F"
+Color_NICHE_MSI <- "#B73A3A"
+Color_OpACIN_neo <- "#00BFC4"
+Color_PRADO <- "#619CFF"
+
+
+cosmic_colors <- c(Aflatoxin = "#d0e0e3", Aging = "#3d85c6", APOBEC = "#674ea7",
+                   Aristolochic_acid = "#d9d2e9", dMMR = "#B73A3A",
+                   HRD = "#e69138", Other = "#cccccc", POL1 = "#cc0000",
+                   POLE_POLD1 = "#5b0f00", POLH = "#FEB5DA", ROS = "#6DB6FF",
+                   SBS5 = "#ea9999", Smoking = "#38761d", TMZ = "#b5a7d6",
+                   Tobacco_chewing = "#6aa84f", UV = "#f1c232")
+
+annotation_color_list = list(
+  Response = c(NR = Color_NR, R = Color_R),
+  Treatment = c(Pre = Color_Pre, Post = Color_Post),
+  Histology = c(LN_melanoma = Color_LN_melanoma, Urothelial = Color_Urothelial,
+                Colon = Color_Colon, HNSCC = Color_HNSCC, TBNC = Color_TNBC,
+                cSCC = Color_CSCC),
+  Trial = c(BELLINI = Color_BELLINI, IMCISION = Color_IMCISION,
+            MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
+            `NICHE-MSS` = Color_NICHE_MSS, `NICHE-MSI` = Color_NICHE_MSI,
+            OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO))
+
+trial_colors <- c(BELLINI = Color_BELLINI, IMCISION = Color_IMCISION,
+            MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
+            `NICHE-MSS` = Color_NICHE_MSS, `NICHE-MSI` = Color_NICHE_MSI,
+            OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO)
+
+trial_colors_combined <- c(Combined = "#999999", BELLINI = Color_BELLINI, IMCISION = Color_IMCISION,
+            MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
+            `NICHE-MSS` = Color_Colon_MSS, `NICHE-MSI` = Color_NICHE_MSI,
+            OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO)
+
+Bagaev_tme_colors <- c(Color_Depleted, Color_Fibrotic,
+                       Color_Inflamed_fibrotic, Color_Inflamed_non_fibrotic)
+
+histology_msi_mss_colors <- c(`Colon-MSI`= Color_Colon_MSI, `Colon-MSS`= Color_Colon_MSS,
+                              CSCC = Color_CSCC, HNSCC = Color_HNSCC, 
+                              LN_melanoma = Color_LN_melanoma, TBNC = Color_TNBC,
+                              Urothelial = Color_Urothelial)
+
+```
+
+# Load WES data
+```{r}
+wes_features_df <- read_csv2(here(wes_dir, "wes_features_df.csv"))
+
+wes_features_df <- wes_features_df %>%
+  mutate(dMMR = MLH1 + PMS2 + MSH2 + MSH6 > 0 | Trial == "NICHE-MSI")  %>%
+  relocate(c(Trial, Response, Variants, TMB), .after = Patient)
+
+dmmr_samples <- wes_features_df %>%
+  select(Patient, Response, dMMR, MLH1, PMS2, MSH2, MSH6, Trial) %>%
+  filter(dMMR)
+table(dmmr_samples$Trial)
+table(dmmr_samples$Trial, dmmr_samples$Response)
+
+table(wes_features_df$dMMR,
+      wes_features_df$Response)
+
+```
+
+# ----------
+# Load gene sets
+```{r Load msigdb hallmarks, echo = FALSE}
+gene_signatures <- read_csv2(
+  here("data", "processed", "signatures", "gene_signatures.csv")) %>%
+  filter(!is.na(Gene))
+
+gene_signatures_l <- split(
+  gene_signatures$Gene, gene_signatures$Signature)
+gene_signatures_l <- gene_signatures_l[gene_signatures$Signature %>% unique()]
+
+print(knitr::kable(gene_signatures %>%
+        select(Signature, Class, Geneset_size) %>%
+        unique()), n = n_distinct(gene_signatures$Signature))
+
+signature_overview <- read_csv2(
+  here("data", "external", "signatures",
+       "_overview_of_signatures_20240702.csv"))
+
+signature_overview <- signature_overview %>%
+  filter(Include != "No")
+table(signature_overview$Meta_signature)
+
+gene_signatures_proliferation <- signature_overview %>%
+  filter(Meta_signature == "Proliferation_metabolic" & Geneset_size > 1)
+
+gene_signatures_tgfb <- signature_overview %>%
+  filter(Meta_signature == "TGF_B_signaling" & Geneset_size > 1)
+
+gene_signatures_immune <- signature_overview %>%
+  filter(Immune_related == "Yes" & Geneset_size > 1)
+
+danaher_sigs <- signature_overview %>% filter(Ref == "Danaher et al. 2017")
+
+gene_features <- read.csv2(
+  file = here("data", "external", "biomaRt_gene_features.csv"))
+
+gene_descriptions <- gene_features %>%
+              select(hgnc_symbol, description) %>%
+              rename("gene" = "hgnc_symbol") %>%
+              unique()
+
+gene_features_ptn <- read_csv2(
+  here("data", "external", "biomaRt_gene_protein_features.csv"))
+
+gene_features_ptn_unique <- gene_features_ptn %>%
+  select(ensembl_gene_id, hgnc_symbol, uniprotswissprot) %>%
+  unique()
+
+msigdb_hallmarks_set <- read.csv2(
+  file = here("data", "external", "signatures", "msigdb_hallmarks_set.csv"))
+msigdb_hallmarks_set <- split(
+  msigdb_hallmarks_set$gene_symbol, msigdb_hallmarks_set$gs_name)
+
+msigdb_hallmarks_names <- read.csv2(
+  file = here("data", "external", "signatures", "names_hallmarks.csv"))
+
+nanostring_immune_genes <- read_delim(
+  here("data", "external", "Immune_related_genes.txt"),
+  col_names = FALSE, delim ="\t") %>% setNames("Gene")
+```
+# ----------
+# ssGSEA
+```{r, echo = TRUE, fig.height = 30, fig.width = 30}
+gene_signatures_ssgsea <- gene_signatures %>% filter(use_ssgsea)
+
+gene_signatures_ssgsea_l <- split(
+  gene_signatures_ssgsea$Gene, gene_signatures_ssgsea$Signature)
+
+ssgsea_results <- read_csv2(here(signature_dir, "ssgsea_results.csv")) %>%
+  column_to_rownames("Signature")
+
+rpm_results <- read_csv2(here(signature_dir, "signature_rpm_data.csv")) 
+
+ssgsea_results_df <- ssgsea_results %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("CF_sample") %>%
+  left_join(rna_metadata) %>%
+  rename(BRAF_status = BRAF)
+
+rna_metadata_pre <- rna_metadata %>%
+  filter(Treatment == "Pre") %>%
+  filter(CF_sample %in% colnames(rpm_counts))
+
+rpm_counts_pre <- rpm_counts %>%
+  select(rna_metadata_pre$CF_sample)
+
+rpm_counts_pre_t <- rpm_counts_pre %>% t() %>% as.data.frame()
+
+ssgsea_results_t <- ssgsea_results %>% t() %>% as.data.frame()
+
+```
+
+# ----------
+# Integrate annotations and export
+```{r}
+# colnames(wes_features_df)[!colnames(wes_features_df) %in% ssgsea_results_df]
+
+ssgsea_wes_results_df <- ssgsea_results_df %>%
+  left_join(wes_features_df %>%
+              select(
+                c("Patient",
+                  colnames(wes_features_df)[!colnames(wes_features_df) %in%
+                                              colnames(ssgsea_results_df)])))
+
+ssgsea_wes_results_df <- ssgsea_wes_results_df %>%
+  relocate(c(CF_sample_tumor, Patient, Trial, Response, Variants, TMB),
+           .after = CF_sample)
+
+# Filter duplicated 
+ssgsea_wes_results_df <- ssgsea_wes_results_df %>%
+  filter(!(CF_sample == "S7934Nr164" & CF_sample_tumor == "S7659Nr42")) %>%
+  filter(!(CF_sample == "S7934Nr166" & CF_sample_tumor == "S7659Nr43"))
+
+ssgsea_wes_results_df %>%
+  write_csv2(here(output_dir, "ssgsea_wes_results_df.csv"))
+
+ssgsea_wes_results_df <- read_csv2(
+  here(wes_rna_dir, "ssgsea_wes_results_df.csv"))
+
+wes_rna_features_df <- ssgsea_wes_results_df %>%
+  left_join(rpm_results %>%
+              select(c("CF_sample",
+                       colnames(rpm_results)[
+                         !colnames(rpm_results) %in%
+                           colnames(ssgsea_wes_results_df)])))
+
+wes_rna_features_df %>% write_csv2(here(output_dir,
+                                              "wes_rna_features_df.csv"))
+
+wes_rna_features_df <- read_csv2(here(output_dir,
+                                              "wes_rna_features_df.csv"))
+
+wes_rna_features_df_pre <- wes_rna_features_df %>%
+  filter(Treatment == "Pre")
+
+median_til_score_pre <- median(
+  wes_rna_features_df_pre$TIL_score)
+median_til_score_pre
+```
+
+# PCA structure on WES + ssGSEA features
+
+```{r}
+# colnames(wes_rna_features_df)
+pca_wes_features <- c("TMB", "Ploidy", "ploidy_WGD", "Aneuploidy_score",
+                      "GIE_IFNy", "GIE_AP")
+
+bagaev_signatures <- gene_signatures %>%
+  filter(Ref == "Bagaev et al. 2021")
+
+wes_rna_pca <- wes_rna_features_df %>%
+  select(all_of(c("CF_sample", pca_wes_features,
+                  unique(bagaev_signatures$Signature)))) %>%
+  mutate(GIE_IFNy = ifelse(GIE_IFNy == TRUE, 1, 0),
+         GIE_AP = ifelse(GIE_AP == TRUE, 1, 0),
+         ploidy_WGD = ifelse(ploidy_WGD == "WGD", 1,
+                             ifelse(ploidy_WGD == "not_WGD", 0, NA))) %>%
+  filter(!is.na(TMB))
+
+# PCA
+wes_rna_pca_z_norm <- wes_rna_pca %>% column_to_rownames("CF_sample") %>%
+  scale()
+pca <- prcomp(wes_rna_pca_z_norm)
+percent_var <- pca$sdev^2 / sum(pca$sdev^2)
+
+percent_var <- percent_var %>%
+  as.data.frame() %>%
+  setNames("Var_exp") %>%
+  rownames_to_column("PC") %>%
+  mutate(Cumvar = cumsum(Var_exp), PC = as.numeric(PC))
+
+percent_var %>%
+  filter(PC < 50) %>%
+  ggplot(aes(x = PC, y = Var_exp)) +
+  geom_col() +
+  geom_point(aes(x = PC, y = Cumvar)) +
+  labs(x = "Principal Component", y = "(Cumulative) Variance Explained") +
+  theme_Publication()
+
+percent_var_pc1 <- percent_var[1, 2] * 100
+percent_var_pc2 <- percent_var[2, 2] * 100
+percent_var_pc3 <- percent_var[3, 2] * 100
+
+n_pcs <- 20
+
+annot_df <- rna_metadata %>%
+  tibble::column_to_rownames("CF_sample") %>%
+  select(Treatment, Response, Trial)
+
+pca_heatmap <- pheatmap(t(pca$x[, 1:n_pcs]),
+         annotation_col = annot_df,
+         col = paletteer_d(palette = "RColorBrewer::RdYlBu", direction = -1),
+         show_colnames = FALSE,
+         cluster_rows = FALSE,
+         )
+print(pca_heatmap)
+
+save_pheatmap_pdf(x = pca_heatmap,
+                  filename = here(
+                    output_dir, "pca_pheatmap.pdf"),
+                  width = 8, height = 7)
+
+pca_data <- as.data.frame(pca$x) %>%
+  rownames_to_column("CF_sample") %>%
+  left_join(rna_metadata)
+  
+pca_data %>%
+  ggplot(aes(x = PC1, y = PC2, col = Treatment, shape = Response)) +
+  geom_point(size = 2.5) +
+  labs(x = sprintf("PC1: %s%% variance", round(percent_var_pc1, 2)),
+       y = sprintf("PC2: %s%% variance", round(percent_var_pc2, 2)),
+       col = "Response") +
+  theme_Publication()
+ggsave(file = file.path(output_dir, "pca_12_treatment_response.png"),
+       width = 5, height = 5, dpi = 300)
+
+pca_data %>%
+  ggplot(aes(x = PC1, y = PC2, col = Response, shape = Treatment)) +
+  geom_point(size = 2.5) +
+  labs(x = sprintf("PC1: %s%% variance", round(percent_var_pc1, 2)),
+       y = sprintf("PC2: %s%% variance", round(percent_var_pc2, 2)),
+       col = "Response") +
+  theme_Publication() +
+  facet_wrap(~Treatment)
+
+pca_data %>%
+  ggplot(aes(x = PC1, y = PC2, col = Response, shape = Treatment)) +
+  geom_point(size = 2.5) +
+  labs(x = sprintf("PC1: %s%% variance", round(percent_var_pc1, 2)),
+       y = sprintf("PC2: %s%% variance", round(percent_var_pc2, 2)),
+       col = "Response") +
+  theme_Publication() +
+  facet_wrap(~Trial, scales = "free")
+
+pca_data %>%
+  ggplot(aes(x = PC1, y = PC2, col = Trial, shape = Response)) +
+  geom_point(size = 2.5) +
+  labs(x = sprintf("PC1: %s%% variance", round(percent_var_pc1, 2)),
+       y = sprintf("PC2: %s%% variance", round(percent_var_pc2, 2)),
+       col = "Response") +
+  theme_Publication() +
+  facet_wrap(~Treatment) +
+  scale_color_manual(values = trial_colors) +
+  guides(col = guide_legend(nrow = 3))
+
+ggsave(file = file.path(output_dir, "pca_trial_response.png"),
+       width = 8, height = 6, dpi = 300)
+
+pca_data %>%
+  ggplot(aes(x = PC2, y = PC3, col = Trial, shape = Response)) +
+  geom_point(size = 2.5) +
+  labs(x = sprintf("PC2: %s%% variance", round(percent_var_pc2, 2) ),
+       y = sprintf("PC3: %s%% variance", round(percent_var_pc3, 2)),
+       col = "Response") +
+  theme_Publication() +
+  facet_wrap(~Treatment) +
+  scale_color_manual(values = trial_colors) +
+  guides(col = guide_legend(nrow = 3))
+
+pca_data %>% ggplot(aes(x = Response, y = PC1)) + geom_boxplot() +
+  facet_wrap(~Treatment) + theme_Publication()
+pca_data %>% ggplot(aes(x = Response, y = PC2)) + geom_boxplot() +
+  facet_wrap(~Treatment)+ theme_Publication()
+
+pca_data %>% write_csv2(here(output_dir, "pca_data_wes_rna.csv"))
+saveRDS(pca, here(output_dir, "pca_wes_rna.RDS"))
+
+```
+
+
+```{r, fig.height = 8, fig.width = 6}
+# Check the loadings
+loadings <- as.data.frame(pca$rotation) %>%
+  rownames_to_column("Bagaev_signature") %>%
+  arrange(PC1)
+
+loadings %>%
+  ggplot(aes(x = reorder(Bagaev_signature, PC1), y = PC1)) +
+  geom_col() +
+  coord_flip() +
+  labs(x = "PC1 Loadings") +
+  theme_Publication()
+
+loadings %>%
+  ggplot(aes(x = reorder(Bagaev_signature, PC2), y = PC2)) +
+  geom_col() +
+  coord_flip() +
+  labs(x = "PC2 Loadings") +
+  theme_Publication()
+```
+
+# ----------
+
+## Mutation association vs TIL scores
+```{r, fig.height = 10, fig.width = 10}
+ssgsea_wes_results_df %>%
+  ggplot(aes(x = as.factor(ap_mut), y = TIL_score, fill = ap_mut)) +
+  geom_boxplot() +
+  geom_point(aes(col = ap_mut)) +
+  theme_Publication() +
+  guides(col = FALSE)
+
+ssgsea_wes_results_df %>%
+  ggplot(aes(x = as.factor(ap_mut), y = TIL_score, fill = ap_mut)) +
+  geom_boxplot() +
+  geom_point(aes(col = ap_mut)) +
+  theme_Publication() +
+  guides(col = FALSE) +
+  facet_wrap(~Treatment)
+
+ssgsea_wes_results_df %>%
+  mutate(treatment_ap_mut = paste0(Treatment, ap_mut)) %>%
+  ggplot(aes(x = as.factor(treatment_ap_mut), y = TIL_score, fill = ap_mut)) +
+  geom_boxplot() +
+  geom_point(aes(col = Trial)) +
+  theme_Publication() +
+  guides(col = FALSE) +
+  facet_wrap(~Trial)
+
+ssgsea_wes_results_df %>%
+  ggplot(aes(x = as.factor(ap_mut), y = TIL_score, fill = ap_mut)) +
+  geom_boxplot() +
+  geom_point(aes(col = Trial)) +
+  theme_Publication() +
+  guides(col = FALSE) +
+  facet_wrap(~Trial)
+
+ssgsea_wes_results_df %>%
+  ggplot(aes(x = as.factor(ifn_mut), y = TIL_score, fill = ifn_mut)) +
+  geom_boxplot() +
+  geom_point(aes(col = ifn_mut)) +
+  theme_Publication() +
+  guides(col = FALSE)
+
+ssgsea_wes_results_df %>%
+  ggplot(aes(x = as.factor(ifn_mut), y = TIL_score, fill = ifn_mut)) +
+  geom_boxplot() +
+  geom_point(aes(col = Trial)) +
+  theme_Publication() +
+  guides(col = FALSE) +
+  facet_wrap(~Trial)
+
+
+ssgsea_wes_results_df %>%
+  ggplot(aes(x = as.factor(ifn_mut), y = TIL_score, fill = ifn_mut)) +
+  geom_boxplot() +
+  geom_point(aes(col = Trial)) +
+  theme_Publication() +
+  guides(col = FALSE) +
+  facet_wrap(~Trial)
+```
+
+# ----------
+# Correlations Spearman
+```{r, fig.height= 12, fig.width = 12}
+
+wes_rna_pca %>%
+  column_to_rownames("CF_sample") %>%
+  cor(use = "pairwise.complete.obs", method = "spearman") %>%
+  corrplot(order = "hclust")
+
+save_pheatmap_pdf(
+  x = wes_rna_pca %>%
+    column_to_rownames("CF_sample") %>%
+  cor(use = "pairwise.complete.obs", method = "spearman") %>%
+  corrplot(order = "hclust"),
+                  filename = here(
+                    output_dir,
+                    "wes_rna_pca_corplot.pdf"),
+                  width = 12, height = 12)
+
+wes_rna_cor_data <- wes_rna_features_df %>%
+  select(all_of(c("CF_sample", pca_wes_features, signature_overview %>%
+                    filter(Meta_analysis == "Yes") %>% pull(Signature)))) %>%
+  mutate(GIE_IFNy = ifelse(GIE_IFNy == TRUE, 1, 0),
+         GIE_AP = ifelse(GIE_AP == TRUE, 1, 0),
+         ploidy_WGD = ifelse(ploidy_WGD == "WGD", 1, ifelse(ploidy_WGD == "not_WGD", 0, NA))) %>%
+  filter(!is.na(TMB))
+
+wes_rna_cor_data %>%
+  column_to_rownames("CF_sample") %>%
+  cor(use = "pairwise.complete.obs", method = "spearman") %>%
+  corrplot(order = "hclust")
+
+wes_rna_cor_data_pre <- wes_rna_features_df %>%
+  select(all_of(c("CF_sample", "Treatment", pca_wes_features, signature_overview %>%
+                    filter(Meta_analysis == "Yes") %>% pull(Signature)))) %>%
+  mutate(GIE_IFNy = ifelse(GIE_IFNy == TRUE, 1, 0),
+         GIE_AP = ifelse(GIE_AP == TRUE, 1, 0),
+         ploidy_WGD = ifelse(ploidy_WGD == "WGD", 1, ifelse(ploidy_WGD == "not_WGD", 0, NA))) %>%
+  filter(!is.na(TMB)) %>%
+  filter(Treatment == "Pre") %>%
+  select(-Treatment)
+
+
+save_pheatmap_pdf(x = wes_rna_cor_data_pre %>%
+  column_to_rownames("CF_sample") %>%
+  cor(use = "pairwise.complete.obs", method = "spearman") %>%
+  corrplot(order = "hclust"),
+                  filename = here(
+                    output_dir,
+                    "wes_rna_meta_corplot_pre.pdf"),
+                  width = 12, height = 12)
+```
+
+
+```{r}
+ssgsea_wes_results_df %>%
+  ggplot(aes(x = ap_mut, y = TIL_score, fill = ap_mut)) +
+  geom_boxplot() +
+  geom_point(aes(col = ap_mut)) +
+  theme_Publication() +
+  guides(col = FALSE)
+
+ssgsea_wes_results_df %>%
+  ggplot(aes(x = ap_mut, y = TIL_score, col = Trial)) +
+  geom_boxplot() +
+  geom_point() +
+  theme_Publication() +
+  guides(col = FALSE)
+
+
+ssgsea_wes_results_df %>%
+  ggplot(aes(x = B2M, y = TIL_score, col = B2M)) +
+  geom_boxplot() +
+  geom_point() +
+  theme_Publication() +
+  guides(col = FALSE)
+
+ssgsea_wes_results_df %>%
+  ggplot(aes(x = TP53, y = TIL_score, col = TP53)) +
+  geom_boxplot() +
+  geom_point() +
+  theme_Publication() +
+  guides(col = FALSE)
+
+ssgsea_wes_results_df %>%
+  mutate(B2M = ifelse(B2M, "B2M mt", "B2M wt")) %>%
+  ggplot(aes(alluvium = Trial_nr, x = Treatment, stratum = mTIL)) +
+  geom_alluvium(color = "black") +
+  geom_stratum(color = "black", aes(fill = mTIL)) +
+  facet_wrap(~B2M) +
+  theme_Publication()
+
+ssgsea_wes_results_df %>%
+  mutate(TP53 = ifelse(TP53, "TP53 mt", "TP53 wt")) %>%
+  ggplot(aes(alluvium = Trial_nr, x = Treatment, stratum = mTIL)) +
+  geom_alluvium(color = "black") +
+  geom_stratum(color = "black", aes(fill = mTIL)) +
+  facet_wrap(~TP53) +
+  theme_Publication()
+
+```
+
+# ----------
+
+# TMB ssGSEA correlations
+```{r, fig.height = 15}
+ssgsea_tmb_results_m <- ssgsea_wes_results_df %>%
+  select(rownames(ssgsea_results_msi_mss), TMB) %>%
+  as.matrix()
+
+ssgsea_tmb_results_m %>%
+  cor(method = "spearman") %>%
+  corrplot(order = "hclust")
+
+# All MSS samples Pre
+ssgsea_tmb_results_pre_m <- ssgsea_wes_results_df %>%
+  filter(Treatment == "Pre") %>%
+  select(rownames(ssgsea_results_msi_mss), TMB) %>%
+  as.matrix()
+
+ssgsea_tmb_results_pre_m %>%
+  cor(method = "spearman") %>%
+  corrplot(order = "hclust")
+
+ssgsea_correlation <- ssgsea_tmb_results_pre_m %>%
+  cor(method = "spearman") %>%
+  as.data.frame() %>%
+  rownames_to_column("Signature")
+
+ssgsea_correlation %>%
+  filter(Signature != "TMB") %>%
+  ggplot(aes(x = reorder(Signature, TMB), y = TMB)) +
+  geom_col() +
+  coord_flip() +
+  theme_Publication() +
+  labs(x = "Signature", y = "TMB Spearman R")
+
+ssgsea_correlation %>%
+  write_csv2(here(output_dir, "tmb_spearman_mss_pre.csv"))
+
+save_pheatmap_pdf(x = ssgsea_tmb_results_pre_m %>%
+                    cor() %>%
+                    corrplot(order = "hclust"),
+                  filename = here(
+                    output_dir,
+                    "ssgsea_tmb_correlation_pre_mss_plot.pdf"),
+                  width = 28, height = 28)
+```
+
+# TMB Correlation Plots 
+```{r TMB Correlation Plots, fig.height = 6.5, fig.width = 8}
+
+tmb_top_corr <- ssgsea_correlation %>%
+  filter(Signature != "TMB") %>%
+  filter(select_top_extremes(TMB, 15))
+
+tmb_top_corr %>%
+  ggplot(aes(x = reorder(Signature, TMB), y = TMB)) +
+  geom_col() +
+  coord_flip() +
+  theme_Publication() +
+  labs(x = "Signature", y = "TMB Spearman R")
+
+combinations <- data.frame(Sig1 = "TMB",
+                           Sig2 = unique(gene_signatures$Signature))
+
+combinations <- combinations %>%
+  filter(Sig2 %in% colnames(ssgsea_wes_results_df)) %>%
+  filter(Sig2 %in% tmb_top_corr$Signature)
+
+for (i in seq_len(nrow(combinations))) {
+
+  plot <- ssgsea_wes_results_df %>%
+  ggplot(aes_string(
+    x = combinations[i, "Sig1"],
+    y = combinations[i, "Sig2"],
+    shape = "Treatment")) +
+  geom_point(aes(col = Response), size = 2.5) +
+  geom_smooth(method = "lm") +
+  facet_wrap(~Treatment)  +
+  theme_Publication()
+  print(plot)
+}
+```
+
+
+# ----------
+# Lint script
+```{r}
+# lint("~/NKI_pancancer_neoadj_io/src/pancan_WES_RNA_integration.Rmd")
+lint(filename = "~/NKI_pancancer_neoadj_io/src/pancan_WES_RNA_integration.Rmd",
+  linters = unused_import_linter()
+)
+```
+
+
+# ----------
+
+# sessionInfo - Package Versions
+```{r sessionInfo}
+sessionInfo()
+```

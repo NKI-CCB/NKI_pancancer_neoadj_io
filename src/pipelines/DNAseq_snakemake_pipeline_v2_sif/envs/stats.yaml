@@ -1,0 +1,8 @@
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - multiqc=1.12.0
+  - fastqc=0.11.9
+  - qualimap=2.2.2

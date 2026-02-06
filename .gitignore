@@ -1,0 +1,15 @@
+data/
+exploratory/
+output_sc/
+references/
+reports/
+src/*.html
+.RData
+.Rhistory
+.Rproj.user/
+.Rprofile
+renv/
+pancancer_neoadj_io.Rproj
+renv_manage_dependencies.Rmd
+snakemake_placeholder
+src/pipelines/RNAseq_snakemake_pipeline_v2_1/sif/*
