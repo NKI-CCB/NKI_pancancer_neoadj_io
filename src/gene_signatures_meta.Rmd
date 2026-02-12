@@ -12,6 +12,7 @@ params:
   analyze_specific_trial: ""
   run_meta_analysis: TRUE
   generate_heatmaps: TRUE
+  use_demo: TRUE
 ---
 
 Author comment:
@@ -65,6 +66,12 @@ print(output_dir)
 output_dir_plots <- here(output_dir, "plots")
 
 data_dir <- here("data", "processed")
+
+if (params$use_demo) {
+  # data_dir <- here("data", "processed_demo")
+  input_dir <- "processed_demo"
+}
+
 combined_dir <- here(data_dir, "gene_signatures")
 
 # if output_dir does not exist, create it
@@ -80,12 +87,12 @@ if (!dir.exists(output_dir)) {
 # ----------
 # Load RNAseq data
 ```{r load rnaseq data, include = TRUE}
-df_counts <- read_csv2(here("data", "processed", "rnaseq_data",
+df_counts <- read_csv2(here("data", input_dir, "rnaseq_data",
                              "combined_rnaseq_counts_p.csv")) %>%
   column_to_rownames("gene")
 
 rna_metadata <- read_csv2(
-  here("data", "processed", "metadata", params$metadata))
+  here("data", input_dir, "metadata", params$metadata))
 
 if (analyze_specific_trial != ""){
   rna_metadata <- rna_metadata %>% filter(Trial == analyze_specific_trial)
@@ -112,13 +119,6 @@ df_counts <- df_counts[rowSums(df_counts) != 0, ]
 unique_patient_id <- rna_metadata %>% select(Trial, Patient) %>% unique()
 table(unique_patient_id$Trial)
  
-paired_samples <- table(rna_metadata$Patient, rna_metadata$Treatment) %>%
-  as.data.frame() %>%
-  setNames(c("Patient", "Treatment", "Freq")) %>%
-  pivot_wider(values_from = Freq, names_from = Treatment) %>%
-  filter(Pre >  0 & Post > 0) %>%
-  left_join(unique_patient_id)
-
 histology_df <- data.frame(
   Trial = c("BELLINI", "IMCISION", "NABUCCO", "NICHE-MSS", "NICHE-MSI",
             "OpACIN_neo", "PRADO", "MATISSE"),
@@ -197,13 +197,13 @@ histology_msi_mss_colors <- c(`Colon-MSI`= Color_Colon_MSI, `Colon-MSS`= Color_C
 # Load gene sets
 ```{r Load msigdb hallmarks, echo = FALSE}
 gene_signatures <- read_csv2(
-  here("data", "processed", "signatures", "gene_signatures.csv"))
+  here("data", input_dir, "signatures", "gene_signatures.csv"))
 
 gene_signatures <- gene_signatures %>% filter(!is.na(Gene))
 
 signature_overview <- read_csv2(
-  here("data", "external", "signatures",
-       "_overview_of_signatures_20240702.csv")) 
+  here("data", input_dir, "signatures",
+       "_overview_of_signatures_20260212.csv")) 
 
 gene_signatures_meta_analysis <- signature_overview %>%
   filter(Meta_analysis == "Yes")
@@ -217,12 +217,12 @@ gene_signatures_meta_analysis %>% knitr::kable()
 
 signature_overview %>%
   filter(!Signature == "TMB") %>%
-  select(-c(Include, Obs, Signature, Signature_abbreviation, DOI, Class)) %>%
+  select(-c(Include, Signature, Signature_abbreviation, DOI, Class)) %>%
   mutate_if(is.character, as.factor) %>%
   summary(maxsum = 20)
 
 gene_signatures_meta_analysis %>%
-  select(-c(Include, Obs, Signature, Signature_abbreviation, DOI, Class)) %>%
+  select(-c(Include, Signature, Signature_abbreviation, DOI, Class)) %>%
   mutate_if(is.character, as.factor) %>%
   summary(maxsum = 20)
 

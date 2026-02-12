@@ -1,11 +1,11 @@
 import yaml
 config = yaml.safe_load(open("config.yaml"))
 
+# Check snakemake dry run of what would be run
 # snakemake -n
-# snakemake --forceall --dag | dot -Tpdf > dag.pdf
 
-# Get list of target figures from yaml config file and parse it, rather than hard coding list
-# target_figures = [f"{config['figures_dir']}/{fig['filename']}" for fig in config["figures"]]
+# Create a directed acyclic graph (DAG) showing the scripts, order of execution and their relationships
+# snakemake --forceall --dag | dot -Tpdf > snakemake_execution_dag.pdf
 
 # Run all
 rule targets:
@@ -26,7 +26,7 @@ rule targets:
     "reports/pancan_WES_RNA_integration.html",
     "reports/pancan_glmer_sensitivity.html",
     "reports/pancan_figures.html"
-     
+
 # -------------------------------------------
 # RNAseq rules
 

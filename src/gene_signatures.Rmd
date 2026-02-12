@@ -8,9 +8,10 @@ output:
     number_sections: true
 params:
   export: TRUE
-  output_dir: "gene_signatures"
+  output_dir: "gene_signatures_bellini"
   metadata: "combined_rna_metadata.csv"
-  analyze_specific_trial: ""
+  analyze_specific_trial: "BELLINI"
+  use_demo: TRUE
 ---
 
 Author comment:
@@ -41,12 +42,13 @@ library(DESeq2)
 library(paletteer)
 library(ggpubr)
 source("helper_functions.R")
-# BiocManager::install("GSVA", version = "2.2")
-packageVersion("GSVA")
 
+# BiocManager::install("GSVA", version = "1.46") # 2.2
+packageVersion("GSVA")
+packageVersion("matrixStats")
 # Downgrade matrixStats, compatibility with GSVA
 # remotes::install_version("matrixStats", version="1.1.0") 
-# Got solved after GSVA 2.2 and Bioconductor 3.2, but needs R 4.5
+# This issue got solved after GSVA v2.2 and Bioconductor v3.2, but needs R 4.5
 set.seed(42)
 select <- dplyr::select
 rename <- dplyr::rename
@@ -108,6 +110,7 @@ corr_func <- function(var1, var2, data) {
 
 ```
 
+
 # ----------
 # Setup output folder
 ```{r Setup, echo = FALSE, include = FALSE}
@@ -124,6 +127,15 @@ has_post_data <- !analyze_specific_trial %in% c("PRADO", "OpACIN_neo",
                                                 "MATISSE")
 run_pre_vs_post <- !analyze_specific_trial %in% c("PRADO", "OpACIN_neo",
                                                 "MATISSE")
+
+input_dir <- "processed"
+if (params$use_demo) {
+  input_dir <- "processed_demo"
+  has_post_data <- FALSE
+  run_pre_vs_post <- FALSE
+}
+
+print(params)
 print(analyze_specific_trial)
 print(run_r_vs_nr)
 print(run_pre_vs_post)
@@ -141,20 +153,16 @@ if (!dir.exists(output_dir)) {
 # ----------
 # Load RNAseq data
 ```{r load rnaseq data, include = TRUE}
-df_counts <- read_csv2(here("data", "processed", "rnaseq_data",
+df_counts <- read_csv2(here("data", input_dir, "rnaseq_data",
                              "combined_rnaseq_counts_p.csv")) %>%
   column_to_rownames("gene")
 
-rpm_counts <- read_csv2(here("data", "processed", "rnaseq_data",
+rpm_counts <- read_csv2(here("data", input_dir, "rnaseq_data",
                              "combined_rnaseq_rpm.csv")) %>%
   column_to_rownames("gene")
- 
-# tpm_counts <- read_csv2(here("data", "processed", "rnaseq_data",
-#                              "rnaseq_tpm.csv"))
-# tpm_counts <- tpm_counts %>% column_to_rownames("gene")
 
 metadata <- read_csv2(
-  here("data", "processed", "metadata", params$metadata))
+  here("data", input_dir, "metadata", params$metadata))
 
 if (analyze_specific_trial != ""){
   metadata <- metadata %>% filter(Trial == analyze_specific_trial)
@@ -195,7 +203,7 @@ unique_patient_id <- metadata %>% select(Trial, Patient) %>% unique()
 # Load gene sets
 ```{r Load gene sets, echo = FALSE}
 gene_signatures <- read_csv2(
-  here("data", "processed", "signatures", "gene_signatures.csv"))
+  here("data", input_dir, "signatures", "gene_signatures.csv"))
 
 gene_signatures <- gene_signatures %>% filter(!is.na(Gene))
 
@@ -207,9 +215,7 @@ print(knitr::kable(gene_signatures %>%
         select(Signature, Class, Geneset_size) %>%
         unique()), n = n_distinct(gene_signatures$Signature))
 
-gene_signatures %>% filter(is.na(Ref)) %>% select(Signature) %>% unique()
-
-# gene_signatures %>% select(-c(Gene, Description)) %>% unique() %>% view()
+gene_signatures %>% filter(is.na(Reference)) %>% select(Signature) %>% unique()
 ```
 
 # ----------
@@ -272,7 +278,7 @@ gene_signatures_ssgsea_l <- split(
   gene_signatures_ssgsea$Gene, gene_signatures_ssgsea$Signature)
 
 ssgsea_results <- gsva(
-  vst_data,
+  as.matrix(vst_data),
   gene_signatures_ssgsea_l,
   method = "ssgsea",
   # Appropriate for vst transformed data
@@ -482,9 +488,6 @@ for (current_gene_signature in names(gene_signatures_l)) {
     left_join(metadata)
 
   signature_rpm_data <- signature_rpm_data %>% left_join(signature_expdata)
-  
-  signature_rpm_data_paired <- signature_rpm_data %>%
-    filter(Patient %in% paired_samples$Patient)
   
   if (run_r_vs_nr){
     t1 <- calc_stat_r_vs_nr(
@@ -708,57 +711,6 @@ signature_response_ssgsea_fdrq %>%
 signature_response_expression_fdrq %>%
   left_join(gene_set_sizes) %>%
   ggplot(aes(x = Geneset_size, y = pooled_sd)) + geom_point()
-```
-
-# ----------
-# Bagaev Clustering on ssGSEA scores
-```{r}
-bagaev_signatures <- gene_signatures %>% filter(Ref == "Bagaev et al. 2021")
-
-bagaev_ssgsea <- ssgsea_results_df %>%
-  select(all_of(c("CF_sample", unique(bagaev_signatures$Signature))))
-
-bagaev_ssgsea_m <- bagaev_ssgsea %>%
-  column_to_rownames("CF_sample") %>%
-  mutate_if(is.character, as.numeric) %>%
-  as.matrix() %>%
-  t()
-matrix_colnames <- colnames(bagaev_ssgsea_m)
-bagaev_ssgsea_m <- t(apply(
-  bagaev_ssgsea_m, 1, function(x) scale(x, center = TRUE, scale = TRUE)))
-
-colnames(bagaev_ssgsea_m) <- matrix_colnames
-
-annot_df <- ssgsea_results_df %>%
-  tibble::column_to_rownames("CF_sample") %>%
-  select(Response, Treatment) %>%
-  mutate_if(is.numeric, as.factor)
-
-mat_breaks <- quantile_breaks(bagaev_ssgsea_m, n = 11)
-
-bagaev_heatmap <- pheatmap::pheatmap(bagaev_ssgsea_m,
-  annotation_col = annot_df,
-  col = paletteer_d(palette = "RColorBrewer::RdYlBu",
-                    n = length(mat_breaks) - 1, direction = -1),
-  show_colnames = FALSE,
-  fontsize_row = 6,
-  breaks = mat_breaks,
-)
-
-annot_df <- ssgsea_results_df %>%
-  tibble::column_to_rownames("CF_sample") %>%
-  select(Response, Treatment) %>%
-  mutate_if(is.numeric, as.factor) %>%
-  filter(Treatment == "Pre")
-
-bagaev_heatmap_pre <- pheatmap::pheatmap(bagaev_ssgsea_m[, rownames(annot_df)],
-  annotation_col = annot_df,
-  col = paletteer_d(palette = "RColorBrewer::RdYlBu",
-                    n = length(mat_breaks) - 1, direction = -1),
-  show_colnames = FALSE,
-  fontsize_row = 6,
-  breaks = mat_breaks,
-)
 ```
 
 # ----------

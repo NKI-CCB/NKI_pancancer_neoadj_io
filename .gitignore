@@ -1,4 +1,6 @@
-data/
+data/raw/
+data/processed/
+data/processed_backup/
 exploratory/
 output_sc/
 references/
@@ -9,7 +11,9 @@ src/*.html
 .Rproj.user/
 .Rprofile
 renv/
+.renvignore
 pancancer_neoadj_io.Rproj
 renv_manage_dependencies.Rmd
 snakemake_placeholder
 src/pipelines/RNAseq_snakemake_pipeline_v2_1/sif/*
+.snakemake/

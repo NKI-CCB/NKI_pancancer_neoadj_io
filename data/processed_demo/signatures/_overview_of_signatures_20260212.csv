@@ -1,0 +1,32 @@
+Include;Signature;Signature_abbreviation;Class;Meta_signature;Cell_type;Immune_related;Meta_analysis;Ref;DOI;Geneset_size
+Yes;Angiogenesis;Angiogenesis;Angiogenesis;Angiogenesis;;No;Yes;Bagaev et al. 2021;https://doi.org/10.1016/j.ccell.2021.04.014;15
+Yes;Ayers_IFNg_expanded_signature;Ayers_IFNg_expanded;Signaling_pathway;Interferon_response;;Yes;Yes;Ayers et al. 2017;10.1172/JCI91190;18
+Yes;Ayers_IFNg_signature;Ayers_IFNg_expanded;Signaling_pathway;Interferon_response;;Yes;No;Ayers et al. 2017;10.1172/JCI91190;6
+Yes;Ayers_T_cell_inflamed;Ayers_T_cell_inflamed;Signaling_pathway;Immune_signaling;;Yes;Yes;Ayers et al. 2017;10.1172/JCI91190;18
+Yes;B_catenin_signature_pancan_22_Luke_et_al;B_catenin_Luke;Signaling_pathway;B_catenin_signaling;;No;Yes;Luke et al. 2019;10.1158/1078-0432.CCR-18-1942;22
+Yes;B_cells;B_cells;B cells;B_cells_TLS;Yes;Yes;Yes;Bagaev et al. 2021;https://doi.org/10.1016/j.ccell.2021.04.014;13
+Yes;Cancer_associated_fibroblasts;CAFs;CAF;CAF;Yes;No;Yes;Bagaev et al. 2021;https://doi.org/10.1016/j.ccell.2021.04.014;19
+Yes;CXCL13;CXCL13;Single_molecule;Immune_signaling;;Yes;Yes;Single gene;Single gene;1
+Yes;CXCL9;CXCL9;Single_molecule;Immune_signaling;;Yes;Yes;Reschke and Gajewski, 2022;DOI: 10.1126/sciimmunol.abq6509;1
+Yes;EMT_signature;EMT_signature;Tumor features;EMT_stemness;;No;Yes;Bagaev et al. 2021;https://doi.org/10.1016/j.ccell.2021.04.014;7
+Yes;Endothelium;Endothelium;Angiogenesis;Angiogenesis;Yes;No;Yes;Bagaev et al. 2021;https://doi.org/10.1016/j.ccell.2021.04.014;10
+Yes;F_TBRS;F_TBRS;TGF-B;TGF_B_signaling;;No;Yes;Calon et al. 2012;10.1016/j.ccr.2012.08.013;286
+Yes;Gamma_delta_TCR_Yu;Gamma_delta_TCRs;Cell_type;Gamma_Delta;Yes;Yes;Yes;Yu_et_al_2024;10.1016/j.xcrm.2024.101764;29
+Yes;H_E2F_Targets;H_E2F_Targets;MSigDB Hallmarks;Proliferation_cell_cycle;;No;Yes;Liberzon et al. 2015;10.1016/j.cels.2015.12.004;200
+Yes;H_Hypoxia;H_Hypoxia;MSigDB Hallmarks;Stress_signaling;;No;Yes;Liberzon et al. 2015;10.1016/j.cels.2015.12.004;200
+Yes;H_TGF_B_Signaling;H_TGF_B;MSigDB Hallmarks;TGF_B_signaling;;No;Yes;Liberzon et al. 2015;10.1016/j.cels.2015.12.004;54
+Yes;H_Wnt_B_Catenin_Signaling;H_Wnt_B_Catenin;MSigDB Hallmarks;B_catenin_signaling;;No;Yes;Liberzon et al. 2015;10.1016/j.cels.2015.12.004;42
+Yes;Immunologic_constant_of_rejection;ICR;Immunologic_constant_of_rejection;Immune_signaling;No;Yes;Yes;Roelands et al. 2020;10.1136/jitc-2020-000617;20
+Yes;Matrix_remodeling;Matrix_remodeling;CAF;CAF;;No;Yes;Bagaev et al. 2021;https://doi.org/10.1016/j.ccell.2021.04.014;12
+Yes;Neutrophil_signature;Neutrophil_sig;Granulocytes;Granulocytes;Yes;Yes;Yes;Bagaev et al. 2021;https://doi.org/10.1016/j.ccell.2021.04.014;10
+Yes;NK_cells;NK_cells;Cytotoxic T and NK cells;Cytotoxic_T_and_NK_cells;Yes;Yes;Yes;Bagaev et al. 2021;https://doi.org/10.1016/j.ccell.2021.04.014;17
+Yes;PD_1;PD_1;Single_molecule;Checkpoint_inhibition;;Yes;Yes;Single gene;Single gene;1
+Yes;PD_L1;PD_L1;Single_molecule;Checkpoint_inhibition;;Yes;Yes;Single gene;Single gene;1
+Yes;Stem.Sig;Stem.Sig;Biological_process;EMT_stemness;;No;Yes;Zhang et al. 2022;https://doi.org/10.1186/s13073-022-01050-w;454
+Yes;TCF1;TCF1;Single_molecule;Cytotoxic_T_and_NK_cells;;Yes;Yes;Single gene;Single gene;1
+Yes;TIL_score;TIL_score;Cell_type;Cytotoxic_T_and_NK_cells;Yes;Yes;Yes;Danaher et al. 2017;10.1186/s40425-017-0215-8;51
+Yes;TLS_markers_Cabrita;TLS_markers_Cabrita;Biological_process;B_cells_TLS;;Yes;Yes;Cabrita et al. 2020;10.1038/s41586-019-1914-8;9
+Yes;TLS_signature_Cabrita;TLS_sig_Cabrita;Biological_process;B_cells_TLS;;Yes;Yes;Cabrita et al. 2020;10.1038/s41586-019-1914-8;9
+No;TMB;TMB;Tumor features;TMB;;No;No;;;1
+Yes;Tumor_associated_Macrophages;TAMs;Tumor promotive immune infiltrate;Macrophages;Yes;Yes;Yes;Bagaev et al. 2021;https://doi.org/10.1016/j.ccell.2021.04.014;8
+Yes;Tumor_proliferation_rate;Tumor_prolif_rate;Tumor features;Proliferation_cell_cycle;;No;Yes;Bagaev et al. 2021;https://doi.org/10.1016/j.ccell.2021.04.014;15

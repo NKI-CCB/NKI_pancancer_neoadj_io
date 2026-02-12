@@ -1,0 +1,9 @@
+Trial;NR;R;Total_n;Response_rate;Histology
+BELLINI;5;5;10;0,5;TBNC
+IMCISION;5;5;10;0,5;HNSCC
+MATISSE;5;5;10;0,5;CSCC
+NABUCCO;5;5;10;0,5;Urothelial
+NICHE-MSI;5;5;10;0,5;Colon
+NICHE-MSS;5;5;10;0,5;Colon
+OpACIN_neo;5;5;10;0,5;LN_melanoma
+PRADO;5;5;10;0,5;LN_melanoma
