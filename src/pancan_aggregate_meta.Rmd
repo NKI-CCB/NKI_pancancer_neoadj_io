@@ -1,0 +1,916 @@
+---
+title: "neoadjuvant pancancer Aggregate meta-analysis"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+params:
+  export: TRUE
+  output_dir: "meta_aggregated"
+  metadata: ""
+  exclude_niche_msi: FALSE
+  run_meta_analysis: TRUE
+  exclude_clinical_response: FALSE
+  response_definition: "Original" # MPR pCR
+---
+
+Author comment:
+File description comment:
+The purpose of this script is to parse results from meta-analysis subsets, aggregating to visualize and export results
+
+# Loading Packages
+```{r, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning = FALSE, message = FALSE, dpi = 300, error = TRUE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# Install if necessary install.packages("tidyverse")
+# Install if necessary BiocManager::install("DESeq2")
+library(tidyverse)
+source("helper_functions.R")
+source("oncomatrix.R")
+library(VariantAnnotation)
+library(ggpubr)
+library(ggrepel)
+library(lintr)
+library(export)
+MakeDataFrameFromVCF <- getFromNamespace("MakeDataFrameFromVCF", "ICAMS")
+
+set.seed(42)
+select <- dplyr::select
+rename <- dplyr::rename
+here <- here::here
+```
+
+# Setup output folder
+
+```{r Setup output, echo = FALSE, include = FALSE}
+export <- params$export
+response_definition <- params$response_definition
+
+# overwrite clinical exclusion in case of MPR/pCR response
+exclude_clinical_response <- params$exclude_clinical_response
+if (params$response_definition %in% c("MPR", "pCR")) {
+  exclude_clinical_response <- TRUE
+}
+
+# generate output directory
+
+output_dir <- here("data", "processed", params$output_dir)
+print(output_dir)
+
+print(exclude_clinical_response)
+print(response_definition)
+
+# if output_dir does not exist, create it
+if (!dir.exists(output_dir)) {
+    dir.create(output_dir)
+    } else {
+  print("Output folder already exists")
+}
+
+```
+
+```{r}
+wes_dir <- here("data", "processed", "WES_analysis")
+metadata_dir <- here("data", "processed", "metadata")
+wes_meta_dir <- here("data", "processed", "WES_analysis_meta") 
+wes_MPR_meta_dir <- here("data", "processed", "WES_analysis_MPR_meta") 
+wes_pCR_meta_dir <- here("data", "processed", "WES_analysis_pCR_meta") 
+```
+
+# ----------
+# Load metadata
+
+```{r Load metadata}
+dna_metadata <- read_csv2(here(metadata_dir, "combined_dna_metadata.csv"))
+
+patient_metadata_combined <- read_csv2(
+  here("data", "processed", "metadata", "patient_metadata_combined.csv"))
+
+histology_df <- data.frame(
+  Trial = c("BELLINI", "IMCISION", "NABUCCO", "NICHE-MSS", "NICHE-MSI",
+            "OpACIN_neo", "PRADO", "MATISSE"),
+  Histology = c("TBNC", "HNSCC", "Urothelial", "Colon", "Colon",
+                "LN_melanoma", "LN_melanoma", "CSCC"))
+
+```
+
+# Annotation color
+```{r}
+
+# Define colours for each group
+Color_NR <- "#F8766D"
+Color_R <- "#00BA38" # "#619CFF"
+Color_NA <- "#CD9600"
+Color_Pre <- "#619CFF"
+Color_Post <- "#F564E3"
+Color_HNSCC <- "#009292"
+Color_CSCC <- "#CD9600"
+Color_Urothelial <- "#B66DFF"
+Color_LN_melanoma <- "#00BFC4"
+Color_Colon <- "#F8766D"
+Color_Colon_MSI <- "#B73A3A"
+Color_Colon_MSS <- "#23C26F"
+Color_TNBC <- "#FEB5DA"
+Color_BELLINI <- "#FEB5DA"
+Color_IMCISION <- "#009292"
+Color_MATISSE <- "#CD9600"
+Color_NABUCCO <- "#B66DFF"
+Color_BELLINI <- "#FEB5DA"
+Color_NICHE_MSS <- "#23C26F"
+Color_NICHE_MSI <- "#B73A3A"
+Color_OpACIN_neo <- "#00BFC4"
+Color_PRADO <- "#619CFF"
+
+annotation_color_list = list(
+  Response = c(NR = Color_NR, R = Color_R),
+  Treatment = c(Pre = Color_Pre, Post = Color_Post),
+  Histology = c(LN_melanoma = Color_LN_melanoma, Urothelial = Color_Urothelial,
+                Colon = Color_Colon, HNSCC = Color_HNSCC, TBNC = Color_TNBC,
+                CSCC = Color_CSCC),
+  Trial = c(BELLINI = Color_BELLINI, IMCISION = Color_IMCISION,
+            MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
+            `NICHE-MSS` = Color_NICHE_MSS, `NICHE-MSI` = Color_NICHE_MSI,
+            OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO))
+
+trial_colors <- c(BELLINI = Color_BELLINI, IMCISION = Color_IMCISION,
+            MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
+            `NICHE-MSS` = Color_NICHE_MSS, `NICHE-MSI` = Color_NICHE_MSI,
+            OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO)
+
+trial_colors_combined <- c(Combined = "#999999", BELLINI = Color_BELLINI,
+                           IMCISION = Color_IMCISION,
+            MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
+            `NICHE-MSS` = Color_Colon_MSS, `NICHE-MSI` = Color_NICHE_MSI,
+            OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO)
+
+histology_msi_mss_colors <- c(`Colon-MSI`= Color_Colon_MSI,
+                              `Colon-MSS`= Color_Colon_MSS,
+                              CSCC = Color_CSCC, HNSCC = Color_HNSCC, 
+                              LN_melanoma = Color_LN_melanoma,
+                              TBNC = Color_TNBC,
+                              Urothelial = Color_Urothelial)
+
+```
+
+# ----------
+
+# Load WES meta-analysis results 
+```{r}
+list.files(here("data", "processed"))
+list.files(here(wes_meta_dir))
+
+wes_meta_studies_results_random_effects <- read_csv2(
+  here(wes_meta_dir, "meta_studies_results_random_effects.csv"))
+
+wes_meta_random_effects <- read_csv2(
+    here(wes_meta_dir, "meta_combined_effects_random_effects.csv"))
+
+wes_excl_mono_random_effects <- read_csv2(
+    here("data", "processed", "WES_analysis_meta_excl_mono",
+         "meta_combined_effects_random_effects.csv"))
+
+wes_excl_clin_random_effects <- read_csv2(
+    here("data", "processed", "WES_analysis_meta_excl_clin_response",
+         "meta_combined_effects_random_effects.csv"))
+
+wes_MPR_meta_random_effects <- read_csv2(
+    here(wes_MPR_meta_dir, "meta_combined_effects_random_effects.csv"))
+
+wes_pCR_meta_random_effects <- read_csv2(
+    here(wes_pCR_meta_dir, "meta_combined_effects_random_effects.csv"))
+
+```
+
+## Aggregate meta results
+```{r}
+wes_meta_aggregated_smd_all_statistics <- wes_meta_random_effects %>%
+  mutate(Analysis_subset = "Original") %>%
+  rbind(
+    wes_MPR_meta_random_effects %>%
+      mutate(Analysis_subset = "MPR")) %>%
+  rbind(
+    wes_pCR_meta_random_effects %>%
+      mutate(Analysis_subset = "pCR"))  %>%
+  rbind(
+    wes_excl_mono_random_effects %>%
+      mutate(Analysis_subset = "Excl_mono."))  %>%
+  rbind(
+    wes_excl_clin_random_effects %>%
+      mutate(Analysis_subset = "Excl_clin.")) %>%
+  relocate(Analysis_subset, .before = "Variable")
+
+wes_meta_aggregated_smd_all_statistics %>%
+  write_csv2(here("data", "processed", "meta_aggregated",
+                  "wes_meta_aggregated_smd_all_statistics.csv")
+)
+
+```
+
+
+```{r}
+variable_order <- factor(c("TMB", "pvactools_filtered_neoantigen_load",
+                    "pyclone_clonal_TMB", "pyclone_subclonal_TMB", 
+                    "APOBEC_abs", "UV_abs", "HRD_abs", "dMMR_abs",
+                    "TMB_frameshift", "wgII_0.6_bases", 
+                             "Aneuploidy_score", "Ploidy", "scna_loss",
+                             "Purity"))
+
+wes_meta_aggregated %>%
+  mutate(Variable = factor(Variable, levels = fct_rev(variable_order))) %>%
+  mutate(label = cut(
+    pval.random,
+    breaks = c(0, 0.001, 0.01, 0.05, 1),
+    labels = c("***", "**", "*", "")
+  ))  %>%
+  ggplot(aes(
+    x = factor(
+      Analysis_subset,
+      levels = c("Original", "Excl_mono.", "Excl_clin.", "MPR", "pCR")), 
+    y = fct_rev(Variable),
+    fill = TE.random,
+    label = label)
+    ) +
+  geom_tile() +
+  geom_text() +
+  scale_fill_gradient2(low = "#075AFF",
+                       mid = "white",
+                       high = "#FF0000") +
+  theme_Publication() +
+  labs(y = "") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  theme(legend.position = "right", legend.direction = "vertical") +
+  theme(legend.key.size = unit(0.75, 'cm')) +
+  labs(x = "", title = "Meta-analysis sensitivity")
+
+```
+
+# ----------
+# Load WES Log OR meta results
+```{r}
+
+meta_studies_results_or_all <-  read_csv2(
+  here(wes_meta_dir, "meta_studies_results_or_all.csv"))
+
+wes_meta_or <- read_csv2(
+  here(wes_meta_dir, "meta_log_or_combined_effects_random_effects.csv"))
+
+wes_excl_mono_or <- read_csv2(
+    here("data", "processed", "WES_analysis_meta_excl_mono",
+         "meta_log_or_combined_effects_random_effects.csv"))
+
+wes_excl_clin_or <- read_csv2(
+    here("data", "processed", "WES_analysis_meta_excl_clin_response",
+         "meta_log_or_combined_effects_random_effects.csv"))
+
+wes_MPR_meta_or <- read_csv2(
+    here(wes_MPR_meta_dir, "meta_log_or_combined_effects_random_effects.csv"))
+
+wes_pCR_meta_or <- read_csv2(
+    here(wes_pCR_meta_dir, "meta_log_or_combined_effects_random_effects.csv"))
+
+```
+
+## Aggregate meta Log OR
+
+```{r}
+wes_or_meta_aggregated_all_statistics  <- wes_meta_or %>%
+  mutate(Analysis_subset = "Original") %>%
+  rbind(
+    wes_MPR_meta_or %>%
+      mutate(Analysis_subset = "MPR")) %>%
+  rbind(
+    wes_pCR_meta_or %>%
+      mutate(Analysis_subset = "pCR"))  %>%
+  rbind(
+    wes_excl_mono_or %>%
+      mutate(Analysis_subset = "Excl_mono."))  %>%
+  rbind(
+    wes_excl_clin_or %>%
+      mutate(Analysis_subset = "Excl_clin.")) %>%
+  relocate(Analysis_subset, .before = "feature") %>%
+  rename(Variable = "feature")
+
+wes_or_meta_aggregated_all_statistics %>%
+  write_csv2(here(output_dir, "wes_or_meta_aggregated_all_statistics.csv"))
+```
+
+```{r}
+log_or_variable_order <- c("GIE_AP", "TP53", "BRCA1_2", "SIGPW_Wnt_B_Cat",
+                           "SIGPW_PI3K_signaling", "SIGPW_Cell_cycle",
+                           "SIGPW_TGFB_signaling", "GIE_IFNy", "RAS_RAF",
+                           "HLA_alteration")
+
+wes_or_meta_aggregated_all_statistics %>%
+  mutate(feature = factor(feature, levels = fct_rev(log_or_variable_order))) %>%
+  mutate(label = cut(
+    pval.random,
+    breaks = c(0, 0.001, 0.01, 0.05, 1),
+    labels = c("***", "**", "*", "")
+  ))  %>%
+  ggplot(aes(
+    x = factor(Analysis_subset,
+               levels = c(
+                 "Original", "Excl_mono.", "Excl_clin.", "MPR", "pCR")), 
+    y = factor(
+      feature, levels = fct_rev(log_or_variable_order)),
+    fill = TE.random,
+    label = label)) +
+  geom_tile() +
+  geom_text() +
+  scale_fill_gradient2(low = "#075AFF",
+                       mid = "white",
+                       high = "#FF0000") +
+  theme_Publication() +
+  labs(y = "") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  theme(legend.position = "right", legend.direction = "vertical") +
+  theme(legend.key.size = unit(0.75, 'cm')) +
+  labs(x = "", title = "Meta-analysis OR sensitivity")
+
+```
+
+## Aggregate WES SMD and OR meta results
+```{r}
+wes_meta_aggregated_all_statistics <- wes_meta_aggregated_smd_all_statistics %>%
+  rbind(wes_or_meta_aggregated_all_statistics) 
+
+wes_meta_aggregated_all_statistics <- wes_meta_aggregated_all_statistics %>%
+  group_by(Analysis_subset) %>%
+  mutate(padj = p.adjust(pval.random, method = "BH")) %>%
+  ungroup()
+
+wes_meta_aggregated_all_statistics %>%
+  select(Analysis_subset, Variable, pval.random, padj)
+
+wes_meta_aggregated_all_statistics %>%
+  select(Analysis_subset, Variable, pval.random, padj) %>%
+  filter(pval.random < 0.1)
+
+wes_meta_aggregated_all_statistics <- wes_meta_aggregated_all_statistics %>%
+  relocate(padj, .after = pval.random) %>%
+  mutate(Analysis_subset = factor(
+    Analysis_subset,
+    levels = c("Original", "Excl_clin.", "Excl_mono.", "MPR", "pCR"))) %>%
+  arrange(Analysis_subset)
+
+wes_meta_aggregated_all_statistics %>%
+  write_csv2(here("data", "processed", "meta_aggregated",
+                  "wes_meta_aggregated_all_statistics.csv")
+)
+
+colnames(wes_meta_aggregated_all_statistics)
+colnames(wes_or_meta_aggregated_all_statistics)
+colnames(wes_meta_aggregated_all_statistics)
+
+```
+
+#----------
+# Load RNA meta-analysis results
+```{r}
+output_folders <- list.files(here("data", "processed"))
+output_folders[str_detect(output_folders, "meta")]
+
+list.files(here("data", "processed", "gene_signatures_meta"))
+
+rna_meta_random_effects <- read_csv2(
+    here("data", "processed", "gene_signatures_meta",
+         "meta_combined_effects_random_effects.csv"))
+
+rna_excl_mono_random_effects <- read_csv2(
+    here("data", "processed", "gene_signatures_meta_excl_mono",
+         "meta_combined_effects_random_effects.csv"))
+
+rna_excl_clin_random_effects <- read_csv2(
+    here("data", "processed", "gene_signatures_meta_excl_clin_response",
+         "meta_combined_effects_random_effects.csv"))
+
+rna_MPR_meta_random_effects <- read_csv2(
+    here("data", "processed", "gene_signatures_meta_MPR",
+         "meta_combined_effects_random_effects.csv"))
+
+rna_pCR_meta_random_effects <- read_csv2(
+    here("data", "processed", "gene_signatures_meta_pCR",
+         "meta_combined_effects_random_effects.csv"))
+
+```
+
+## Aggregate RNA meta results
+
+```{r, fig.width  = 8, fig.height = 11}
+
+rna_meta_aggregated_all_statistics  <- rna_meta_random_effects %>%
+  mutate(Analysis_subset = "Original",
+         padj = p.adjust(pval.random, method = "BH")) %>%
+  rbind(
+    rna_MPR_meta_random_effects %>%
+      mutate(Analysis_subset = "MPR",
+             padj = p.adjust(pval.random, method = "BH"))) %>%
+  rbind(
+    rna_pCR_meta_random_effects %>%
+      mutate(Analysis_subset = "pCR",
+             padj = p.adjust(pval.random, method = "BH"))) %>%
+  rbind(
+    rna_excl_mono_random_effects %>%
+      mutate(Analysis_subset = "Excl_mono.",
+             padj = p.adjust(pval.random, method = "BH")))  %>%
+  rbind(
+    rna_excl_clin_random_effects %>%
+      mutate(Analysis_subset = "Excl_clin.",
+             padj = p.adjust(pval.random, method = "BH"))) %>%
+  mutate(Variable = ifelse(Variable == "Gamma_delta_TCR_Yu",
+                           "Gamma_delta_TCRs", Variable))%>%
+  relocate(Analysis_subset, .before = "Variable")
+
+
+rna_meta_aggregated_all_statistics <- rna_meta_aggregated_all_statistics %>%
+  relocate(padj, .after = pval.random) %>%
+  mutate(Analysis_subset = factor(
+    Analysis_subset,
+    levels = c("Original", "Excl_clin.", "Excl_mono.", "MPR", "pCR"))) %>%
+  arrange(Analysis_subset)
+
+
+rna_meta_aggregated_all_statistics %>%
+  write_csv2(here(output_dir, "rna_meta_aggregated_all_statistics.csv"))
+
+# rna_meta_aggregated_all_statistics <- rna_meta_aggregated_all_statistics %>%
+#   group_by(Analysis_subset) %>%
+#   mutate(padj = p.adjust(pval.random, method = "BH")) %>%
+#   ungroup()
+
+colnames(rna_meta_aggregated_all_statistics)
+colnames(rna_excl_mono_random_effects)
+colnames(rna_excl_clin_random_effects)
+
+
+rna_meta_studies_results <- read_csv2(
+    here("data", "processed", "gene_signatures_meta",
+         "meta_studies_results.csv"))
+
+# Filter out meta-analysis variables, used combined analysis subset metrics
+rna_meta_studies_results_per_cohort <- rna_meta_studies_results %>%
+  select(c("n.e", "mean.e", "sd.e", "n.c", "mean.c", "sd.c", "studlab",
+           "TE", "seTE", "statistic", "pval", "lower", "upper", "w.common",
+           "w.random", "zval", "w.fixed", "Signature", "Contrast")) %>%
+  mutate(Analysis_subset = "Original") %>%
+  relocate(c(Analysis_subset, studlab, Signature, Contrast), .before = "n.e") 
+
+rna_meta_studies_results_per_cohort %>%
+  write_csv2(here(output_dir, "rna_meta_studies_results_per_cohort.csv"))
+
+wes_meta_studies_results_per_cohort <- wes_meta_studies_results_random_effects %>%
+  select(c("n.e", "mean.e", "sd.e", "n.c", "mean.c", "sd.c", "studlab",
+           "TE", "seTE", "statistic", "pval", "lower", "upper", "w.common",
+           "w.random", "zval", "w.fixed", "Variable", "Contrast")) %>%
+  mutate(Analysis_subset = "Original") %>%
+  relocate(c(Analysis_subset, studlab, Variable, Contrast), .before = "n.e") %>%
+  full_join(meta_studies_results_or_all %>%
+  select(c("studlab",
+           "TE", "seTE", "statistic", "pval", "lower", "upper", "w.common",
+           "w.random", "zval", "w.fixed", "Variable", "Contrast")) %>%
+  mutate(Analysis_subset = "Original") %>%
+  relocate(c(Analysis_subset, studlab, Variable, Contrast), .before = "TE") )
+
+wes_meta_studies_results_per_cohort %>%
+  write_csv2(here(output_dir, "wes_meta_studies_results_per_cohort.csv"))
+
+```
+
+
+```{r, fig.width  = 8, fig.height = 11}
+original_order <- rna_meta_random_effects %>%
+  mutate(Variable = ifelse(Variable == "Gamma_delta_TCR_Yu",
+                           "Gamma_delta_TCRs", Variable)) %>%
+  arrange(TE.random) %>%
+  pull("Variable")
+
+rna_meta_aggregated_all_statistics %>%
+  mutate(label = cut(
+    pval.random,
+    breaks = c(0, 0.001, 0.01, 0.05, 1),
+    labels = c("***", "**", "*", "")
+  ))  %>%
+  ggplot(aes(
+    x = factor(Analysis_subset,
+               levels = c(
+                 "Original", "Excl_mono.", "Excl_clin.", "MPR", "pCR")), 
+    y = factor(
+      Variable, levels = original_order),
+    fill = TE.random,
+    label = label)) +
+  geom_tile() +
+  geom_text() +
+  scale_fill_gradient2(low = "#075AFF",
+                       mid = "white",
+                       high = "#FF0000") +
+  theme_Publication() +
+  labs(y = "") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  theme(legend.position = "right", legend.direction = "vertical") +
+  theme(legend.key.size = unit(0.75, 'cm')) +
+  labs(x = "", title = "Meta-analysis sensitivity")
+
+```
+
+# ----------
+# Heterogeneity statistics
+
+## wes smd meta
+```{r}
+wes_meta_aggregated_smd_all_statistics %>%
+  ggplot(aes(x = TE.random, y = TE.fixed, col = Analysis_subset)) +
+  geom_point() +
+  theme_Publication() + geom_abline(slope = 1, intercept = 0)
+
+wes_meta_aggregated_smd_all_statistics %>%
+  ggplot(aes(x = Q, y = -log10(pval.Q), col = Analysis_subset)) +
+  geom_point() +
+  theme_Publication() +
+  geom_hline(yintercept = -log10(0.05)) +
+  geom_text_repel(aes(x = Q, y = -log10(pval.Q), label = Variable),
+                  data = wes_meta_aggregated_smd_all_statistics)
+
+wes_meta_aggregated_smd_all_statistics %>%
+  ggplot(aes(x = tau2, y = -log10(pval.Q), col = Analysis_subset)) +
+  geom_point() +
+  theme_Publication() +
+  geom_hline(yintercept = -log10(0.05)) +
+  geom_text_repel(aes(x = tau2, y = -log10(pval.Q), label = Variable),
+                  data = wes_meta_aggregated_smd_all_statistics)
+
+wes_meta_aggregated_smd_all_statistics %>%
+  ggplot(aes(x = I2, y = -log10(pval.Q), col = Analysis_subset)) +
+  geom_point() +
+  theme_Publication() +
+  geom_hline(yintercept = -log10(0.05)) +
+  geom_text_repel(aes(x = I2, y = -log10(pval.Q), label = Variable),
+                  data = wes_meta_aggregated_smd_all_statistics)
+
+wes_meta_aggregated_smd_all_statistics %>%
+  filter(pval.random < 0.05) %>%
+  ggplot(aes(x = I2, y = -log10(pval.Q), col = Analysis_subset)) +
+  geom_point() +
+  theme_Publication() +
+  geom_hline(yintercept = -log10(0.05)) +
+  geom_text_repel(aes(x = I2, y = -log10(pval.Q), label = Variable),
+                  data = wes_meta_aggregated_smd_all_statistics %>%
+  filter(pval.random < 0.05))
+
+wes_meta_aggregated_smd_all_statistics %>%
+  ggplot(aes(x = Q, y = I2, col = Analysis_subset)) +
+  geom_point() + theme_Publication() +
+  geom_text_repel(aes(x = Q, y = I2, label = Variable),
+                  data = wes_meta_aggregated_smd_all_statistics)
+
+wes_meta_aggregated_smd_all_statistics %>%
+  ggplot(aes(x = tau2, y = I2, col = Analysis_subset)) +
+  geom_point() + theme_Publication() +
+  geom_text_repel(aes(x = tau2, y = I2, label = Variable),
+                  data = wes_meta_aggregated_smd_all_statistics)
+
+wes_meta_aggregated_smd_all_statistics %>%
+  mutate(label = cut(
+    pval.Q,
+    breaks = c(0, 0.001, 0.01, 0.05, 1),
+    labels = c("***", "**", "*", "")
+  ))  %>%
+  ggplot(aes(
+    x = factor(Analysis_subset), 
+    y = factor(
+      Variable, levels = rev(order_variables)),
+    fill = I2,
+    label = label)) +
+  geom_tile() +
+  geom_text() +
+  scale_fill_gradient2(low = "#075AFF",
+                       mid = "white",
+                       high = "#FF0000") +
+  theme_Publication() +
+  labs(y = "") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  theme(legend.position = "right", legend.direction = "vertical") +
+  theme(legend.key.size = unit(0.75, 'cm')) +
+  labs(x = "")
+
+ggsave(here(output_dir, "meta_combined_effects_random_effects_het.png"),
+    height = 9, width = 4.5)
+
+heterogeneity_plot <- wes_meta_aggregated_smd_all_statistics %>%
+  mutate(label = cut(
+    pval.Q,
+    breaks = c(0, 0.001, 0.01, 0.05, 1),
+    labels = c("***", "**", "*", "")
+  ))  %>%
+  ggplot(aes(
+    x = factor(Analysis_subset), 
+    y = factor(
+      Variable, levels = rev(order_variables)),
+    fill = I2,
+    label = label)) +
+  geom_tile() +
+  geom_text() +
+  scale_fill_gradient2(low = "#075AFF",
+                       mid = "white",
+                       high = "#FF0000") +
+  theme_Publication() +
+  labs(y = "") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  theme(legend.position = "right", legend.direction = "vertical") +
+  theme(legend.key.size = unit(0.75, 'cm')) +
+  labs(x = "")
+
+heterogeneity_plot
+graph2pdf(heterogeneity_plot,
+          here(output_dir, "meta_combined_effects_random_effects_het.pdf"),
+    height = 9, width = 4.5)
+```
+
+```{r}
+wes_meta_random_effects_all <- wes_meta_random_effects %>%
+  select(Variable, TE.random, pval.random) %>%
+  mutate(Feature_set = "WES_SMD") %>%
+  rbind(
+    meta_studies_results_or_all %>%
+      select(feature, TE.random, pval.random) %>%
+      rename(Variable = feature)%>%
+      mutate(Feature_set = "WES_OR")
+  )  %>%
+  rbind(
+    rna_meta_random_effects %>%
+      select(Variable, TE.random, pval.random) %>%
+      mutate(Feature_set = "RNA_SMD")
+    )  %>%
+  mutate(meta_FDR = p.adjust(pval.random, method = "BH")) %>%
+  arrange(TE.random)
+
+wes_meta_random_effects_all %>%
+  ggplot(aes(x = pval.random, y = meta_FDR)) +
+  geom_point() + theme_Publication()
+
+wes_meta_random_effects_all %>%
+  filter(meta_FDR < 0.05) %>%
+  ggplot(aes(x = pval.random, y = meta_FDR)) +
+  geom_point() + theme_Publication()
+
+wes_meta_random_effects_all %>%
+  arrange(-TE.random) %>% 
+  select(Variable, pval.random, meta_FDR, Feature_set) %>%
+  mutate(pval.random = round(pval.random, 2)) %>%
+  mutate(meta_FDR = round(meta_FDR, 2)) %>%
+  arrange(meta_FDR)
+```
+
+
+## OR meta
+```{r}
+
+order_variables <- wes_meta_or %>%
+  arrange(TE.random) %>%
+  pull(feature) 
+
+wes_or_meta_aggregated_all_statistics %>%
+  ggplot(aes(x = TE.random, y = TE.fixed, col = Analysis_subset)) +
+  geom_point() +
+  theme_Publication() + geom_abline(slope = 1, intercept = 0)
+
+wes_or_meta_aggregated_all_statistics %>%
+  ggplot(aes(x = Q, y = -log10(pval.Q), col = Analysis_subset)) +
+  geom_point() +
+  theme_Publication() +
+  geom_hline(yintercept = -log10(0.05)) +
+  geom_text_repel(aes(x = Q, y = -log10(pval.Q), label = Variable),
+                  data = wes_or_meta_aggregated_all_statistics)
+
+wes_or_meta_aggregated_all_statistics %>%
+  ggplot(aes(x = tau2, y = -log10(pval.Q), col = Analysis_subset)) +
+  geom_point() +
+  theme_Publication() +
+  geom_hline(yintercept = -log10(0.05)) +
+  geom_text_repel(aes(x = tau2, y = -log10(pval.Q), label = Variable),
+                  data = wes_or_meta_aggregated_all_statistics)
+
+wes_or_meta_aggregated_all_statistics %>%
+  ggplot(aes(x = I2, y = -log10(pval.Q), col = Analysis_subset)) +
+  geom_point() +
+  theme_Publication() +
+  geom_hline(yintercept = -log10(0.05)) +
+  geom_text_repel(aes(x = I2, y = -log10(pval.Q), label = Variable),
+                  data = wes_or_meta_aggregated_all_statistics)
+
+wes_or_meta_aggregated_all_statistics %>%
+  filter(pval.random < 0.05) %>%
+  ggplot(aes(x = I2, y = -log10(pval.Q), col = Analysis_subset)) +
+  geom_point() +
+  theme_Publication() +
+  geom_hline(yintercept = -log10(0.05)) +
+  geom_text_repel(aes(x = I2, y = -log10(pval.Q), label = Variable),
+                  data = wes_or_meta_aggregated_all_statistics %>%
+  filter(pval.random < 0.05))
+
+wes_or_meta_aggregated_all_statistics %>%
+  ggplot(aes(x = Q, y = I2, col = Analysis_subset)) + geom_point() +
+  theme_Publication() +
+  geom_text_repel(aes(x = Q, y = I2, label = Variable),
+                  data = wes_or_meta_aggregated_all_statistics)
+
+wes_or_meta_aggregated_all_statistics %>%
+  ggplot(aes(x = tau2, y = I2, col = Analysis_subset)) + geom_point() +
+  theme_Publication() +
+  geom_text_repel(aes(x = tau2, y = I2, label = Variable),
+                  data = wes_or_meta_aggregated_all_statistics)
+
+wes_or_meta_aggregated_all_statistics %>%
+  mutate(label = cut(
+    pval.Q,
+    breaks = c(0, 0.001, 0.01, 0.05, 1),
+    labels = c("***", "**", "*", "")
+  ))  %>%
+  ggplot(aes(
+    x = factor(Analysis_subset), 
+    y = factor(
+      Variable, levels = rev(order_variables)),
+    fill = I2,
+    label = label)) +
+  geom_tile() +
+  geom_text() +
+  scale_fill_gradient2(low = "#075AFF",
+                       mid = "white",
+                       high = "#FF0000") +
+  theme_Publication() +
+  labs(y = "") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  theme(legend.position = "right", legend.direction = "vertical") +
+  theme(legend.key.size = unit(0.75, 'cm')) +
+  labs(x = "")
+
+ggsave(here(output_dir, "meta_combined_effects_random_effects_OR_het.png"),
+    height = 9, width = 4.5)
+
+heterogeneity_plot <- wes_or_meta_aggregated_all_statistics %>%
+  mutate(label = cut(
+    pval.Q,
+    breaks = c(0, 0.001, 0.01, 0.05, 1),
+    labels = c("***", "**", "*", "")
+  ))  %>%
+  ggplot(aes(
+    x = factor(Analysis_subset), 
+    y = factor(
+      Variable, levels = rev(order_variables)),
+    fill = I2,
+    label = label)) +
+  geom_tile() +
+  geom_text() +
+  scale_fill_gradient2(low = "#075AFF",
+                       mid = "white",
+                       high = "#FF0000") +
+  theme_Publication() +
+  labs(y = "") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  theme(legend.position = "right", legend.direction = "vertical") +
+  theme(legend.key.size = unit(0.75, 'cm')) +
+  labs(x = "")
+
+heterogeneity_plot
+graph2pdf(heterogeneity_plot,
+          here(output_dir, "meta_combined_effects_random_effects_OR_het.pdf"),
+    height = 9, width = 4.5)
+```
+
+## RNA SMD meta
+
+```{r, fig.height = 10, fig.width = 8}
+order_variables <- rna_meta_random_effects %>%
+  mutate(Variable = ifelse(
+    Variable == "Gamma_delta_TCR_Yu", "Gamma_delta_TCRs", Variable)) %>%
+  arrange(TE.random) %>%
+  pull(Variable) %>%
+  rev()
+
+rna_meta_aggregated_all_statistics %>%
+  ggplot(aes(x = TE.random, y = TE.fixed, col = Analysis_subset)) +
+  geom_point() +
+  theme_Publication() + geom_abline(slope = 1, intercept = 0)
+
+rna_meta_aggregated_all_statistics %>%
+  ggplot(aes(x = Q, y = -log10(pval.Q), col = Analysis_subset)) +
+  geom_point() +
+  theme_Publication() +
+  geom_hline(yintercept = -log10(0.05)) +
+  geom_text_repel(aes(x = Q, y = -log10(pval.Q), label = Variable),
+                  data = rna_meta_aggregated_all_statistics)
+
+rna_meta_aggregated_all_statistics %>%
+  ggplot(aes(x = tau2, y = -log10(pval.Q), col = Analysis_subset)) +
+  geom_point() +
+  theme_Publication() +
+  geom_hline(yintercept = -log10(0.05)) +
+  geom_text_repel(aes(x = tau2, y = -log10(pval.Q), label = Variable),
+                  data = rna_meta_aggregated_all_statistics)
+
+rna_meta_aggregated_all_statistics %>%
+  ggplot(aes(x = I2, y = -log10(pval.Q), col = Analysis_subset)) +
+  geom_point() +
+  theme_Publication() +
+  geom_hline(yintercept = -log10(0.05)) +
+  geom_text_repel(aes(x = I2, y = -log10(pval.Q), label = Variable),
+                  data = rna_meta_aggregated_all_statistics)
+
+rna_meta_aggregated_all_statistics %>%
+  filter(pval.random < 0.05) %>%
+  ggplot(aes(x = I2, y = -log10(pval.Q), col = Analysis_subset)) +
+  geom_point() +
+  theme_Publication() +
+  geom_hline(yintercept = -log10(0.05)) +
+  geom_text_repel(aes(x = I2, y = -log10(pval.Q), label = Variable),
+                  data = rna_meta_aggregated_all_statistics %>%
+  filter(pval.random < 0.05))
+
+rna_meta_aggregated_all_statistics %>%
+  ggplot(aes(x = Q, y = I2, col = Analysis_subset)) + geom_point() +
+  theme_Publication() +
+  geom_text_repel(aes(x = Q, y = I2, label = Variable),
+                  data = rna_meta_aggregated_all_statistics)
+
+rna_meta_aggregated_all_statistics %>%
+  ggplot(aes(x = tau2, y = I2, col = Analysis_subset)) + geom_point() +
+  theme_Publication() +
+  geom_text_repel(aes(x = tau2, y = I2, label = Variable),
+                  data = rna_meta_aggregated_all_statistics)
+
+rna_meta_aggregated_all_statistics %>%
+  mutate(label = cut(
+    pval.Q,
+    breaks = c(0, 0.001, 0.01, 0.05, 1),
+    labels = c("***", "**", "*", "")
+  ))  %>%
+  ggplot(aes(
+    x = factor(Analysis_subset), 
+    y = factor(
+      Variable, levels = rev(order_variables)),
+    fill = I2,
+    label = label)) +
+  geom_tile() +
+  geom_text() +
+  scale_fill_gradient2(low = "#075AFF",
+                       mid = "white",
+                       high = "#FF0000") +
+  theme_Publication() +
+  labs(y = "") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  theme(legend.position = "right", legend.direction = "vertical") +
+  theme(legend.key.size = unit(0.75, 'cm')) +
+  labs(x = "")
+
+ggsave(here(output_dir, "meta_combined_effects_random_effects_het_rna.png"),
+    height = 9, width = 4.5)
+
+rna_heterogeneity_plot <- rna_meta_aggregated_all_statistics %>%
+  mutate(label = cut(
+    pval.Q,
+    breaks = c(0, 0.001, 0.01, 0.05, 1),
+    labels = c("***", "**", "*", "")
+  ))  %>%
+  ggplot(aes(
+    x = factor(Analysis_subset), 
+    y = factor(
+      Variable, levels = rev(order_variables)),
+    fill = I2,
+    label = label)) +
+  geom_tile() +
+  geom_text() +
+  scale_fill_gradient2(low = "#075AFF",
+                       mid = "white",
+                       high = "#FF0000") +
+  theme_Publication() +
+  labs(y = "") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  theme(legend.position = "right", legend.direction = "vertical") +
+  theme(legend.key.size = unit(0.75, 'cm')) +
+  labs(x = "")
+
+rna_heterogeneity_plot
+graph2pdf(rna_heterogeneity_plot,
+          here(output_dir, "meta_combined_effects_random_effects_het_rna.pdf"),
+    height = 9, width = 4.5)
+```
+
+# ----------
+# Lint script
+```{r}
+# lint("~/NKI_pancancer_neoadj_io/src/pancan_aggregate_meta.Rmd")
+lint(filename = "~/NKI_pancancer_neoadj_io/src/pancan_aggregate_meta.Rmd",
+  linters = unused_import_linter()
+)
+```
+
+# ----------
+
+# sessionInfo - Package Versions
+```{r sessionInfo}
+sessionInfo()
+```

@@ -1,0 +1,1008 @@
+---
+title: "neoadjuvant pancancer WES analysis"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+params:
+  export: TRUE
+  output_dir: "Tissue_PDL1_TILs"
+  metadata: ""
+  filter_and_parse_vcfs: FALSE
+  exclude_niche_msi: FALSE
+  exclude_clinical_response: FALSE
+  response_definition: "Original" # MPR pCR
+---
+
+Author comment: 
+File description comment:
+The purpose of this script is to parse available PDL1 scores and CD8/CD8-PD1 staining data, and perform analysis for nICB response
+
+# Loading Packages
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning = FALSE, message = FALSE, dpi = 300, error = TRUE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# Install if necessary install.packages("tidyverse")
+# Install if necessary BiocManager::install("DESeq2")
+
+# library("devtools")
+# BiocManager::install("VariantAnnotation")
+library(tidyverse)
+library(readxl)
+source("helper_functions.R")
+library(ggpubr)
+library(meta)
+library(forestplot)
+
+set.seed(42)
+select <- dplyr::select
+rename <- dplyr::rename
+here <- here::here
+
+```
+
+
+
+# Setup output folder
+```{r, echo = FALSE, include = FALSE}
+export <- params$export
+analyze_specific_trial <- params$analyze_specific_trial
+run_meta_analysis <- params$run_meta_analysis   
+generate_heatmaps <- params$generate_heatmaps
+
+# generate output directory
+output_dir <- here("data", "processed", params$output_dir)
+print(output_dir)
+output_dir_plots <- here(output_dir, "plots")
+
+data_dir <- here("data", "processed")
+combined_dir <- here(data_dir, "gene_signatures")
+
+# if output_dir does not exist, create it
+if (!dir.exists(output_dir)) {
+    dir.create(output_dir)
+    dir.create(output_dir_plots)
+} else {
+  print("Output folder already exists")
+}
+
+```
+
+# ----------
+# Annotation color
+```{r}
+
+# annotation_color_list = list(
+#   Response = c(NR = "#F8766D", R = "#619CFF"),
+#   Treatment = c(Pre = "#00BA38", Post = "#F564E3"),
+#   Celecoxib = c(Yes = "#00BFC4", No = "#CD9600"),
+#   KRAS_12X = c(G12 = "#333333", not_G12 = "#CCCCCC"),
+#   B2M = c(Mut = "#333333", WT = "#CCCCCC"),
+#   KRAS = c(Mut = "#333333", WT = "#CCCCCC"),
+#   TP53 = c(Mut = "#333333", WT = "#CCCCCC")
+# )
+
+# Define colours for each group
+Color_NR <- "#F8766D"
+Color_R <- "#00BA38" # "#619CFF"
+Color_NA <- "#CD9600"
+Color_Pre <- "#619CFF"
+Color_Post <- "#F564E3"
+Color_HNSCC <- "#009292"
+Color_CSCC <- "#CD9600"
+Color_Urothelial <- "#B66DFF"
+Color_LN_melanoma <- "#00BFC4"
+Color_Colon <- "#F8766D"
+Color_Colon_MSI <- "#B73A3A"
+Color_Colon_MSS <- "#23C26F"
+Color_TNBC <- "#FEB5DA"
+Color_BELLINI <- "#FEB5DA"
+Color_IMCISION <- "#009292"
+Color_MATISSE <- "#CD9600"
+Color_NABUCCO <- "#B66DFF"
+Color_BELLINI <- "#FEB5DA"
+Color_NICHE_MSS <- "#23C26F"
+Color_NICHE_MSI <- "#B73A3A"
+Color_OpACIN_neo <- "#00BFC4"
+Color_PRADO <- "#619CFF"
+
+annotation_color_list = list(
+  Response = c(NR = Color_NR, R = Color_R),
+  Treatment = c(Pre = Color_Pre, Post = Color_Post),
+  Histology = c(LN_melanoma = Color_LN_melanoma, Urothelial = Color_Urothelial,
+                Colon = Color_Colon, HNSCC = Color_HNSCC, TBNC = Color_TNBC,
+                CSCC = Color_CSCC),
+  Trial = c(BELLINI = Color_BELLINI, IMCISION = Color_IMCISION,
+            MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
+            `NICHE-MSS` = Color_NICHE_MSS, `NICHE-MSI` = Color_NICHE_MSI,
+            OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO))
+
+trial_colors <- c(BELLINI = Color_BELLINI, IMCISION = Color_IMCISION,
+            MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
+            `NICHE-MSS` = Color_NICHE_MSS, `NICHE-MSI` = Color_NICHE_MSI,
+            OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO)
+
+trial_colors_combined <- c(Combined = "#999999", BELLINI = Color_BELLINI,
+                           IMCISION = Color_IMCISION,
+            MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
+            `NICHE-MSS` = Color_Colon_MSS, `NICHE-MSI` = Color_NICHE_MSI,
+            OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO)
+
+histology_msi_mss_colors <- c(`Colon-MSI`= Color_Colon_MSI,
+                              `Colon-MSS`= Color_Colon_MSS,
+                              CSCC = Color_CSCC, HNSCC = Color_HNSCC, 
+                              LN_melanoma = Color_LN_melanoma,
+                              TBNC = Color_TNBC,
+                              Urothelial = Color_Urothelial)
+
+```
+
+```{r}
+patient_metadata_combined <- read_csv2(
+  here("data", "processed", "metadata", "patient_metadata_combined.csv"))
+```
+
+
+# ----------
+# BELLINI
+```{r}
+BELLINI_tissue_raw <- read_excel(
+  here("data", "external", "PDL1_CD8_PD1_data",
+       "M18BEL_for_Pedro_28042026.xlsx"))
+
+BELLINI_tissue_pre <- BELLINI_tissue_raw %>%
+  filter(Timepoint == "Pre") %>% mutate(Patient = paste0("BEL", Patient_ID))
+
+table(BELLINI_tissue_pre$Patient %in% patient_metadata_combined$Patient)
+BELLINI_tissue_pre$Patient[
+  !BELLINI_tissue_pre$Patient %in% patient_metadata_combined$Patient]
+
+# Patients without RNA/DNA Pre treatment
+BELLINI_tissue_pre_f <- BELLINI_tissue_pre %>%
+  rename(Cohort_ID_ABC = Cohort) %>%
+  filter(Patient %in% patient_metadata_combined$Patient) %>%
+  filter(!Patient %in% c("BEL53")) %>%
+  left_join(patient_metadata_combined, by = "Patient") %>%
+  mutate(PDL1_CPS = parse_number(CPS_pre),
+         CD8_per_um2 = parse_number(CD8_area),
+         CD8_PD1_per_um2 = parse_number(CD8PD1_area)) %>% 
+  mutate(CD8_per_mm2 = CD8_per_um2 * 1e6,
+         CD8_PD1_per_mm2 = CD8_PD1_per_um2 * 1e6) # Convert area to mm2
+
+BELLINI_tissue_pre_f %>% factor_summary()
+```
+
+```{r}
+BELLINI_tissue_pre_f %>%
+  ggplot(aes(x = CD8_per_mm2, y = CD8_PD1_per_mm2)) +
+  geom_point() + theme_Publication()
+
+BELLINI_tissue_pre_f %>%
+  ggplot(aes(x = Response, y = CD8_per_mm2, fill = Response)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  labs(title = "BELLINI") +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE)
+
+BELLINI_tissue_pre_f %>%
+  ggplot(aes(x = Response, y = CD8_PD1_per_mm2, fill = Response)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  labs(title = "BELLINI") +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE)
+
+BELLINI_tissue_pre_f %>%
+  ggplot(aes(x = Response, y = PDL1_CPS, fill = Response)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.15) + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  labs(title = "BELLINI") +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE)
+
+BELLINI_tissue_pre_f %>%
+  ggplot(aes(x = Response, y = CD8_per_mm2, fill = Response)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  facet_wrap(~Cohort_id) +
+  labs(title = "BELLINI") +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE)
+
+BELLINI_tissue_pre_f %>%
+  ggplot(aes(x = Response, y = CD8_PD1_per_mm2, fill = Response)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  facet_wrap(~Cohort_id) +
+  labs(title = "BELLINI") +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE)
+
+BELLINI_tissue_pre_f %>%
+  ggplot(aes(x = Response, y = PDL1_CPS, fill = Response)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.15) + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  facet_wrap(~Cohort_id) +
+  labs(title = "BELLINI") +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE)
+```
+
+# ----------
+# NICHE
+```{r}
+NICHE_CD8_PD1_raw <- read_csv2(
+  here("data", "external","PDL1_CD8_PD1_data", "NICHE1_pMMR_CD8_PD1.csv"))
+
+table(NICHE_CD8_PD1_raw$Patient %in% patient_metadata_combined$Patient)
+
+NICHE_CD8_PD1 <- NICHE_CD8_PD1_raw %>%
+  left_join(patient_metadata_combined, by = c(
+    "Patient", "Response", "Response_detail"))
+
+colnames(NICHE_CD8_PD1)
+
+NICHE_CD8_PD1 %>%
+  ggplot(aes(x = Response, y = CD8_per_mm2, fill = Response)) +
+  geom_boxplot() + geom_point() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  labs(title = "NICHE-1 pMMR") +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE)
+
+NICHE_CD8_PD1 %>%
+  ggplot(aes(x = Response, y = CD8_PD1_per_mm2, fill = Response)) +
+  geom_boxplot() + geom_point() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  labs(title = "NICHE-1 pMMR") +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE)
+
+```
+
+# ----------
+# IMCISION
+```{r, fig.height = 8, fig.width = 8}
+IMCISION_PDL1_CD3_CD8a <- read_excel(
+  here("data", "external", "paper_supplementaries",
+       "Vos_IMCISION_41467_2021_26472_MOESM4_ESM.xlsx"),
+  sheet = "Supp. Fig. 8a") %>%
+  filter(!is.na(ID))
+
+colnames(IMCISION_PDL1_CD3_CD8a)
+
+IMCISION_PDL1_CD3_CD8b <- read_excel(
+  here("data", "external", "paper_supplementaries",
+       "Vos_IMCISION_41467_2021_26472_MOESM4_ESM.xlsx"),
+  sheet = "Supp. Fig. 8b") %>% filter(!is.na(ID))
+colnames(IMCISION_PDL1_CD3_CD8b)
+
+IMCISION_PDL1_CD3_CD8 <- IMCISION_PDL1_CD3_CD8a %>%
+  full_join(IMCISION_PDL1_CD3_CD8b) %>%
+  setNames(c("ID", "Response_orig", "PDL1_CPS", "CD3_CD8_per_mm2",
+             "Tumor_mutational_load", "AID_APOBEC_Signature_2")) %>%
+  mutate(Patient = paste0("IMC_", ID)) %>%
+  left_join(patient_metadata_combined, by = "Patient") %>%
+  mutate(PDL1_CPS = extract_numeric(PDL1_CPS),
+         CD3_CD8_per_mm2 = extract_numeric(CD3_CD8_per_mm2)) %>%
+  mutate(CD8_per_mm2 = CD3_CD8_per_mm2) # Assume all CD8s are CD3 positive
+
+IMCISION_PDL1_CD3_CD8 %>% factor_summary()
+
+rm(IMCISION_PDL1_CD3_CD8a, IMCISION_PDL1_CD3_CD8b)
+```
+
+```{r}
+table(IMCISION_PDL1_CD3_CD8$Response_orig,
+      IMCISION_PDL1_CD3_CD8$Response)
+
+IMCISION_PDL1_CD3_CD8 %>%
+  ggplot(aes(x = Response_orig,
+             y = CD3_CD8_per_mm2)) +
+  geom_boxplot() + geom_point() + theme_Publication() +
+  labs(title = "IMCISION")
+
+IMCISION_PDL1_CD3_CD8 %>%
+  ggplot(aes(x = Response_orig,
+             y = Tumor_mutational_load)) +
+  geom_boxplot() + geom_point() + theme_Publication() +
+  labs(title = "IMCISION")
+
+IMCISION_PDL1_CD3_CD8 %>%
+  ggplot(aes(x = Response_orig,
+             y = PDL1_CPS)) +
+  geom_boxplot() + geom_point() + theme_Publication() +
+  labs(title = "IMCISION")
+
+IMCISION_PDL1_CD3_CD8 %>%
+  ggplot(aes(x = Response,
+             y = CD3_CD8_per_mm2, fill = Response)) +
+  geom_boxplot(outlier.shape = NA) + geom_point() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  labs(title = "IMCISION")+
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE)
+
+IMCISION_PDL1_CD3_CD8 %>%
+  ggplot(aes(x = Response,
+             y = CD3_CD8_per_mm2, fill = Response)) +
+  geom_boxplot(outlier.shape = NA) + geom_point() + theme_Publication() +
+  facet_wrap(~Response_type) +
+  labs(title = "IMCISION") +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE)
+
+IMCISION_PDL1_CD3_CD8 %>%
+  ggplot(aes(x = Response, y = Tumor_mutational_load,
+             fill = Response)) + geom_boxplot() +
+  geom_point(outlier.shape = NA) + theme_Publication() +
+  labs(title = "IMCISION") +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE)
+
+IMCISION_PDL1_CD3_CD8 %>%
+  ggplot(aes(x = Response, y = PDL1_CPS,
+             fill = Response)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point() + theme_Publication() +
+  labs(title = "IMCISION") +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE)
+
+IMCISION_PDL1_CD3_CD8 %>%
+  ggplot(aes(x = Response, y = PDL1_CPS,
+             fill = Response)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point() + theme_Publication() + facet_wrap(~Response_type) +
+  labs(title = "IMCISION") +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE)
+
+```
+
+# ----------
+# NABUCCO
+## PDL1
+```{r}
+NABUCCO_PDL1_raw <- read_excel(here("data", "external", "paper_supplementaries",
+                                "Stockem et al 2025 Table S3.xlsx")) %>%
+  filter(`Study ID` !=  "Abbreviations: NA = not available")
+
+NABUCCO_PDL1 <- NABUCCO_PDL1_raw
+colnames(NABUCCO_PDL1)
+colnames(NABUCCO_PDL1) <- c("Study_ID", "PDL1_CPS_discrete",
+                            "PDL1_IC_discrete", "PDL1_TPS_discrete",
+                            "Response_orig")
+
+NABUCCO_PDL1 <- NABUCCO_PDL1 %>%
+  mutate(PDL1_CPS_discrete = ifelse(
+    is.na(PDL1_CPS_discrete), "NA", PDL1_CPS_discrete)) %>%
+  mutate(PDL1_TPS_discrete = ifelse(
+    is.na(PDL1_TPS_discrete), "NA", PDL1_TPS_discrete)) %>%
+  mutate(PDL1_IC_discrete = ifelse(
+    is.na(PDL1_IC_discrete), "NA", PDL1_IC_discrete)) %>%
+  filter(! Study_ID %in% 34)%>%
+  filter(! Study_ID %in% c(33, 52))  # NA response
+
+NABUCCO_PDL1 <- NABUCCO_PDL1 %>%
+  mutate(PDL1_CPS_discrete = ifelse(
+    PDL1_CPS_discrete == "1", "CPS >= 10", PDL1_CPS_discrete)) %>%
+  mutate(PDL1_CPS_discrete = ifelse(
+    PDL1_CPS_discrete == "0", "CPS < 10", PDL1_CPS_discrete)) %>%
+  mutate(PDL1_TPS_discrete = ifelse(
+    PDL1_TPS_discrete == "1", "TPS >= 1", PDL1_TPS_discrete)) %>%
+  mutate(PDL1_TPS_discrete = ifelse(
+    PDL1_TPS_discrete == "0", "TPS < 1", PDL1_TPS_discrete)) %>%
+  mutate(PDL1_IC_discrete = ifelse(
+    PDL1_IC_discrete == "0", "IC < 1", PDL1_IC_discrete)) %>%
+  mutate(PDL1_IC_discrete = ifelse(
+    PDL1_IC_discrete == "1", "IC 1-5", PDL1_IC_discrete))%>%
+  mutate(PDL1_IC_discrete = ifelse(
+    PDL1_IC_discrete == "2", "IC >5", PDL1_IC_discrete))
+
+NABUCCO_PDL1 <- NABUCCO_PDL1 %>%
+  mutate(Patient = paste0("NAB_S", Study_ID)) %>%
+  left_join(patient_metadata_combined)
+table(NABUCCO_PDL1$Patient %in% patient_metadata_combined$Patient)
+
+table(NABUCCO_PDL1$PDL1_CPS_discrete, useNA = "ifany")
+table(NABUCCO_PDL1$PDL1_TPS_discrete, useNA = "ifany")
+table(NABUCCO_PDL1$PDL1_CPS_discrete,
+      NABUCCO_PDL1$PDL1_IC_discrete, useNA = "ifany")
+table(NABUCCO_PDL1$PDL1_CPS_discrete,
+      NABUCCO_PDL1$PDL1_TPS_discrete, useNA = "ifany")
+
+NABUCCO_PDL1_detailed <- read_excel(
+  here("data", "external", "PDL1_CD8_PD1_data",
+       "NABUCCO Response per PD-l1_Pedro_16-4-2026.xlsx")) 
+
+NABUCCO_PDL1 %>% factor_summary()
+```
+
+## CD8 PD1
+
+```{r}
+NABUCCO_CD8_PD1_raw <- read_excel(
+  here("data", "external", "PDL1_CD8_PD1_data",
+       "cd8pd1_summarized_NABUCCO_1_and_2.xlsx"))
+
+table(NABUCCO_CD8_PD1_raw$`Study ID`, NABUCCO_CD8_PD1_raw$tur_cys) %>%
+  as.data.frame() %>%
+  filter(Freq > 0) %>%
+  pull(Var1) %>%
+  table() %>%
+  as.data.frame() %>%
+  filter(Freq > 1)
+
+# Exclude patients S34 and S33
+# S33 non evaluable response
+# S34 without RNA or DNA data
+NABUCCO_CD8_PD1_raw %>%
+  select(`Study ID`, tur_cys, tnumber) %>%
+  unique() %>%
+  pivot_wider(names_from = tur_cys, values_from = tnumber)
+
+NABUCCO_CD8_PD1_pre <- NABUCCO_CD8_PD1_raw %>%
+  filter(tur_cys == "TUR") %>%
+  rename(Study_ID = "Study ID") %>%
+  mutate(Patient = paste0("NAB_S", Study_ID))
+
+table(NABUCCO_CD8_PD1_pre$Patient %in% patient_metadata_combined$Patient)
+NABUCCO_CD8_PD1_pre$Patient[
+  !NABUCCO_CD8_PD1_pre$Patient %in% patient_metadata_combined$Patient] %>%
+  unique()
+
+NABUCCO_CD8_PD1_pre_f <- NABUCCO_CD8_PD1_pre %>%
+  filter(Patient %in% patient_metadata_combined$Patient) %>%
+  left_join(patient_metadata_combined, by = "Patient") 
+
+NABUCCO_CD8_PD1_pre %>% factor_summary()
+
+```
+
+```{r}
+NABUCCO_CD8_PD1_pre_check <- NABUCCO_CD8_PD1_pre_f %>%
+  select(c(tnumber, classification, n, total_n, n_frac, `Tissue Area (μm²)`,
+           density, Cohort_id)) %>%
+  mutate(n_frac2 = n / total_n,
+         density2 = n / `Tissue Area (μm²)`)
+
+# Calculation check
+NABUCCO_CD8_PD1_pre_check %>%
+  ggplot(aes(x = n_frac, y = n_frac2, color = classification)) +
+  geom_point() + theme_Publication() +
+  facet_wrap(~classification, scales = "free") +
+  labs(title = "NABUCCO")
+
+NABUCCO_CD8_PD1_pre_check %>%
+  ggplot(aes(x = density, y = density2 * 1e6)) +
+  geom_point() + theme_Publication() +
+  labs(title = "NABUCCO") # 1e6 factor
+
+# Distribution check
+NABUCCO_CD8_PD1_pre_check %>%
+  ggplot(aes(x = classification, y = n_frac, color = classification)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point() + geom_boxplot() + theme_Publication() +
+  labs(title = "NABUCCO")
+
+NABUCCO_CD8_PD1_pre_check %>%
+  ggplot(aes(x = classification, y = density, color = classification)) +
+  geom_boxplot(outlier.shape = NA)  +
+  geom_point()+ theme_Publication() +
+  labs(title = "NABUCCO")
+
+NABUCCO_CD8_PD1_pre_f %>%
+  filter(classification %in% c("CD8+PD1+")) %>%
+  select(Patient, density) %>% rename(CD8_PD1_per_mm2 = density)
+
+NABUCCO_CD8_PD1_pre_f %>%
+  filter(classification %in% c("CD8+PD1-", "CD8+PD1+")) %>%
+  group_by(Patient) %>% summarize(CD8_per_mm2 = sum(density)) %>%
+  ungroup()
+
+NABUCCO_CD8_PD1_pre_f %>%
+  filter(classification %in% c("CD8+PD1-", "CD8+PD1+")) %>%
+  group_by(Patient) %>%
+  summarize(n = sum(n), `Tissue Area (μm²)` = `Tissue Area (μm²)`) %>% 
+  ungroup() %>%
+  unique() %>%
+  mutate(density = n / `Tissue Area (μm²)` * 1e6)
+
+NABUCCO_CD8_PD1_pre_p <- NABUCCO_CD8_PD1_pre_f %>%
+  filter(classification %in% c("CD8+PD1-", "CD8+PD1+")) %>%
+  group_by(Patient) %>%
+  summarize(CD8_per_mm2 = sum(density)) %>%
+  ungroup() %>%
+  full_join(NABUCCO_CD8_PD1_pre_f %>%
+              filter(classification %in% c("CD8+PD1+")) %>%
+              select(Patient, density) %>%
+              rename(CD8_PD1_per_mm2 = density)
+  ) %>%
+  mutate(CD8_PD1_per_mm2 = ifelse(
+    is.na(CD8_PD1_per_mm2), 0, CD8_PD1_per_mm2)) %>%
+  left_join(patient_metadata_combined)
+```
+
+
+```{r, fig.height = 6, fig.width = 6}
+
+NABUCCO_CD8_PD1_pre_check %>%
+  ggplot(aes(x = Cohort_id, y = density, color = classification)) +
+  geom_boxplot(outlier.shape = NA)  +
+  geom_point() + theme_Publication() +
+  facet_wrap(~classification) +
+  labs(title = "NABUCCO")+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+NABUCCO_CD8_PD1_pre_check %>%
+  ggplot(aes(x = Cohort_id, y = density, color = classification)) +
+  geom_boxplot(outlier.shape = NA)  +
+  geom_point() + theme_Publication() +
+  facet_wrap(~classification, scales = "free") +
+  expand_limits(y = 0) +
+  labs(title = "NABUCCO") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+NABUCCO_CD8_PD1_pre_p %>%
+  ggplot(aes(x = Cohort_id, y = CD8_per_mm2)) +
+  geom_boxplot(outlier.shape = NA)  +
+  geom_point() + theme_Publication() +
+  expand_limits(y = 0) +
+  labs(title = "NABUCCO") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+table(NABUCCO_CD8_PD1_pre_p$Cohort_id)
+
+NABUCCO_CD8_PD1_pre_p %>%
+  ggplot(aes(x = Cohort_id, y = CD8_PD1_per_mm2)) +
+  geom_boxplot(outlier.shape = NA)  +
+  geom_point() + theme_Publication() +
+  expand_limits(y = 0) +
+  labs(title = "NABUCCO") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+
+# ----------
+# Opacin Neo
+## PDL1 TPS
+```{r}
+Opacin_neo_PDL1_raw <- read_excel(
+  here("data", "external", "PDL1_CD8_PD1_data",
+       "PD-L1_OpACINneo_04052026.xlsx"))
+
+table(Opacin_neo_PDL1_raw$`PD-L1`)
+
+Opacin_neo_PDL1 <- Opacin_neo_PDL1_raw %>%
+  mutate(Patient = paste0("OpACIN_neo", Patient_ID)) %>%
+  select(Patient, `PD-L1`) %>%
+  setNames(c("Patient", "PDL1_TPS")) %>%
+  filter(!is.na(PDL1_TPS))  %>%
+  filter(PDL1_TPS != "NA") %>%
+  mutate(PDL1_TPS_cat = ifelse(PDL1_TPS %in% c("1-50%", ">50%"),
+                               "TPS >= 1", NA))%>%
+  mutate(PDL1_TPS_cat = ifelse(PDL1_TPS %in% c("<1%"),
+                               "TPS < 1", PDL1_TPS_cat)) %>%
+  filter(Patient %in% patient_metadata_combined$Patient) %>%
+  left_join(patient_metadata_combined) 
+
+table(Opacin_neo_PDL1$PDL1_TPS, Opacin_neo_PDL1$Response)
+table(Opacin_neo_PDL1$PDL1_TPS_cat, Opacin_neo_PDL1$Response)
+
+```
+
+# ----------
+# PRADO
+## PDL1 TPS
+```{r}
+PRADO_PDL1_raw <- read_excel(
+  here("data", "external", "PDL1_CD8_PD1_data",
+       "PRADO_annotation_DNA_RNA_complete_20221124_copy.xlsx"))
+list.files( here("data", "external", "PDL1_CD8_PD1_data"))
+
+table(PRADO_PDL1_raw$PDL1_CAT)
+
+PRADO_PDL1 <- PRADO_PDL1_raw  %>%
+  mutate(Patient = paste0("PRADO_", studyID))%>%
+  select(Patient, PDL1, PDL1_CAT) %>%
+  setNames(c("Patient", "PDL1_TPS", "PDL1_TPS_cat")) %>%
+  filter(Patient %in% patient_metadata_combined$Patient) %>%
+  left_join(patient_metadata_combined) %>%
+  filter(!PDL1_TPS %in% c("unknown")) %>%
+  mutate(PDL1_TPS_cat = ifelse(PDL1_TPS_cat %in% c("≥ 1%"),
+                               "TPS >= 1", PDL1_TPS_cat))%>%
+  mutate(PDL1_TPS_cat = ifelse(PDL1_TPS_cat %in% c("˂ 1%"),
+                               "TPS < 1", PDL1_TPS_cat))
+
+table(PRADO_PDL1$PDL1_TPS, PRADO_PDL1$Response)
+table(PRADO_PDL1$PDL1_TPS_cat, PRADO_PDL1$Response)
+
+```
+
+# ----------
+
+# Combine CD8 PD1
+```{r}
+CD8_combined <- NICHE_CD8_PD1 %>%
+  select(Patient, Trial, Response, CD8_per_mm2) %>%
+  rbind(IMCISION_PDL1_CD3_CD8 %>%
+              select(Patient, Trial, Response, CD3_CD8_per_mm2) %>%
+              rename(CD8_per_mm2 = "CD3_CD8_per_mm2")) %>%
+  rbind(BELLINI_tissue_pre_f %>%
+              select(Patient, Trial, Response, CD8_per_mm2)) %>%
+  rbind(NABUCCO_CD8_PD1_pre_p %>%
+              select(Patient, Trial, Response, CD8_per_mm2)) %>%
+  left_join(patient_metadata_combined)
+
+CD8_PD1_combined <- NICHE_CD8_PD1 %>%
+  select(Patient, Trial, Response, CD8_PD1_per_mm2) %>%
+  rbind(BELLINI_tissue_pre_f %>%
+              select(Patient, Trial, Response, CD8_PD1_per_mm2)) %>%
+  rbind(NABUCCO_CD8_PD1_pre_p %>%
+              select(Patient, Trial, Response, CD8_PD1_per_mm2))  %>%
+  left_join(patient_metadata_combined)
+
+CD8_combined %>% write_csv2(here(output_dir, "CD8_combined.csv"))
+CD8_PD1_combined %>% write_csv2(here(output_dir, "CD8_PD1_combined.csv"))
+
+table(CD8_combined$Trial)
+round(43/44, 2)
+round(38/51, 2)
+round(29/31, 2)
+
+table(CD8_PD1_combined$Trial)
+round(43/44, 2)
+round(38/51, 2)
+round(29/31, 2)
+```
+
+
+```{r}
+CD8_combined %>%
+  ggplot(aes(x = Trial, y = CD8_per_mm2, fill = Trial)) +
+  geom_boxplot() + geom_point() + theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  scale_fill_manual(values = trial_colors) +
+  guides(fill = FALSE)
+
+CD8_PD1_combined %>%
+  ggplot(aes(x = Trial, y = CD8_PD1_per_mm2, fill = Trial)) +
+  geom_boxplot() + geom_point() + theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  scale_fill_manual(values = trial_colors) +
+  guides(fill = FALSE)
+
+```
+
+```{r}
+CD8_combined %>%
+  ggplot(aes(x = Response, y = CD8_per_mm2, fill = Response)) +
+  geom_boxplot() + geom_point() +
+  stat_compare_means(method = "wilcox") + theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE) +
+  labs(title = "Combined")
+```
+
+```{r, fig.height = 7, fig.width = 10}
+table(CD8_combined$Trial, CD8_combined$Response)
+table(CD8_PD1_combined$Trial, CD8_PD1_combined$Response,
+      is.na(CD8_PD1_combined$CD8_PD1_per_mm2))
+
+CD8_combined %>%
+  ggplot(aes(x = Response, y = CD8_per_mm2, fill = Response)) +
+  geom_boxplot() + geom_point() + facet_wrap(~Trial, scales = "free") +
+  stat_compare_means(method = "wilcox") + theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE) +
+  labs(title = "Combined")
+```
+
+```{r}
+CD8_PD1_combined %>%
+  ggplot(aes(x = Response, y = CD8_PD1_per_mm2, fill = Response)) +
+  geom_boxplot() + geom_point() +
+  stat_compare_means(method = "wilcox") + theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE)
+```
+
+```{r, fig.height = 5, fig.width = 10}
+
+table(CD8_PD1_combined$Trial, CD8_PD1_combined$Response,
+      is.na(CD8_PD1_combined$CD8_PD1_per_mm2))
+
+CD8_PD1_combined %>%
+  ggplot(aes(x = Response, y = CD8_PD1_per_mm2, fill = Response)) +
+  geom_boxplot() + geom_point() + facet_wrap(~Trial) +
+  stat_compare_means(method = "wilcox") + theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE)
+
+```
+
+# ----------
+
+# Combine PDL1
+
+```{r}
+
+PDL1_CPS_combined <- IMCISION_PDL1_CD3_CD8 %>%
+  select(Patient, PDL1_CPS) %>%
+  rbind(BELLINI_tissue_pre_f %>%
+  select(Patient, PDL1_CPS)) %>%
+    mutate(PDL1_CPS_discrete = ifelse(PDL1_CPS >= 10,
+                                      "CPS >= 10", "CPS < 10")) %>%
+  full_join(NABUCCO_PDL1 %>%
+              select(Patient, PDL1_CPS_discrete)) %>%
+  left_join(patient_metadata_combined)
+
+PDL1_CPS_combined %>% write_csv2(here(output_dir, "PDL1_CPS_combined.csv"))
+
+```
+
+```{r}
+PDL1_CPS_combined %>%
+  ggplot(aes(x = PDL1_CPS_discrete, y = PDL1_CPS, fill = Trial)) +
+  geom_boxplot() + geom_point() + theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  scale_fill_manual(values = trial_colors) +
+  guides(fill = FALSE) + facet_wrap(~Trial) +
+  geom_hline(yintercept = 10, linetype = "dashed")
+
+PDL1_CPS_combined %>%
+  ggplot(aes(x = Trial, y = PDL1_CPS, fill = Trial)) +
+  geom_boxplot() + geom_point() + theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  scale_fill_manual(values = trial_colors) +
+  guides(fill = FALSE)
+
+PDL1_CPS_combined %>%
+  ggplot(aes(x = Trial, y = PDL1_CPS, fill = Trial)) +
+  geom_boxplot() + geom_point() + theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  scale_fill_manual(values = trial_colors) +
+  guides(fill = FALSE)
+
+PDL1_CPS_combined %>%
+  ggplot(aes(x = Response, y = PDL1_CPS, fill = Response)) +
+  geom_boxplot() + geom_point() + facet_wrap(~Trial) +
+  stat_compare_means(method = "wilcox") + theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE)
+```
+
+## Discrete
+```{r}
+table(PDL1_CPS_combined$Trial,
+      PDL1_CPS_combined$PDL1_CPS_discrete) %>%
+  as.data.frame() %>%
+  setNames(c("Trial","PDL1_CPS_discrete", "Freq")) %>%
+  ggplot(aes(x = Trial, y = Freq, fill = PDL1_CPS_discrete)) +
+  geom_col() + theme_Publication()
+
+table(PDL1_CPS_combined$PDL1_CPS_discrete,
+      PDL1_CPS_combined$Response,
+      PDL1_CPS_combined$Trial)
+
+table(PDL1_CPS_combined$Trial,
+      PDL1_CPS_combined$PDL1_CPS_discrete) %>%
+  as.data.frame() %>%
+  setNames(c("Trial","PDL1_CPS_discrete", "Freq")) %>%
+  ggplot(aes(x = Trial, y = Freq, fill = PDL1_CPS_discrete)) +
+  geom_col() + theme_Publication()
+
+
+table(PDL1_CPS_combined$PDL1_CPS_discrete,
+      PDL1_CPS_combined$Response,
+      PDL1_CPS_combined$Trial) %>%
+  as.data.frame() %>%
+  setNames(c("PDL1_CPS_discrete", "Response", "Trial", "Freq"))
+
+table(PDL1_CPS_combined$PDL1_CPS_discrete,
+      PDL1_CPS_combined$Response,
+      PDL1_CPS_combined$Trial) %>%
+  as.data.frame() %>%
+  setNames(c("PDL1_CPS_discrete", "Response", "Trial", "Freq")) %>%
+  pivot_wider(values_from = Freq, names_from = Response) %>%
+  mutate(Total = NR + R, Response_rate = R / Total)
+
+table(PDL1_CPS_combined$PDL1_CPS_discrete,
+      PDL1_CPS_combined$Response,
+      PDL1_CPS_combined$Trial) %>%
+  as.data.frame() %>%
+  setNames(c("PDL1_CPS_discrete", "Response", "Trial", "Freq")) %>%
+  pivot_wider(values_from = Freq, names_from = Response) %>%
+  mutate(Total = NR + R, Response_rate = R / Total) %>%
+  ggplot(aes(PDL1_CPS_discrete, y = Response_rate)) + geom_col() +
+  theme_Publication() + facet_wrap(~Trial)
+
+PDL1_cat_combined <- PDL1_CPS_combined %>%
+  select(Patient, PDL1_CPS_discrete) %>%
+  setNames(c("Patient", "PDL1_group")) %>%
+  rbind(PRADO_PDL1 %>%
+  select(Patient, PDL1_TPS_cat) %>%
+  setNames(c("Patient", "PDL1_group"))) %>%
+  rbind(Opacin_neo_PDL1 %>%
+  select(Patient, PDL1_TPS_cat) %>%
+  setNames(c("Patient", "PDL1_group")))  %>%
+  mutate(PDL1_discrete_group = ifelse(
+    PDL1_group %in% c("TPS >= 1", "CPS >= 10"),
+    "PDL1_high", NA)) %>%
+  mutate(PDL1_discrete_group = ifelse(
+    PDL1_group %in% c("TPS < 1", "CPS < 10"),
+    "PDL1_low", PDL1_discrete_group)) %>%
+  left_join(patient_metadata_combined)
+  
+table(PDL1_cat_combined$PDL1_group,
+      PDL1_cat_combined$Response,
+      PDL1_cat_combined$Trial) %>%
+  as.data.frame() %>%
+  setNames(c("PDL1_group", "Response", "Trial", "Freq")) %>%
+  filter(! (
+    Trial %in% c("BELLINI", "IMCISION", "NABUCCO") &
+      PDL1_group %in% c("TPS < 1", "TPS >= 1"))) %>%
+  filter(! (
+    Trial %in% c("PRADO", "OpACIN_neo") &
+      PDL1_group %in% c("CPS < 10", "CPS >= 10")))  %>%
+  pivot_wider(values_from = Freq, names_from = Response) %>%
+  mutate(Total = NR + R, Response_rate = R / Total) %>%
+  ggplot(aes(PDL1_group, y = Response_rate)) + geom_col() +
+  theme_Publication() + facet_wrap(~Trial, scales = "free_x")
+
+table(PDL1_cat_combined$PDL1_group,
+      PDL1_cat_combined$Response,
+      PDL1_cat_combined$Trial) %>%
+  as.data.frame() %>%
+  setNames(c("PDL1_group", "Response", "Trial", "Freq")) %>%
+  filter(! (
+    Trial %in% c("BELLINI", "IMCISION", "NABUCCO") &
+      PDL1_group %in% c("TPS < 1", "TPS >= 1"))) %>%
+  filter(! (
+    Trial %in% c("PRADO", "OpACIN_neo") &
+      PDL1_group %in% c("CPS < 10", "CPS >= 10")))  %>%
+  pivot_wider(values_from = Freq, names_from = Response) %>%
+  mutate(Total = NR + R, Response_rate = R / Total) %>%
+  ggplot(aes(PDL1_group, y = Response_rate)) + geom_col() +
+  theme_Publication() + facet_wrap(~Trial, scales = "free")
+
+table(PDL1_cat_combined$PDL1_discrete_group,
+      PDL1_cat_combined$Response,
+      PDL1_cat_combined$Trial) %>%
+  as.data.frame() %>%
+  setNames(c("PDL1_discrete_group", "Response", "Trial", "Freq"))  %>%
+  pivot_wider(values_from = Freq, names_from = Response) %>%
+  mutate(Total = NR + R, Response_rate = R / Total) %>%
+  ggplot(aes(x = fct_rev(PDL1_discrete_group), y = Response_rate)) +
+  geom_col() + theme_Publication() +
+  facet_wrap(~Trial, scales = "free_x") + labs(x = "")
+
+table(PDL1_CPS_combined$Trial)
+table(PDL1_cat_combined$Trial)
+
+round(43/44, 2)
+round(56/64, 2)
+round(63/80, 2)
+
+PDL1_cat_combined %>% write_csv2(here(output_dir, "PDL1_cat_combined.csv"))
+```
+
+## Odds ratio
+
+```{r}
+PDL1_cat_data <- PDL1_cat_combined %>%
+    mutate(PDL1_discrete_group_n = ifelse(
+      PDL1_discrete_group %in% c("PDL1_high"), TRUE, FALSE))
+
+table(PDL1_cat_data$PDL1_discrete_group_n, PDL1_cat_data$Trial)
+table(PDL1_cat_data$PDL1_discrete_group_n, PDL1_cat_data$Response,
+      PDL1_cat_data$Trial)
+
+# Sourced from helper function
+trial_odds_ratio_df <- get_trial_or_estimates(
+  data = PDL1_cat_combined %>%
+    mutate(PDL1_discrete_group_n = ifelse(
+      PDL1_discrete_group %in% c("PDL1_high"), TRUE, FALSE)),
+  trial_list = c("Combined", "BELLINI", "NABUCCO", "IMCISION",
+                 "PRADO", "OpACIN_neo"),
+  variable_list = "PDL1_discrete_group_n")
+
+trial_odds_ratio_df
+
+trial_odds_ratio_df %>%
+  filter(Trial == "Combined") %>%
+  mutate(estimate = round(estimate, 2), p.value = round(p.value, 3)) %>%
+  arrange(-estimate) %>%
+  forestplot(labeltext = c(feature, n_feature_pos, n_feature_neg,
+                           estimate, p.value),
+             mean = "estimate", lower = "conf.low", upper = "conf.high",
+             clip = c(0.1, 20),
+             zero = 1,
+             boxsize = 0.375,
+             xlog = TRUE,
+             xlab = "log(OR) (95% CI)") %>%
+  fp_set_style(box = "royalblue",
+               line = "darkblue",
+               summary = "royalblue",
+               txt_gp = fpTxtGp(ticks = gpar(cex = 1),
+                                xlab  = gpar(cex = 1))
+               ) %>% 
+  fp_set_zebra_style("#EFEFEF") %>%
+  fp_add_header(feature = c("Feature"),
+                estimate = c("OR"),
+                n_feature_pos = c("n pos"),
+                n_feature_neg = c("n neg"),
+                p.value = c("p.value")) %>%
+  fp_add_lines()
+
+trial_odds_ratio_df %>%
+  mutate(estimate = round(estimate, 2), p.value = round(p.value, 4)) %>%
+  arrange(-estimate) %>%
+  forestplot(labeltext = c(Trial, n_feature_pos, n_feature_neg,
+                           estimate, p.value),
+             mean = "estimate", lower = "conf.low", upper = "conf.high",
+             clip = c(0.1, 20),
+             zero = 1,
+             boxsize = 0.375,
+             xlog = TRUE,
+             xlab = "log(OR) (95% CI)") %>%
+  fp_set_style(box = "royalblue",
+               line = "darkblue",
+               summary = "royalblue",
+               txt_gp = fpTxtGp(ticks = gpar(cex = 1),
+                                xlab  = gpar(cex = 1))
+               ) %>%
+  fp_set_zebra_style("#EFEFEF") %>%
+  fp_add_header(Trial = c("Trial"),
+                estimate = c("OR"),
+                n_feature_pos = c("n pos"),
+                n_feature_neg = c("n neg"),
+                p.value = c("p.value")) %>%
+  fp_add_lines()
+```
+
+## OR meta
+```{r}
+
+feature_odds_ratio_list <- "PDL1_discrete_group_n"
+
+# Sourced from helper function
+run_or_meta_analysis(meta_analysis_df = trial_odds_ratio_df %>%
+                               filter(!Trial %in% c("Combined",
+                                                    "Combined_excl_dMMR")),
+                     variable_list = feature_odds_ratio_list,
+                     output_suffix = "random_effects")
+
+```
+
+# ----------
+# Lint script
+```{r}
+
+library(lintr)
+# lint("~/NKI_pancancer_neoadj_io/src/pancan_aggregate_PDL1_TILs.Rmd")
+lint(filename = "~/NKI_pancancer_neoadj_io/src/pancan_aggregate_PDL1_TILs.Rmd",
+  linters = unused_import_linter()
+)
+```
+
+# ----------
+
+# sessionInfo - Package Versions
+
+```{r sessionInfo}
+sessionInfo()
+```

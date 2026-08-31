@@ -12,9 +12,11 @@ params:
   metadata: ""
   filter_and_parse_vcfs: FALSE
   exclude_niche_msi: FALSE
+  exclude_clinical_response: FALSE
+  response_definition: "Original" # Original MPR pCR
 ---
 
-Author comment: File description comment: The purpose of this script is to parse results from WES analysis vcf files, quality logs, comparing with RNAseq data filter_and_parse_vcfs
+Author comment: File description comment: The purpose of this script is to perform WES analysis on parsed WES files
 
 
 # Loading Packages
@@ -26,16 +28,14 @@ knitr::opts_chunk$set(
 )
 
 # Install if necessary install.packages("tidyverse")
-# Install if necessary BiocManager::install("DESeq2")
-
 # library("devtools")
-# devtools::install("~/Tools/TMBleR")
+# devtools::install_github("mskcc/facets-suite")
+# BiocManager::install("MutationalPatterns")
 # BiocManager::install("VariantAnnotation")
 # BiocManager::install("maftools")
 
 library(tidyverse)
 library(readxl)
-# library(TMBleR)
 library(maftools)
 library(ICAMS)
 source("helper_functions.R")
@@ -47,22 +47,13 @@ library(paletteer)
 library(corrplot)
 library(ggpointdensity)
 library(export)
-library(meta)
-# library(metafor)
 library(lsa)
-library(forestplot)
 library(export)
 library(MutationalPatterns)
-# library(data.table)
-# devtools::install_github("mskcc/facets-suite")
 library("facetsSuite")
-# BiocManager::install("MutationalPatterns")
-
-# install.packages("forestplot")
-# library("devtools")
-# devtools::install_github("ashishjain1988/MAFDash")
-# library(MAFDash)
-# library(data.table)
+library("BSgenome.Hsapiens.UCSC.hg38") #v 1.4.3
+library(GenomicRanges)
+library(purrr)
 
 MakeDataFrameFromVCF <- getFromNamespace("MakeDataFrameFromVCF", "ICAMS")
 
@@ -74,13 +65,20 @@ here <- here::here
 packageVersion("GSVA")
 ```
 
-# Setup output folder
+# Parse params and setup output folder
 
 ```{r Setup output, echo = FALSE, include = FALSE}
 print(params)
 
 export <- params$export
 filter_and_parse_vcfs <- params$filter_and_parse_vcfs
+response_definition <- params$response_definition
+
+# overwrite clinical exclusion in case of MPR/pCR response
+exclude_clinical_response <- params$exclude_clinical_response
+if (params$response_definition %in% c("MPR", "pCR")) {
+  exclude_clinical_response <- TRUE
+}
 
 # generate output directory
 output_dir <- here("data", "processed", params$output_dir)
@@ -88,6 +86,11 @@ wes_dir <- here("data", "processed", "WES_analysis")
 
 metadata_dir <- here("data", "processed", "metadata")
 print(output_dir)
+
+print(exclude_clinical_response)
+print(response_definition)
+
+
 # if output_dir does not exist, create it
 if (!dir.exists(output_dir)) {
     dir.create(output_dir)
@@ -124,10 +127,12 @@ histology_df <- data.frame(
 compare_r_nr_trials <- c("Combined", "BELLINI", "IMCISION", "MATISSE",
                          "NABUCCO", "NICHE-MSS", "OpACIN_neo", "PRADO")
 
-trial_list <- c("Combined", "BELLINI", "IMCISION", "MATISSE", "NABUCCO", "NICHE-MSS",  "NICHE-MSI", "OpACIN_neo", "PRADO")
+trial_list <- c("Combined", "BELLINI", "IMCISION", "MATISSE", "NABUCCO",
+                "NICHE-MSS",  "NICHE-MSI", "OpACIN_neo", "PRADO")
 
 trial_group_map <- data.frame(Trial = c(trial_list, trial_list, trial_list),
-           Group = c(trial_list, sprintf("%s_R", trial_list), sprintf("%s_NR", trial_list)),
+           Group = c(trial_list, sprintf("%s_R", trial_list),
+                     sprintf("%s_NR", trial_list)),
            Response = c(
              rep("Combined", length(trial_list)),
              rep("R", length(trial_list)),
@@ -209,6 +214,7 @@ histology_msi_mss_colors <- c(`Colon-MSI`= Color_Colon_MSI, `Colon-MSS`= Color_C
 ```{r}
 combined_maf_raw <- readRDS(here(output_dir, "combined_maf_raw.rds"))
 combined_maf_df <- read_csv2(here(output_dir, "combined_maf_df.csv"))
+sample_name_df <- read_csv2(here(output_dir, "sample_name_df.csv"))
 
 combined_maf_df %>% filter(is.na(Trial)) %>% pull(Source_MAF) %>% table(useNA = "ifany")
 # combined_maf_df_dmmr <- combined_maf_df %>% filter((Trial %in% "NICHE-MSI" & Tumor_nr == "Tumor_2"))
@@ -223,7 +229,6 @@ combined_maf_df <- combined_maf_df %>%
 combined_maf_df %>% select(Trial, Patient) %>% unique() %>% dim()
 combined_maf_df %>% select(Trial, Patient) %>% unique() %>% pull(Trial) %>% table()
 
-sample_name_df <- read_csv2(here(output_dir, "sample_name_df.csv"))
 dna_metadata <- dna_metadata %>% left_join(sample_name_df) 
 
 # Only a few patients do not have WES data
@@ -241,6 +246,39 @@ dna_metadata_f <- dna_metadata %>%
 
 dna_metadata_f %>% write_csv2(here(output_dir, "dna_metadata_maf.csv"))
 dna_metadata_f <- read_csv2(here(wes_dir, "dna_metadata_maf.csv"))
+```
+
+
+## Adapt Response Definition
+```{r}
+patient_metadata_combined <- read_csv2(
+  here("data", "processed", "metadata", "patient_metadata_combined.csv"))
+
+dna_metadata_f <- dna_metadata_f %>%
+    mutate(Response_original = Response) %>%
+  left_join(patient_metadata_combined %>%
+              select(Patient, Response_type, Response_pCR, Response_MPR)) %>%
+  mutate(Response_analysis = response_definition,
+         exclude_clinical_response = exclude_clinical_response)
+
+
+# Automatic in case response definition is MPR and pCR
+if (exclude_clinical_response) {
+  dna_metadata_f <- dna_metadata_f %>%
+    filter(Response_type == "Pathological")
+}
+
+if (response_definition == "MPR") {
+  dna_metadata_f <- dna_metadata_f %>%
+    filter(Response_type == "Pathological") %>%
+    mutate(Response = ifelse(Response_MPR == "MPR", "R", "NR"))
+}
+
+if (response_definition == "pCR") {
+  dna_metadata_f <- dna_metadata_f %>%
+    filter(Response_type == "Pathological") %>%
+    mutate(Response = ifelse(Response_pCR == "pCR", "R", "NR"))
+}
 
 # Sensitivity analysis excluding NICHE2 dMMR MSI samples
 if (params$exclude_niche_msi) {
@@ -263,7 +301,8 @@ dna_metadata %>% filter(!Patient %in% combined_maf_df$Patient)
 combined_maf_df_samples <- combined_maf_df %>%
   select(Patient, Trial, Tumor_Sample_Barcode) %>%
   unique() %>%
-  filter(!is.na(Patient))
+  filter(!is.na(Patient)) %>%
+  filter(Tumor_Sample_Barcode %in% dna_metadata_f$Tumor_Sample_Barcode)
 
 combined_maf_df_patients <- combined_maf_df %>%
   select(Patient, Trial) %>%
@@ -289,7 +328,7 @@ combined_maf_df %>%
 # Common variants, remove?
 ```{r}
 table(combined_maf_df$FILTER)
-combined_maf_df %>% filter(FILTER == "common_variant") %>% view()
+combined_maf_df %>% filter(FILTER == "common_variant")
 
 ```
 
@@ -299,7 +338,7 @@ combined_maf_df %>% filter(FILTER == "common_variant") %>% view()
 
 ```{r}
 combined_maf@clinical.data <- combined_maf@clinical.data %>%
-  left_join(dna_metadata %>%
+  left_join(dna_metadata_f %>%
               select(-c(Source_MAF, CF_sample_tumor, CF_sample_gl))) 
 
 combined_maf@data$Symbol_Variant <- sprintf(
@@ -702,8 +741,7 @@ tmb_group_trial_response %>%
   select(Trial, TMB_group, Proportion) %>%
   mutate(Proportion = round(Proportion, 2)) %>%
   pivot_wider(names_from = TMB_group, values_from = Proportion) %>%
-  left_join(response_rates) %>%
-  view()
+  left_join(response_rates)
 
 tmb_group_trial_response %>%
   ggplot(aes(x = reorder(Trial_TMB_group, Proportion),
@@ -752,7 +790,8 @@ combined_maf_dp20_vaf_df <- combined_maf_dp20_vaf_df %>%
 combined_maf_dp20_vaf_df %>%
   write_csv2(here(output_dir, "combined_maf_dp20_vaf_df.csv"))
 
-combined_maf_dp20_vaf_df <- read_csv2(here(wes_dir, "combined_maf_dp20_vaf_df.csv"))
+combined_maf_dp20_vaf_df <- read_csv2(
+  here(wes_dir, "combined_maf_dp20_vaf_df.csv"))
 
 combined_maf_dp20_vaf_df %>% select(VAF) %>% summary()
 
@@ -1068,8 +1107,7 @@ tmb_group_trial_response %>%
   select(Trial, TMB_group, Proportion) %>%
   mutate(Proportion = round(Proportion, 2)) %>%
   pivot_wider(names_from = TMB_group, values_from = Proportion) %>%
-  left_join(response_rates) %>%
-  view()
+  left_join(response_rates)
 
 tmb_group_trial_response %>%
   ggplot(aes(x = reorder(Trial_TMB_group, Proportion),
@@ -1121,6 +1159,11 @@ n_variants_dp20_vaf_tmb %>%
 
 tmb_group_trial_response %>%
   write_csv2(here(output_dir, "tmb_group_trial_response.csv"))
+
+n_variants_dp20_vaf_tmb <- read_csv2(
+  here(output_dir, "n_variants_dp20_vaf_tmb.csv"))
+
+tmb_response_rate <- read_csv2(here(output_dir, "tmb_response_rate.csv"))
 
 ```
 
@@ -1563,61 +1606,12 @@ oncoplot(combined_maf_dp20_vaf, pathways = "smgbp",
          sortByAnnotation = TRUE)
 
 maftools_sigpw_pathways %>% filter(Pathway == "WNT") %>% pull(Gene) %>% unique()
-maftools_BP_SMG_pathways %>% filter(Pathway == "Wnt/B-catenin signaling") %>% pull(Gene) %>% unique()
+maftools_BP_SMG_pathways %>%
+  filter(Pathway == "Wnt/B-catenin signaling") %>% pull(Gene) %>% unique()
 
-oncoKB_cancerGeneList %>% filter(Hugo.Symbol %in% c("PTCH1", "CTNND1", "LZTR1", "NDP", "CHD4", "CHD8"))
+oncoKB_cancerGeneList %>%
+  filter(Hugo.Symbol %in% c("PTCH1", "CTNND1", "LZTR1", "NDP", "CHD4", "CHD8"))
 
-```
-
-# Oncoplot TOP100 in pathways
-
-```{r}
-top100_genes <- read_csv2(
-  here("data", "processed", "PanCancer_pathway_mutations", "all_pathways",
-       "Mutated_genes_ALL_patways_TOP_100_ensembl_gene_list.csv"))
-
-top100_genes <- read_delim(
-  here("data", "processed", "PanCancer_pathway_mutations",
-       "Oncoplot_top_mutated_genes_oncoKB",
-       "OncoPlot_pathway_mutated_genes_oncoKB.txt"), col_names =  FALSE) %>%
-  setNames(c("Gene_description", "Description"))
-
-top100_genes <- read_csv2(
-  here("data", "processed", "PanCancer_pathway_mutations",
-       "Oncoplot_top_mutated_genes_oncoKB",
-       "OncoPlot_pathway_mutated_genes_oncoKB.csv")) 
-
-top100_genes <- top100_genes %>% mutate()
-
-top100_genes$Gene %in% combined_maf_dp20_vaf_df$Hugo_Symbol
-
-oncoplot(combined_maf_dp20_vaf,
-         genes = top100_genes$Gene,
-         gene_mar = 8, fontSize = 0.6,
-         clinicalFeatures = c("Response", "Trial"),
-         annotationColor = annotation_color_list,
-         topBarData = "TMB",
-         sortByAnnotation = TRUE,
-         removeNonMutated = FALSE
-         )
-
-# Dev off only works from the console, and not from the rmd chunk. Copy and run
-# do not run from chunks and knit
-if (FALSE) {
-pdf(file = here(output_dir, "_oncoplot_top100_genes_pathway_response.pdf"),
-    width = 14, height = 18)
-oncoplot(combined_maf_dp20_vaf, genes = top100_genes$Gene,
-         gene_mar = 8, fontSize = 0.75,
-         clinicalFeatures = c("Response", "Trial"),
-         annotationColor = annotation_color_list,
-         topBarData = "TMB",
-         drawColBar = TRUE,
-         sortByAnnotation = TRUE,
-         removeNonMutated = FALSE
-         )
-dev.off()
-
-}
 ```
 
 # ----------
@@ -1760,187 +1754,6 @@ table(polyphen_sift_comparison_npathogenic_f$SIFT_score < 0.05,
 
 # ----------
 
-# Check dMMR proteins
-
-```{r}
-oncoplot(combined_maf_dp20_vaf, genes = dmmr_ptns,
-         clinicalFeatures = c("Trial", "Response"),
-         annotationColor = annotation_color_list,
-         topBarData = "TMB", logColBar = FALSE)
-
-combined_maf_dp20_vaf_df_dmmr <- combined_maf_dp20_vaf_df %>%
-  filter(SYMBOL %in% dmmr_ptns) %>%
-  mutate(Symbol_Variant = sprintf("%s_%s", SYMBOL, HGVSp_Short))
-
-combined_maf_dp20_vaf_df_dmmr %>% select(all_of(c(variant_eval_columns, "Patient", "Trial", "Tumor_Sample_Barcode"))) %>% view()
-
-combined_maf_dp20_vaf_df_dmmr_f <- combined_maf_dp20_vaf_df_dmmr %>%
-  filter(!Symbol_Variant %in% c("PMS2_p.S459L", "MLH1_p.E234K", "MSH6_p.L310F",
-"PMS2_p.P509S", "PMS2_p.P470S", "MSH2_p.G426E", "PMS2_p.S547L", "PMS2_p.P470F",
-"MSH6_p.P831S", "PMS2_p.E491K", "MLH1_p.S421G", "MSH6_p.R361H", "MSH2_p.V932A",
-"PMS2_p.S498G", "MLH1_p.P169S", "PMS2_p.S164F", "MLH1_p.S421G", 
-"MSH6_p.A23V", "MSH6_p.E368K", "MSH6_p.R361H", "MLH1_p.I655M", "PMS2_p.E5K") |
-  Trial == "NICHE-MSI")
-
-combined_maf_dp20_vaf_df_dmmr_removed <- combined_maf_dp20_vaf_df_dmmr %>%
-  filter(!Symbol_Variant %in% combined_maf_dp20_vaf_df_dmmr_f$Symbol_Variant)
-
-combined_maf_dp20_vaf_df_dmmr_removed %>%
-  select(all_of(c(variant_eval_columns, "Patient", "Tumor_Sample_Barcode")))
-
-combined_maf_dp20_vaf_df_dmmr_f %>%
-  select(all_of(c(variant_eval_columns, "Patient", "Tumor_Sample_Barcode")))
-
-# "MSH6_p.X1180_splice", "MSH2_p.P696L",
-#                                "MLH1_p.S44F", "PMS2_p.R563*", "MSH6_p.P903S",
-#                                "MSH6_p.R300W", "MSH2_p.S325F", "MLH1_p.I8V",
-#                                "MLH1_p.R265C", "PMS2_p.P760S"
-
-# add missing patients as factor levels, still used in table with 0 counts
-combined_maf_dp20_vaf_df_dmmr_f$Patient <- factor(
-  combined_maf_dp20_vaf_df_dmmr_f$Patient,
-  levels = unique(combined_maf_dp20_vaf_df$Patient))
-
-combined_maf_dp20_vaf_df_dmmr_f %>%
-   select(all_of(variant_eval_columns))
-
-combined_maf_dp20_vaf_df_dmmr_f %>%
-   select(all_of(variant_eval_columns)) %>%
-  view()
-
-combined_maf_dp20_vaf_df_dmmr_f %>%
-  select(all_of(variant_eval_columns)) %>%
-  mutate_if(is.character, as.factor) %>%
-  summary(maxsum = 10)
-
-
-combined_maf_dp20_vaf_df_dmmr_f_unique <- combined_maf_dp20_vaf_df_dmmr_f %>%
-  select(Patient, Trial, Response) %>% unique()
-table(combined_maf_dp20_vaf_df_dmmr_f_unique$Trial)
-table(combined_maf_dp20_vaf_df_dmmr_f_unique$Response)
-
-table(combined_maf_dp20_vaf_df_dmmr_f_unique$Trial,
-      combined_maf_dp20_vaf_df_dmmr_f_unique$Response)
-
-# Not accounting for all dMMR MSI tumors from NICHE
-combined_maf_dp20_vaf_df_dmmr_f %>% filter(Trial ==  "NICHE-MSI") %>% nrow()
-combined_maf_dp20_vaf_df_dmmr_f_unique %>% filter(Trial ==  "NICHE-MSI") %>% nrow()
-table(combined_maf_dp20_vaf_df_dmmr_f$Trial)
-table(combined_maf_dp20_vaf_df_dmmr_f_unique$Trial,
-      combined_maf_dp20_vaf_df_dmmr_f_unique$Response)
-
-# Added NICHE MSI manually
-# dMMR status assigned from independent test, not from WES data
-# e.g. MLH1 hypermethylation + IHC loss
-dmmr_trial_response <- table(combined_maf_dp20_vaf_df_dmmr_f_unique$Trial,
-                             combined_maf_dp20_vaf_df_dmmr_f_unique$Response) %>%
-  as.data.frame() %>% setNames(c("Trial", "Response", "Freq")) 
-  # mutate(Freq = ifelse(Trial == "NICHE-MSI" & Response == "R", 19, Freq))
-
-dmmr_trial_response %>% pivot_wider(names_from = Response, values_from = Freq)
-dmmr_trial_response %>% filter(!Trial %in% c("NICHE-MSI")) %>%
-  pivot_wider(names_from = Response, values_from = Freq)
-
-
-dmmr_trial_response %>%
-  ggplot(aes(x = Trial, y = Freq, fill = Response)) + geom_col() +
-  theme_Publication() + labs(x = "", y = "dMMR Freq") +
-  scale_fill_manual(values = c(Color_NR, Color_R))
-ggsave(here(output_dir, "dmmr_trial_response.png"), height = 5, width = 6.5)
-
-dmmr_trial_response %>%
-  group_by(Response) %>% summarize(Total = sum(Freq)) %>%
-  ggplot(aes(x = Response, y = Total, fill = Response)) + geom_col() +
-  theme_Publication() + labs(x = "", y = "dMMR Freq") +
-  scale_fill_manual(values = c(Color_NR, Color_R))
-ggsave(here(output_dir, "dmmr_response.png"), height = 5, width = 4)
-
-dmmr_trial_response %>%
-  group_by(Response) %>% summarize(Freq = sum(Freq)) %>%
-  mutate(Total = sum(Freq), percentage = Freq / Total * 100) %>%
-  ggplot(aes(x = "dMMR", y = percentage, fill = Response)) + geom_col() +
-  theme_Publication() + labs(x = "", y = "dMMR % Response") +
-  scale_fill_manual(values = c(Color_NR, Color_R))
-ggsave(here(output_dir, "dmmr_response_percentage.png"), height = 5, width = 4)
-
-combined_maf_dp20_vaf_df_dmmr_f %>%
-  write_csv2(here(output_dir, "combined_maf_dp20_vaf_df_dmmr_f.csv"))
-
-combined_maf_dp20_vaf_df_dmmr_f <- read_csv2(
-  here(output_dir, "combined_maf_dp20_vaf_df_dmmr_f.csv"))
-  
-table(combined_maf_dp20_vaf_df_dmmr_f$Trial)
-# PMS2 lower TMB, less immunogenic, less pCR?
-# Look at WES, RNA and IHC for msi proteins
-
-combined_maf_dp20_vaf_df_dmmr_f_unique %>%
-  left_join(n_variants_dp20_vaf_tmb) %>%
-  ggplot(aes(x = Trial, y = TMB)) +
-  geom_boxplot(outlier.shape = NA) +
-  geom_point(aes(col = Trial, shape = Response)) +
-  theme_Publication() +
-  geom_hline(yintercept = 10, linetype = "dashed")
-
-combined_maf_dp20_vaf_df_dmmr_f %>%
-  # select(-Arm) %>%
-  left_join(n_variants_dp20_vaf_tmb) %>%
-  ggplot(aes(x = SYMBOL, y = TMB)) +
-  geom_boxplot(outlier.shape = NA) +
-  geom_point(aes(col = Trial, shape = Response)) +
-  theme_Publication() +
-  geom_hline(yintercept = 10, linetype = "dashed")
-
-dmmr_mutation_df <- table(combined_maf_dp20_vaf_df_dmmr_f$Patient,
-                          combined_maf_dp20_vaf_df_dmmr_f$Hugo_Symbol) %>%
-  as.data.frame() %>%
-  setNames(c("Patient", "Gene_somatic_germline", "Freq")) %>%
-  pivot_wider(names_from = Gene_somatic_germline, values_from = Freq) %>%
-  left_join(dna_metadata_f)
-
-dmmr_mutation_df %>% write_csv2(here(output_dir,
-                                         "dmmr_mutation_df.csv"))
-dmmr_mutation_df <- read_csv2(here(output_dir,
-                                         "dmmr_mutation_df.csv"))
-
-dmmr_mutation_df %>% filter(Trial == "NICHE-MSI") %>% view()
-
-combined_maf_dp20_vaf_df_dmmr_f %>% filter(Trial == "BELLINI") %>%
-  filter(Hugo_Symbol %in% dmmr_ptns) %>%
-  select(Patient, variant_eval_columns) %>% view()
-
-combined_maf_dp20_vaf_df_dmmr_f %>% filter(Trial == "NABUCCO") %>%
-  filter(Hugo_Symbol %in% dmmr_ptns) %>%
-  select(Patient, variant_eval_columns) %>% view()
-
-combined_maf_dp20_vaf_df_dmmr_f %>% filter(Trial == "MATISSE") %>%
-  filter(Hugo_Symbol %in% dmmr_ptns) %>%
-  select(Patient, variant_eval_columns) %>% view()
-
-combined_maf_dp20_vaf_df_dmmr_f %>% filter(Trial == "NICHE-MSI") %>%
-  filter(Hugo_Symbol %in% dmmr_ptns) %>%
-  select(Patient, variant_eval_columns) %>% view()
-
-n_variants_dp20_vaf_tmb %>%
-  mutate(dMMR_hit = ifelse(
-    Tumor_Sample_Barcode %in% combined_maf_dp20_vaf_df_dmmr_f$Tumor_Sample_Barcode,
-    "dMMR", "no dMMR hit")) %>%
-  ggplot(aes(x = dMMR_hit, y = TMB, color = Histology)) + geom_point() +
-  theme_Publication() +
-  scale_color_manual(values = histology_msi_mss_colors)
-
-combined_maf_dmmr_f <- subsetMaf(
-  combined_maf, tsb = combined_maf_dp20_vaf_df_dmmr_f$Tumor_Sample_Barcode)
-
-combined_maf_dp20_vaf_df_dmmr_f %>% select(Trial, Patient) %>% unique() %>% pull(Trial) %>% table()
-
-oncoplot(combined_maf_dmmr_f, genes = dmmr_ptns)
-
-plotVaf(combined_maf, genes = dmmr_ptns)
-
-```
-
-# ----------
-
 # Check gene mutation frequencies
 
 ```{r}
@@ -2059,8 +1872,12 @@ top_genes_n_samples %>%
   filter(Gene %in% genes_to_assess) %>%
   view()
 
-top_genes_n_samples %>% filter(Gene %in% c("TP53" , "KRAS", "NRAS", "HRAS", "BRAF", "BRCA1", "BRCA2", "CDK2NA", "B2M"))
-top_genes_n_samples %>% filter(Gene %in% c("TP53" , "KRAS", "NRAS", "HRAS", "BRAF", "BRCA1", "BRCA2", "CDK2NA", "B2M")) %>% view()
+top_genes_n_samples %>%
+  filter(Gene %in% c("TP53" , "KRAS", "NRAS", "HRAS", "BRAF", "BRCA1",
+                     "BRCA2", "CDK2NA", "B2M"))
+top_genes_n_samples %>%
+  filter(Gene %in% c("TP53" , "KRAS", "NRAS", "HRAS", "BRAF", "BRCA1",
+                     "BRCA2", "CDK2NA", "B2M")) %>% view()
 
 combined_maf_dp20_vaf_df_specific_f %>% select(variant_eval_columns) %>% view()
 ```
@@ -2089,85 +1906,6 @@ mutation_proportions[c((rowMeans(mutation_proportions) > 0.2) & (!rownames(mutat
 mutation_proportions[rowMeans(mutation_proportions) > 0.2, ] %>% pheatmap()
  
 table(rowSums(mutation_proportions > 0.1) == ncol(mutation_proportions))
-```
-
-# PCA on mutation frequencies
-
-```{r}
-mutation_proportions_z_norm <- mutation_proportions %>% t() %>% scale()
-
-mutation_proportions_z_norm[1:5, 1:5]
-rownames(mutation_proportions_z_norm) <- gsub("Prop_", "", rownames(mutation_proportions_z_norm))
-
-rowSums(mutation_proportions_z_norm)
-head(colSums(mutation_proportions_z_norm))
-
-pca <- prcomp(mutation_proportions_z_norm)
-
-percent_var <- pca$sdev^2 / sum(pca$sdev^2)
-
-percent_var <- percent_var %>%
-  as.data.frame() %>%
-  setNames("Var_exp") %>%
-  rownames_to_column("PC") %>%
-  mutate(Cumvar = cumsum(Var_exp), PC = as.numeric(PC))
-
-percent_var %>%
-  filter(PC < 50) %>%
-  ggplot(aes(x = PC, y = Var_exp)) +
-  geom_col() +
-  geom_point(aes(x = PC, y = Cumvar)) +
-  labs(x = "Principal Component", y = "(Cumulative) Variance Explained") +
-  theme_Publication()
-
-percent_var_pc1 <- percent_var[1, 2] * 100
-percent_var_pc2 <- percent_var[2, 2] * 100
-percent_var_pc3 <- percent_var[3, 2] * 100
-
-n_pcs <- 8
-pca_heatmap <- pheatmap(t(pca$x[, 1:n_pcs]),
-         # annotation_col = annot_df,
-         col = paletteer_d(palette = "RColorBrewer::RdYlBu", direction = -1),
-         show_colnames = TRUE,
-         cluster_rows = FALSE,
-         )
-print(pca_heatmap)
-
-
-pca_data <- as.data.frame(pca$x) %>%
-  rownames_to_column("Trial")
-  
-pca_data %>%
-  ggplot(aes(x = PC1, y = PC2, col = Trial)) +
-  geom_point(size = 2.5) +
-  labs(x = sprintf("PC1: %s%% variance", round(percent_var_pc1, 2)),
-       y = sprintf("PC2: %s%% variance", round(percent_var_pc2, 2)),
-       col = "Response",
-       title = "Genetic landscape - mutational frequencies") +
-  theme_Publication()
-
-pca_data %>% write_csv2(here(output_dir, "pca_data_mutation_frequencies.csv"))
-saveRDS(pca, here(output_dir, "pca_mutation_frequencies.RDS"))
-
-# pca$rotation[, "PC1"]
-loadings <- as.data.frame(pca$rotation) %>%
-  rownames_to_column("Gene") %>%
-  arrange(PC1)
-
-
-loadings[select_top_extremes(loadings$PC1, 10), ] %>%
-  ggplot(aes(x = reorder(Gene, PC1), y = PC1)) +
-  geom_col() +
-  coord_flip() +
-  labs(x = "PC1 Loadings") +
-  theme_Publication()
-
-loadings[select_top_extremes(loadings$PC2, 10), ] %>%
-  ggplot(aes(x = reorder(Gene, PC2), y = PC2)) +
-  geom_col() +
-  coord_flip() +
-  labs(x = "PC2 Loadings") +
-  theme_Publication()
 ```
 
 # ----------
@@ -2313,9 +2051,9 @@ combined_maf_dp20_vaf_df_specific_removed %>%
   write_csv2(here(output_dir, "combined_maf_dp20_vaf_df_specific_removed.csv"))
 
 # Check extra variants removed
-combined_maf_dp20_vaf_df_specific_removed %>%
-  filter(Symbol_Variant %in% remove_extra_variants) %>%
-  select(Patient, all_of(variant_eval_columns)) %>% view()
+# combined_maf_dp20_vaf_df_specific_removed %>%
+#   filter(Symbol_Variant %in% remove_extra_variants) %>%
+#   select(Patient, all_of(variant_eval_columns)) %>% view()
 
 combined_maf_dp20_vaf_df_specific_removed %>%
   select(Patient, all_of(variant_eval_columns)) %>% view()
@@ -2327,6 +2065,8 @@ combined_maf_dp20_vaf_df_specific_removed %>%
 combined_maf_dp20_vaf_df_specific_f %>%
   select(all_of(variant_eval_columns)) %>%
   factor_summary()
+
+combined_maf_dp20_vaf_df_specific_f %>% select(variant_eval_columns) %>% view()
 
 ```
 
@@ -2483,7 +2223,7 @@ dev.off()
 
 # Oncogenic Pathways - Functional filtering
 
-```{r}
+```{r, fig.width = 11, fig.height = 13}
 oncoplot(combined_maf_specific_f, pathways = maftools_sigpw_pathways %>%
            filter(Pathway == "RTK-RAS") %>%
            select(Gene, Pathway),
@@ -2583,6 +2323,8 @@ n_distinct(combined_maf_dp20_vaf_df_specific_f_unique$Patient)
 specific_mutation_df %>%
   mutate_if(is.character, as.factor) %>%
   summary()
+
+dim(specific_mutation_df)
 
 specific_mutation_df %>% write_csv2(here(output_dir,
                                          "specific_mutation_df.csv"))
@@ -2794,7 +2536,8 @@ table(pathway_level_mutation_df$Patient) %>%
 
 pathway_level_mutation_df <- pathway_level_mutation_df %>%
   left_join(
-    n_variants_dp20_vaf_tmb %>% select(c("Tumor_Sample_Barcode", colnames(n_variants_dp20_vaf_tmb)[
+    n_variants_dp20_vaf_tmb %>%
+      select(c("Tumor_Sample_Barcode", colnames(n_variants_dp20_vaf_tmb)[
       !colnames(n_variants_dp20_vaf_tmb) %in% colnames(pathway_level_mutation_df)]))) %>%
   unique() 
 
@@ -2811,10 +2554,6 @@ pathway_level_mutation_df <- read_csv2(here(output_dir,
 pathway_level_mutation_df$Patient <- as.factor(
   pathway_level_mutation_df$Patient)
 
-str(pathway_level_mutation_df[, (ncol(pathway_level_mutation_df)-35-1):ncol(pathway_level_mutation_df)])
-pathway_level_mutation_df[, (ncol(pathway_level_mutation_df)-35-1):ncol(pathway_level_mutation_df)] %>%
-  factor_summary()
-
 pathway_level_mutation_df %>%
   select("GIE", "GIE_IFNy", "GIE_AP", "DDR", "SMG_Wnt_B_Cat", "SMG_TGFB_signaling",
          "SMG_RTK_signaling", "SMG_Genome_integrity", "SMG_Cell_cycle",
@@ -2825,6 +2564,20 @@ pathway_level_mutation_df %>%
 pathway_level_mutation_df %>% select(c("Patient", Trial, "ddr_hits", ddr_ptns_f)) %>% view()
 pathway_level_mutation_df %>% select(c("Patient", Trial, "immune_hits", immune_escape_genes_f)) %>%
   view()
+
+n_variants_dp20_vaf_tmb_status %>%
+  write_csv2(here(output_dir, "n_variants_dp20_vaf_tmb_status.csv"))
+
+n_variants_dp20_vaf_tmb_status <- read_csv2(
+  here(output_dir, "n_variants_dp20_vaf_tmb_status.csv"))
+
+# GIE AP Genetic Immune Evasion Antigen Presentation
+# GIE IFNy Genetic Immune Evasion Antigen IFNy pathway
+n_variants_dp20_vaf_tmb_status <- n_variants_dp20_vaf_tmb_status %>%
+  mutate(GIE_IFNy = ifelse(as.logical(GIE_IFNy),
+                           "GIE_IFNy_mut", "GIE_IFNy_wt")) %>%
+  mutate(GIE_AP = ifelse(as.logical(GIE_AP),
+                         "GIE_AP_mut", "GIE_AP_wt"))
 ```
 
 # Pathway level correlations
@@ -2832,7 +2585,9 @@ pathway_level_mutation_df %>% select(c("Patient", Trial, "immune_hits", immune_e
 ```{r, fig.height = 10, fig.width = 10}
  
 pathway_level_mutation_m <- pathway_level_mutation_df %>%
-  select(TMB, starts_with("SMG"), starts_with("GIE"), starts_with("SIGPW"), "DDR", "RAS_RAF", "BRCA1_2") %>%
+  select(TMB, starts_with("SMG"),
+         starts_with("GIE"),
+         starts_with("SIGPW"), "DDR", "RAS_RAF", "BRCA1_2") %>%
   as.matrix() 
 
 pathway_level_mutation_m %>%
@@ -2841,7 +2596,9 @@ pathway_level_mutation_m %>%
 
 pathway_level_mutation_excl_dmmr_m <- pathway_level_mutation_df %>%
   filter(Trial != "NICHE-MSI") %>%
-  select(TMB, starts_with("SMG"), starts_with("GIE"), starts_with("SIGPW"), "DDR", "RAS_RAF", "BRCA1_2") %>%
+  select(TMB, starts_with("SMG"),
+         starts_with("GIE"),
+         starts_with("SIGPW"), "DDR", "RAS_RAF", "BRCA1_2") %>%
   as.matrix() 
 
 pathway_level_mutation_excl_dmmr_m %>%
@@ -3102,12 +2859,29 @@ oncoplot(combined_maf_dp20_vaf,
          annotationColor = annotation_color_list,
          gene_mar = 8, fontSize = 0.6,
          sortByAnnotation = TRUE)
+```
 
+## Frequency in trials vs TMB
+
+```{r, fig.height = 6, fig.width = 6}
+ table(n_variants_dp20_vaf_tmb_status$Trial,
+       n_variants_dp20_vaf_tmb_status$GIE_AP, useNA = "ifany")
+
+ table(n_variants_dp20_vaf_tmb_status$Trial,
+       n_variants_dp20_vaf_tmb_status$GIE_IFNy, useNA = "ifany")
+ 
+table(ifelse(n_variants_dp20_vaf_tmb_status$TMB >= 10, "TMB-H", "TMB-L"),
+      n_variants_dp20_vaf_tmb_status$GIE_AP, useNA = "ifany")
+
+table(ifelse(n_variants_dp20_vaf_tmb_status$TMB >= 10, "TMB-H", "TMB-L"),
+      n_variants_dp20_vaf_tmb_status$GIE_IFNy, useNA = "ifany")
+  
 immune_hits_ap_freq <- table(pathway_level_mutation_df$Trial,
                              pathway_level_mutation_df$immune_hits_ap > 0) %>%
   as.data.frame() %>%
   setNames(c("Trial", "immune_hits_ap", "Freq")) %>%
-  mutate(immune_hits_ap = ifelse(as.logical(immune_hits_ap), "AP_mut", "AP_wt")) %>%
+  mutate(immune_hits_ap = ifelse(as.logical(immune_hits_ap),
+                                 "AP_mut", "AP_wt")) %>%
   pivot_wider(names_from = immune_hits_ap, values_from = Freq) %>%
   mutate(Total = AP_wt + AP_mut,
          AP_mut_perc = AP_mut / Total * 100) %>%
@@ -3118,11 +2892,13 @@ table(pathway_level_mutation_df$immune_hits_ap > 0,
       pathway_level_mutation_df$Response) %>%
   as.data.frame() %>%
   setNames(c("immune_hits_ap", "Response", "Count")) %>%
-  mutate(immune_hits_ap = ifelse(as.logical(immune_hits_ap), "AP_mut", "AP_wt"))  %>%
+  mutate(immune_hits_ap = ifelse(as.logical(immune_hits_ap),
+                                 "AP_mut", "AP_wt"))  %>%
   group_by(immune_hits_ap) %>%
   mutate(Total = sum(Count), Percentage = Count / Total * 100)  %>% 
-  ggplot(aes(x = immune_hits_ap, y = Percentage, fill = Response)) + geom_col() +
-  theme_Publication()+
+  ggplot(aes(x = immune_hits_ap, y = Percentage, fill = Response)) +
+  geom_col() +
+  theme_Publication() +
   scale_fill_manual(values = c(Color_NR, Color_R))
 
 immune_hits_ap_freq %>%
@@ -3133,7 +2909,8 @@ immune_hits_ap_freq %>%
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
   labs(x = "")
 
-table(pathway_level_mutation_df$Trial, pathway_level_mutation_df$immune_hits_ap > 0) %>%
+table(pathway_level_mutation_df$Trial,
+      pathway_level_mutation_df$immune_hits_ap > 0) %>%
   as.data.frame() %>%
   setNames(c("Trial", "immune_hits_ap", "Count")) %>%
   ggplot(aes(x = Trial, y = Count, fill = immune_hits_ap)) + geom_col() +
@@ -3146,14 +2923,16 @@ immune_hits_ap_freq %>%
   ggplot(aes(x = median_TMB, y = AP_mut_perc, col = Histology_MSI_MSS)) +
   geom_point() +
   labs(x = "median_TMB (mutations/Mb)", y = "AP mutation %",  col = "") +
-  theme_Publication()
+  theme_Publication() +
+  scale_color_manual(values = histology_msi_mss_colors)
 
 immune_hits_ap_freq %>%
   ggplot(aes(x = median_TMB, y = AP_mut_perc, col = Histology_MSI_MSS)) +
   geom_point() +
   labs(x = "median_TMB (mutations/Mb)", y = "AP mutation %",  col = "") +
   scale_x_continuous(trans = "log", breaks = c(1, 10, 20, 30, 40, 50)) +
-  theme_Publication()
+  theme_Publication() +
+  scale_color_manual(values = histology_msi_mss_colors)
 ggsave(here(output_dir, "ap_mut_freq_tmb.png"), height = 5, width = 6)
 
 
@@ -3172,7 +2951,8 @@ immune_hits_ifny_freq <- table(
   pathway_level_mutation_df$immune_hits_ifny > 0) %>%
   as.data.frame() %>%
   setNames(c("Trial", "immune_hits_ifny", "Freq")) %>%
-  mutate(immune_hits_ifny = ifelse(as.logical(immune_hits_ifny), "pIFNy_mut", "pIFNy_wt")) %>%
+  mutate(immune_hits_ifny = ifelse(as.logical(immune_hits_ifny),
+                                   "pIFNy_mut", "pIFNy_wt")) %>%
   pivot_wider(names_from = immune_hits_ifny, values_from = Freq) %>%
   mutate(Total = pIFNy_mut + pIFNy_wt,
          pIFNy_mut_perc = pIFNy_mut / Total * 100) %>%
@@ -3183,7 +2963,8 @@ immune_hits_ifny_freq %>%
   geom_point() +
   labs(x = "median_TMB (mutations/Mb)", y = "pIFNy mutation %",  col = "") +
   theme_Publication() +
-  scale_x_continuous(trans = "log", breaks = c(1, 10, 20, 30, 40, 50))
+  scale_x_continuous(trans = "log", breaks = c(1, 10, 20, 30, 40, 50)) +
+  scale_color_manual(values = histology_msi_mss_colors)
 ggsave(here(output_dir, "pifny_mut_freq_tmb.png"), height = 5, width = 6)
 
 n_variants_dp20_vaf_tmb_status %>%
@@ -3247,7 +3028,8 @@ table(pathway_level_mutation_df$TMB > 10,
   scale_fill_manual(values = c(Color_NR, Color_R)) +
   facet_wrap(~TMB)
 
-pathway_level_mutation_df_non_dmmr <- pathway_level_mutation_df %>% filter(!Trial %in% c("NICHE-MSI"))
+pathway_level_mutation_df_non_dmmr <- pathway_level_mutation_df %>%
+  filter(!Trial %in% c("NICHE-MSI"))
 table(pathway_level_mutation_df_non_dmmr$TMB > 10,
       pathway_level_mutation_df_non_dmmr$immune_hits > 0,
       pathway_level_mutation_df_non_dmmr$Response) %>%
@@ -3320,180 +3102,9 @@ mut_ci_counts_c %>%
 
 ```
 
-```{r, fig.width = 16, fig.height = 8}
-get_wt_mt_response <- function(specific_mutation_df, genes_to_assess){
-  mt_wt_response_ci <- data.frame(matrix(nrow = 0, ncol = 6))
-
-  for (current_gene in genes_to_assess) {
-    if (!current_gene %in% colnames(specific_mutation_df)) {
-      next
-    }
-  
-    specific_mutation_df_mut <- specific_mutation_df %>%
-      filter(specific_mutation_df[, current_gene])
-  
-    specific_mutation_df_wt <- specific_mutation_df %>%
-      filter(!specific_mutation_df[, current_gene])
-  
-    mut_ci_counts_r <- counts_CI_for_frequency_tables(
-      specific_mutation_df_mut, "Response", "R")
-  
-    mut_ci_counts_r <- as.data.frame(
-    do.call(rbind, mut_ci_counts_r)) %>%
-    mutate(CI_interval = sprintf("%s - %s", CI_lower, CI_upper),
-           Response = "R", Gene = sprintf("%smt", current_gene))
-  
-    mut_ci_counts_nr <- counts_CI_for_frequency_tables(
-      specific_mutation_df_mut, "Response", "NR")
-  
-      mut_ci_counts_nr <- as.data.frame(
-    do.call(rbind, mut_ci_counts_nr)) %>%
-    mutate(CI_interval = sprintf("%s - %s", CI_lower, CI_upper),
-           Response = "NR", Gene = sprintf("%smt", current_gene))
-  
-    wt_ci_counts_r <- counts_CI_for_frequency_tables(
-      specific_mutation_df_wt, "Response", "R")
-  
-    wt_ci_counts_r <- as.data.frame(
-    do.call(rbind, wt_ci_counts_r)) %>%
-    mutate(CI_interval = sprintf("%s - %s", CI_lower, CI_upper),
-           Response = "R", Gene = sprintf("%swt", current_gene))
-  
-    wt_ci_counts_nr <- counts_CI_for_frequency_tables(
-      specific_mutation_df_wt, "Response", "NR")
-  
-    wt_ci_counts_nr <- as.data.frame(
-    do.call(rbind, wt_ci_counts_nr)) %>%
-    mutate(CI_interval = sprintf("%s - %s", CI_lower, CI_upper),
-           Response = "NR", Gene = sprintf("%swt", current_gene))
-    
-    mt_wt_response_ci <- mt_wt_response_ci %>%
-      rbind(mut_ci_counts_r, mut_ci_counts_nr, wt_ci_counts_r, wt_ci_counts_nr)
-  }
-
-  mt_wt_response_ci <- mt_wt_response_ci %>%
-    mutate(Gene_response_n = sprintf("%s (%s)", Gene, Number_of_values),
-           Gene_name = substring(Gene, 1, nchar(Gene) - 2)) %>%
-    group_by(Gene) %>%
-    mutate(Gene_status_n = sprintf("%s (%s)", Gene, sum(Number_of_values)))
-
-  mt_wt_response_ci
-}
-
-```
-
-```{r, fig.height = 6, fig.width = 22}
-
-if (filter_and_parse_vcfs) {
-  mt_wt_response_ci <- get_wt_mt_response(specific_mutation_df,
-                                                genes_to_assess) # genes_to_assess_exp
-
-  mt_wt_response_ci %>%
-    write_csv2(here(output_dir, "mt_wt_response_ci.csv"))
-  
-  mt_wt_response_ci_excl_dmmr <- get_wt_mt_response(specific_mutation_df %>%
-                                                      filter(Trial != "NICHE-MSI"),
-                                                genes_to_assess) # genes_to_assess_exp
-
-  mt_wt_response_ci_excl_dmmr %>%
-    write_csv2(here(output_dir, "mt_wt_response_ci_excl_dmmr.csv"))
-}
-
-mt_wt_response_ci <- read_csv2(
-  here(output_dir, "mt_wt_response_ci.csv"))
-
-mt_wt_response_ci_excl_dmmr <- read_csv2(
-  here(output_dir, "mt_wt_response_ci_excl_dmmr.csv"))
-
-mt_wt_response_ci[1:50, ] %>%
-  ggplot(aes(x = Gene_status_n, y = percentage_of_total, fill = Response)) +
-  geom_col() +
-  theme_Publication() +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
-  labs(y = "Percentage (95% CI) of \n(non) Responders") +
-  scale_fill_manual(values = c(Color_NR, Color_R))
-
-mt_wt_response_ci[1:124, ] %>%
-  ggplot(aes(x = Gene_response_n, y = percentage_of_total, fill = Response)) +
-  geom_col(position = position_dodge()) +
-  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper),
-                position = position_dodge(width = 1), lwd = 0.25, width = 0.5) +
-  theme_Publication() +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
-  labs(y = "Percentage (95% CI) of \n(non) Responders") +
-  scale_fill_manual(values = c(Color_NR, Color_R))
-
-mt_wt_response_ci_delta <- mt_wt_response_ci %>%
-  ungroup() %>%
-  filter(Response == "R") %>%
-  mutate(mut_wt = ifelse(str_detect(Gene, "mt$"), "mutant", "wildtype")) %>%
-  select(Response, Number_of_values, percentage_of_total, mut_wt, Gene_name) %>%
-  pivot_wider(names_from = mut_wt, values_from = c(Number_of_values, percentage_of_total)) %>%
-  filter(Number_of_values_mutant > 10) %>%
-  mutate(Response_rate_delta = percentage_of_total_mutant - percentage_of_total_wildtype) %>%
-  arrange(Response_rate_delta)
-
-mt_wt_response_ci_excl_dmmr_delta <- mt_wt_response_ci_excl_dmmr %>%
-  ungroup() %>%
-  filter(Response == "R") %>%
-  mutate(mut_wt = ifelse(str_detect(Gene, "mt$"), "mutant", "wildtype")) %>%
-  select(Response, Number_of_values, percentage_of_total, mut_wt, Gene_name) %>%
-  pivot_wider(names_from = mut_wt, values_from = c(Number_of_values, percentage_of_total)) %>%
-  filter(Number_of_values_mutant > 10) %>%
-  mutate(Response_rate_delta = percentage_of_total_mutant - percentage_of_total_wildtype) %>%
-  arrange(Response_rate_delta)
-
-```
-
-```{r, fig.width = 5, fig.height = 5}
-genes_to_assess_exp
-
-for (current_gene in genes_to_assess_exp) {
-  if (!current_gene %in% colnames(specific_mutation_df)) {
-    next
-  }
-  
-  # Skip genes where a total is below X, not very informative
-  check_total <- mt_wt_response_ci %>%
-    filter(Gene_name == current_gene) %>%
-    group_by(Gene) %>% summarize(Total = sum(Total))
-  
-  if (any(check_total$Total < 20)) {
-    next
-  }
-  
-  cat(current_gene)
-  cat("  \n")
-  
-  plot <- mt_wt_response_ci %>%
-    filter(Gene_name == current_gene) %>%
-    ggplot(aes(x = Gene_response_n, y = percentage_of_total, fill = Response)) +
-  geom_col(position = position_dodge()) +
-  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper),
-                position = position_dodge(width = 1), lwd = 0.25, width = 0.5) +
-  theme_Publication() +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
-  labs(y = "Percentage (95% CI) of \n(non) Responders") +
-  scale_fill_manual(values = c(Color_NR, Color_R)) +
-    facet_wrap(~Gene, scales = "free")
-  print(plot)
-
-  plot <- mt_wt_response_ci %>%
-    filter(Gene_name == current_gene) %>%
-    ggplot(aes(x = Gene_status_n, y = percentage_of_total, fill = Response)) +
-  geom_col() +
-  theme_Publication() +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
-  labs(x = "Gene", y = "Percentage of \n(non) Responders") +
-  scale_fill_manual(values = c(Color_NR, Color_R))
-  print(plot)
-}
- 
-```
-
 # ----------
-
-# POLE
+# Investigate specific genes
+## POLE
 
 ```{r POLE}
 POLE_mutations <- combined_maf_dp20_vaf_df_specific_f %>%
@@ -3544,11 +3155,16 @@ labs(x = "Gene", y = "Percentage of \n(non) Responders") +
 scale_fill_manual(values = c(Color_NR, Color_R))
 print(plot)
 
-table(specific_mutation_df$Trial, specific_mutation_df$Response, specific_mutation_df$POLE)
+table(specific_mutation_df$Trial,
+      specific_mutation_df$Response,
+      specific_mutation_df$POLE)
 
 plotProtein(gene = "POLE")
 
-n_variants_dp20_vaf_tmb_status %>% filter(POLE) %>% select(TMB, Trial) %>% factor_summary()
+n_variants_dp20_vaf_tmb_status %>%
+  filter(POLE) %>%
+  select(TMB, Trial) %>%
+  factor_summary()
 
 n_variants_dp20_vaf_tmb_status %>%
   ggplot(aes(x = Trial, y = TMB, fill = Trial, group = Trial)) +
@@ -3568,7 +3184,7 @@ n_variants_dp20_vaf_tmb_status %>%
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
 ```
 
-# POLD1
+## POLD1
 
 ```{r POLD1}
 POLD1_mutations <- combined_maf_dp20_vaf_df_specific_f %>%
@@ -3605,7 +3221,7 @@ n_variants_dp20_vaf_tmb_status %>%
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
 ```
 
-# RAS BRAF co-mutations
+## RAS BRAF co-mutations
 
 ```{r}
 oncoplot(combined_maf_specific_f,
@@ -3646,7 +3262,7 @@ table(specific_mutation_df$KRAS, specific_mutation_df$BRAF) %>%
 
 ```
 
-# BRAF mutation breakdown
+## BRAF mutation breakdown
 
 ```{r}
 lollipopPlot(
@@ -3677,7 +3293,7 @@ table(BRAF_mutations$BRAF_type, BRAF_mutations$Trial)
 table(BRAF_mutations$BRAF_type, BRAF_mutations$Response)
 ```
 
-# RAS mutation breakdown
+## RAS mutation breakdown
 
 ```{r ras breakdown}
 lollipopPlot(
@@ -3818,8 +3434,6 @@ setNames(c("Gene", "Freq")) %>%
          Proportion = round(Freq / Total * 100, 2)) %>%
   arrange(-Proportion)
 
-specific_mutation_df_freq
-
 external_proportions <- mutation_prop_full_TCGA %>%
   select(Gene, Freq_n, Is.Cancer.Gene..source..OncoKB.) %>%
   setNames(c("Gene", "Perc_full_TCGA", "OncoKB_Canger_gene")) %>%
@@ -3841,7 +3455,6 @@ nki_vs_ext_prop <- specific_mutation_df_freq %>%
   setNames(c("Gene", "Freq_NKI", "Total_NKI", "Perc_NKI")) %>%
   left_join(external_proportions)
 
-# TODO compare plots
 nki_vs_ext_prop_l <- nki_vs_ext_prop %>%
   pivot_longer(cols = c(Perc_NKI, Perc_full_TCGA, Perc_matched_TCGA,
                         Perc_matched_samstein), values_to = "Perc",
@@ -3867,7 +3480,7 @@ nki_vs_ext_prop <- read.csv2(here(output_dir, "nki_vs_ext_prop.csv"))
 
 # Get pathway proportions oncoplot return fractions function
 
-# Oncoplot R NR split
+## Oncoplot R NR split
 
 ```{r, fig.width = 14, fig.height = 14}
 responder_tsb <- combined_maf_specific_f@clinical.data %>% filter(Response == "R") %>% pull(Tumor_Sample_Barcode)
@@ -3930,7 +3543,7 @@ oncoplot(combined_maf_nr, pathways = "smgbp",
 
 ```
 
-# Oncoplot functions return and export fractions
+## Oncoplot functions return and export fractions
 
 ```{r}
 custom_pathway_load <- function(maf, pathways = NULL) {
@@ -4425,7 +4038,7 @@ get_pathway_proportion_trial_mafs <- function(
 
 ```
 
-# Parse and export combined files
+## Parse and export combined files
 
 ```{r}
 parse_pathway_proportions <- function(pathway_dir) {
@@ -4468,8 +4081,6 @@ parse_pathway_proportions <- function(pathway_dir) {
 
 ```{r}
 msigdb_pathways <- readRDS(here("data", "processed", "PanCancer_pathway_mutations", "all_pathways", "msigdb_all_pathways.rds"))
-length(msigdb_pathways)
-head(names(msigdb_pathways), 100)
 
 msigdb_pathways_f <- msigdb_pathways # [c("")]
 msigdb_pathways_f <- stack(msigdb_pathways_f) %>%
@@ -4478,7 +4089,10 @@ msigdb_pathways_f <- stack(msigdb_pathways_f) %>%
 # Analysis Petros signatures
 list.files(here("data", "processed", "PanCancer_pathway_mutations", "all_pathways"))
 
-non_response_pathways <- read_csv(here("data", "processed", "PanCancer_pathway_mutations", "Non_responders", "Non_response_pathways__stats.csv"))
+non_response_pathways <- read_csv(here("data", "processed",
+                                       "PanCancer_pathway_mutations",
+                                       "Non_responders",
+                                       "Non_response_pathways__stats.csv"))
 
 non_response_pathways$Pathway %in% names(msigdb_pathways)
 
@@ -4488,11 +4102,13 @@ oncoplot_nr_pathways <- stack(msigdb_pathways[non_response_pathways$Pathway]) %>
 table(oncoplot_nr_pathways$Pathway) %>% as.data.frame() %>% arrange(-Freq)
 table(oncoplot_nr_pathways$Pathway) %>% as.data.frame() %>% summary()
 
-# oncoplot_nr_pathways %>% select(Pathway) %>% unique() %>% write_csv2(here(output_dir, "oncoplot_nr_pathways_map.csv"))
-oncoplot_nr_pathways_map <- read_csv2(here(output_dir, "oncoplot_nr_pathways_map.csv"))
+oncoplot_nr_pathways_map <- read_csv2(
+  here(output_dir, "oncoplot_nr_pathways_map.csv"))
 
-oncoplot_nr_pathways <- oncoplot_nr_pathways %>% left_join(oncoplot_nr_pathways_map)
-oncoplot_nr_pathways %>% write_csv2(here(output_dir, "oncoplot_nr_pathways.csv"))
+oncoplot_nr_pathways <- oncoplot_nr_pathways %>%
+  left_join(oncoplot_nr_pathways_map)
+oncoplot_nr_pathways %>%
+  write_csv2(here(output_dir, "oncoplot_nr_pathways.csv"))
 
 # SMG
 # Genome_integrity, MAPK_signaling, Cell_cycle, Chromatin_other,
@@ -4507,7 +4123,7 @@ oncoplot_nr_pathways %>% write_csv2(here(output_dir, "oncoplot_nr_pathways.csv")
 
 ```
 
-# All pathways
+## All pathways
 
 ```{r}
 if (filter_and_parse_vcfs) {
@@ -4529,8 +4145,15 @@ if (filter_and_parse_vcfs) {
   parse_pathway_proportions(here(output_dir, "pathway_proportions_msigdb"))
 }
 
-pathway_data_msigdb_combined <- read.csv2(here(output_dir, "pathway_proportions_msigdb", "pathway_data_combined.csv")) %>% left_join(trial_group_map)
-pathway_gene_data_msigdb_combined <- read.csv2(here(output_dir, "pathway_proportions_msigdb", "pathway_gene_data_combined.csv")) %>% left_join(trial_group_map)
+pathway_data_msigdb_combined <- read.csv2(
+  here(output_dir, "pathway_proportions_msigdb",
+       "pathway_data_combined.csv")) %>%
+  left_join(trial_group_map)
+
+pathway_gene_data_msigdb_combined <- read.csv2(
+  here(output_dir, "pathway_proportions_msigdb",
+       "pathway_gene_data_combined.csv")) %>%
+  left_join(trial_group_map)
 
 pathway_data_msigdb_combined_trial_prop <- pathway_data_msigdb_combined %>%
   filter(!str_detect(Group, "_R|_NR"))
@@ -4544,7 +4167,7 @@ pathway_data_msigdb_combined_trial_prop %>%
   geom_density() + theme_Publication() + facet_wrap(~Trial)
 ```
 
-# Number of gene sets over mutation threshold
+## Number of gene sets over mutation threshold
 
 ```{r}
 check_proportion_thresholds <- function(df, sequence = seq(0, 1, by = 0.01)) {
@@ -4639,7 +4262,7 @@ pathway_data_msigdb_response %>%
   filter(Response_delta < -0.1)
 ```
 
-# Get pathway proportions smgbp
+## Get pathway proportions smgbp
 
 ```{r, fig.height = 12, fig.width = 14}
 # Careful! Oncoplot pathways is using and returning smgbp pathways, even if you indicate pathways = "sigpw"
@@ -4682,7 +4305,7 @@ pathway_smgbp_data_combined %>%
   guides(fill = FALSE) + labs(x = "", title = "SMGBP pathways")
 ```
 
-# Get pathway proportions sigpw
+## Get pathway proportions sigpw
 
 ```{r, fig.height = 12, fig.width = 14}
 # Careful! Oncoplot pathways is using and returning smgbp pathways, even if you indicate pathways = "sigpw"
@@ -4744,7 +4367,7 @@ pathway_sigpw_data_combined %>%
 
 ```
 
-# Select/defining Oncoplot custom pathways
+## Select/defining Oncoplot custom pathways
 
 ```{r}
 maftools_BP_SMG_pathways %>%
@@ -4790,7 +4413,7 @@ oncoplot_custom_pathways$Gene %>% table() %>% as.data.frame() %>% filter(Freq > 
 
 ## Careful, there is a oncoplot bug when using overlapping pathways
 
-```{r}
+```{r fig.width = 10, fig.height = 8}
 ### BUG warning
 # Each gene is only assigned to 1 pathway, so result is different when using them together or separately... 
 # It does not work to plot them separately. Each gene will still be assigned to only 1 pathway in the collection
@@ -4878,7 +4501,7 @@ table(pathway_level_mutation_df$Trial, pathway_level_mutation_df$PIK3CA) %>% pro
 
 ```
 
-# Get pathway proportions custom list
+## Get pathway proportions custom list
 
 ```{r}
 dir.create(here(output_dir, "pathway_proportions"))
@@ -5075,7 +4698,7 @@ graph2pdf(x = pathway_data_combined_response_mean_diff_plot,
           width = 10)
 ```
 
-# Check
+## Check
 
 ```{r}
 # pathway_level_mutation_df_non_dmmr
@@ -5088,108 +4711,155 @@ for (pathway in pathway_level_mutation_df %>%
 }
 ```
 
-# Specific Cohort Oncoplots
+## Specific Cohort Oncoplots
 
 ```{r, fig.height = 14, fig.width = 14}
-oncoplot(subsetMaf(combined_maf_specific_f, tsb = dna_metadata_f %>% filter(Trial == "BELLINI") %>% pull(Tumor_Sample_Barcode)), 
+oncoplot(subsetMaf(combined_maf_specific_f, tsb = dna_metadata_f %>%
+                     filter(Trial == "BELLINI") %>%
+                     pull(Tumor_Sample_Barcode)), 
          clinicalFeatures = c("Response", "Trial"),
          pathways = "smgbp",
-         selectedPathways = c("RNA_abundance", "MAPK_signaling", "Genome_integrity"),
+         selectedPathways = c("RNA_abundance", "MAPK_signaling",
+                              "Genome_integrity"),
          annotationColor = annotation_color_list,
-         topBarData = "TMB", logColBar = FALSE, sortByAnnotation = TRUE, removeNonMutated = FALSE)
+         topBarData = "TMB", logColBar = FALSE, sortByAnnotation = TRUE,
+         removeNonMutated = FALSE)
 
-oncoplot(subsetMaf(combined_maf_specific_f, tsb = dna_metadata_f %>% filter(Trial == "BELLINI") %>% pull(Tumor_Sample_Barcode)), 
+oncoplot(subsetMaf(combined_maf_specific_f, tsb = dna_metadata_f %>%
+                     filter(Trial == "BELLINI") %>%
+                     pull(Tumor_Sample_Barcode)), 
          clinicalFeatures = c("Response", "Trial"),
          pathways = "smgbp",
          selectedPathways = c("Chromatin_other", "Chromatin_SWI/SNF_complex", "Chromatin_histone_modifiers"),
          annotationColor = annotation_color_list,
-         topBarData = "TMB", logColBar = FALSE, sortByAnnotation = TRUE, removeNonMutated = FALSE)
+         topBarData = "TMB", logColBar = FALSE, sortByAnnotation = TRUE,
+         removeNonMutated = FALSE)
 
-oncoplot(subsetMaf(combined_maf_specific_f, tsb = dna_metadata_f %>% filter(Trial == "IMCISION") %>% pull(Tumor_Sample_Barcode)), 
+oncoplot(subsetMaf(combined_maf_specific_f, tsb = dna_metadata_f %>%
+                     filter(Trial == "IMCISION") %>%
+                     pull(Tumor_Sample_Barcode)), 
          clinicalFeatures = c("Response", "Trial"),
          pathways = "smgbp",
          selectedPathways = c("NOTCH_signaling", "RTK_signaling"),
          annotationColor = annotation_color_list,
-         topBarData = "TMB", logColBar = FALSE, sortByAnnotation = TRUE, removeNonMutated = FALSE)
+         topBarData = "TMB", logColBar = FALSE, sortByAnnotation = TRUE,
+         removeNonMutated = FALSE)
 
-oncoplot(subsetMaf(combined_maf_specific_f, tsb = dna_metadata_f %>% filter(Trial == "IMCISION") %>% pull(Tumor_Sample_Barcode)), 
+oncoplot(subsetMaf(combined_maf_specific_f, tsb = dna_metadata_f %>%
+                     filter(Trial == "IMCISION") %>%
+                     pull(Tumor_Sample_Barcode)), 
          clinicalFeatures = c("Response", "Trial"),
          pathways = "smgbp",
          selectedPathways = c("Chromatin_other", "Chromatin_SWI/SNF_complex", "Chromatin_histone_modifiers"),
          annotationColor = annotation_color_list,
-         topBarData = "TMB", logColBar = FALSE, sortByAnnotation = TRUE, removeNonMutated = FALSE)
+         topBarData = "TMB", logColBar = FALSE, sortByAnnotation = TRUE,
+         removeNonMutated = FALSE)
 
-oncoplot(subsetMaf(combined_maf_specific_f, tsb = dna_metadata_f %>% filter(Trial == "MATISSE") %>% pull(Tumor_Sample_Barcode)), 
+oncoplot(subsetMaf(combined_maf_specific_f, tsb = dna_metadata_f %>%
+                     filter(Trial == "MATISSE") %>% pull(Tumor_Sample_Barcode)), 
          clinicalFeatures = c("Response", "Trial"),
          pathways = "smgbp",
          selectedPathways = c("RNA_abundance", "NFKB_signaling"),
          annotationColor = annotation_color_list,
-         topBarData = "TMB", logColBar = FALSE, sortByAnnotation = TRUE, removeNonMutated = FALSE)
+         topBarData = "TMB", logColBar = FALSE, sortByAnnotation = TRUE,
+         removeNonMutated = FALSE)
 
-oncoplot(subsetMaf(combined_maf_specific_f, tsb = dna_metadata_f %>% filter(Trial == "NABUCCO") %>% pull(Tumor_Sample_Barcode)), 
+oncoplot(subsetMaf(combined_maf_specific_f, tsb = dna_metadata_f %>%
+                     filter(Trial == "NABUCCO") %>% pull(Tumor_Sample_Barcode)), 
          clinicalFeatures = c("Response", "Trial"),
          pathways = "smgbp",
          selectedPathways = c("Apoptosis", "RTK_signaling"),
          annotationColor = annotation_color_list,
-         topBarData = "TMB", logColBar = FALSE, sortByAnnotation = TRUE, removeNonMutated = FALSE)
+         topBarData = "TMB", logColBar = FALSE,
+         sortByAnnotation = TRUE, removeNonMutated = FALSE)
 
-oncoplot(subsetMaf(combined_maf_specific_f, tsb = dna_metadata_f %>% filter(Trial == "NICHE-MSS") %>% pull(Tumor_Sample_Barcode)), 
+oncoplot(subsetMaf(combined_maf_specific_f, tsb = dna_metadata_f %>%
+                     filter(Trial == "NICHE-MSS") %>%
+                     pull(Tumor_Sample_Barcode)), 
          clinicalFeatures = c("Response", "Trial"),
          pathways = "smgbp",
-         selectedPathways = c("MAPK_signaling", "Protein_homeostasis/ubiquitination", "Genome_integrity"),
+         selectedPathways = c("MAPK_signaling",
+                              "Protein_homeostasis/ubiquitination",
+                              "Genome_integrity"),
          annotationColor = annotation_color_list,
-         topBarData = "TMB", logColBar = FALSE, sortByAnnotation = TRUE, removeNonMutated = FALSE)
+         topBarData = "TMB", logColBar = FALSE, sortByAnnotation = TRUE,
+         removeNonMutated = FALSE)
 
-oncoplot(subsetMaf(combined_maf_specific_f, tsb = dna_metadata_f %>% filter(Trial == "OpACIN_neo") %>% pull(Tumor_Sample_Barcode)), 
+oncoplot(subsetMaf(combined_maf_specific_f, tsb = dna_metadata_f %>%
+                     filter(Trial == "OpACIN_neo") %>%
+                     pull(Tumor_Sample_Barcode)), 
+         clinicalFeatures = c("Response", "Trial"),
+         pathways = "smgbp",
+         selectedPathways = c("MAPK_signaling", "RTK_signaling"),
+         annotationColor = annotation_color_list,
+         topBarData = "TMB", logColBar = FALSE, sortByAnnotation = TRUE,
+         removeNonMutated = FALSE)
+
+oncoplot(subsetMaf(combined_maf_specific_f, tsb = dna_metadata_f %>%
+                     filter(Trial == "OpACIN_neo") %>%
+                     pull(Tumor_Sample_Barcode)), 
+         clinicalFeatures = c("Response", "Trial"),
+         pathways = "smgbp",
+         selectedPathways = c("Chromatin_other", "Chromatin_SWI/SNF_complex", "Chromatin_histone_modifiers"),
+         annotationColor = annotation_color_list,
+         topBarData = "TMB", logColBar = FALSE, sortByAnnotation = TRUE,
+         removeNonMutated = FALSE)
+
+oncoplot(subsetMaf(combined_maf_specific_f, tsb = dna_metadata_f %>%
+                     filter(Trial == "PRADO") %>%
+                     pull(Tumor_Sample_Barcode)), 
          clinicalFeatures = c("Response", "Trial"),
          pathways = "smgbp",
          selectedPathways = c("MAPK_signaling", "RTK_signaling"),
          annotationColor = annotation_color_list,
          topBarData = "TMB", logColBar = FALSE, sortByAnnotation = TRUE, removeNonMutated = FALSE)
 
-oncoplot(subsetMaf(combined_maf_specific_f, tsb = dna_metadata_f %>% filter(Trial == "OpACIN_neo") %>% pull(Tumor_Sample_Barcode)), 
+oncoplot(subsetMaf(combined_maf_specific_f, tsb = dna_metadata_f %>%
+                     filter(Trial == "PRADO") %>%
+                     pull(Tumor_Sample_Barcode)), 
          clinicalFeatures = c("Response", "Trial"),
          pathways = "smgbp",
          selectedPathways = c("Chromatin_other", "Chromatin_SWI/SNF_complex", "Chromatin_histone_modifiers"),
          annotationColor = annotation_color_list,
-         topBarData = "TMB", logColBar = FALSE, sortByAnnotation = TRUE, removeNonMutated = FALSE)
-
-oncoplot(subsetMaf(combined_maf_specific_f, tsb = dna_metadata_f %>% filter(Trial == "PRADO") %>% pull(Tumor_Sample_Barcode)), 
-         clinicalFeatures = c("Response", "Trial"),
-         pathways = "smgbp",
-         selectedPathways = c("MAPK_signaling", "RTK_signaling"),
-         annotationColor = annotation_color_list,
-         topBarData = "TMB", logColBar = FALSE, sortByAnnotation = TRUE, removeNonMutated = FALSE)
-
-oncoplot(subsetMaf(combined_maf_specific_f, tsb = dna_metadata_f %>% filter(Trial == "PRADO") %>% pull(Tumor_Sample_Barcode)), 
-         clinicalFeatures = c("Response", "Trial"),
-         pathways = "smgbp",
-         selectedPathways = c("Chromatin_other", "Chromatin_SWI/SNF_complex", "Chromatin_histone_modifiers"),
-         annotationColor = annotation_color_list,
-         topBarData = "TMB", logColBar = FALSE, sortByAnnotation = TRUE, removeNonMutated = FALSE)
+         topBarData = "TMB", logColBar = FALSE, sortByAnnotation = TRUE,
+         removeNonMutated = FALSE)
 ```
 
 
 ```{r, fig.height = 14, fig.width = 14}
-oncoplot(subsetMaf(combined_maf_specific_f, tsb = dna_metadata_f %>% filter(Trial == "IMCISION") %>% pull(Tumor_Sample_Barcode)), 
+oncoplot(subsetMaf(combined_maf_specific_f, tsb = dna_metadata_f %>%
+                     filter(Trial == "IMCISION") %>%
+                     pull(Tumor_Sample_Barcode)), 
          clinicalFeatures = c("Response", "Trial"),
-         pathways = oncoplot_custom_pathways %>% filter(Pathway == "SIGPW_PI3K"),
+         pathways = oncoplot_custom_pathways %>%
+           filter(Pathway == "SIGPW_PI3K"),
          selectedPathways = c("SIGPW_PI3K"),
          annotationColor = annotation_color_list,
-         topBarData = "TMB", logColBar = FALSE, sortByAnnotation = TRUE, removeNonMutated = FALSE)
+         topBarData = "TMB", logColBar = FALSE, sortByAnnotation = TRUE,
+         removeNonMutated = FALSE)
 
-oncoplot(subsetMaf(combined_maf_specific_f, tsb = dna_metadata_f %>% filter(Trial == "MATISSE") %>% pull(Tumor_Sample_Barcode)), 
+oncoplot(subsetMaf(combined_maf_specific_f, tsb = dna_metadata_f %>%
+                     filter(Trial == "MATISSE") %>%
+                     pull(Tumor_Sample_Barcode)), 
          clinicalFeatures = c("Response", "Trial"),
-         pathways = oncoplot_custom_pathways %>% filter(Pathway == "IFN_y_pathway"),
+         pathways = oncoplot_custom_pathways %>%
+           filter(Pathway == "IFN_y_pathway"),
          selectedPathways = c("IFN_y_pathway"),
          annotationColor = annotation_color_list,
-         topBarData = "TMB", logColBar = FALSE, sortByAnnotation = TRUE, removeNonMutated = FALSE)
+         topBarData = "TMB", logColBar = FALSE, sortByAnnotation = TRUE,
+         removeNonMutated = FALSE)
 
 oncoplot_custom_pathways$Pathway %>% unique()
 
-table(pathway_level_mutation_df$Trial, pathway_level_mutation_df$SIGPW_PI3K_signaling)
+table(pathway_level_mutation_df$Trial,
+      pathway_level_mutation_df$SIGPW_PI3K_signaling)
+
 table(pathway_level_mutation_df$Trial, pathway_level_mutation_df$PIK3CA)
-table(pathway_level_mutation_df$Trial, pathway_level_mutation_df$PIK3CA) %>% prop.table(margin = 1) %>% round(2)
+
+table(pathway_level_mutation_df$Trial, pathway_level_mutation_df$PIK3CA) %>%
+  prop.table(margin = 1) %>%
+  round(2)
+
 table(pathway_level_mutation_df$Trial, pathway_level_mutation_df$GIE_IFNy) %>% prop.table(margin = 1) %>% round(2)
 
 table(pathway_level_mutation_df$Trial, pathway_level_mutation_df$GIE_IFNy) %>% prop.table(margin = 1) %>% round(2)
@@ -5202,9 +4872,7 @@ table(pathway_level_mutation_df$Trial, pathway_level_mutation_df$GIE_IFNy) %>% p
 ```{r, fig.height = 6, fig.width = 6}
 cytoband_df <- read.delim(
   here("data", "external", "cytoBand.txt"), header = F) %>%
-  setNames(c("chr", "startpos", "endpos", "cytoband", "giemsa"))
-
-cytoband_df <- cytoband_df %>%
+  setNames(c("chr", "startpos", "endpos", "cytoband", "giemsa")) %>%
   mutate(chr_arm = paste0(chr, ifelse(str_detect(cytoband, "p"), "p", "q")))
 
 cytoband_pq_df <- cytoband_df %>%
@@ -5241,10 +4909,13 @@ cytoband_pq_df %>%
 cytoband_pq_df %>%
   write_csv2(here(output_dir, "cytoband_pq_df.csv"))
 
+cytoband_pq_df <- read_csv2(here(output_dir, "cytoband_pq_df.csv"))
+
 chr_arms_exclude <- c("chrYp", "chrYq", "chrXp", "chrXp", "chr13p",
                       "chr14p", "chr15p", "chr21p", "chr22p")
 
-chromosome_sizes <- cytoband_pq_df %>% group_by(chr) %>%
+chromosome_sizes <- cytoband_pq_df %>%
+  group_by(chr) %>%
   summarize(chr_size = sum(chr_arm_size), chr_size_mb = sum(chr_arm_size_mb))
 
 ```
@@ -5342,7 +5013,8 @@ facets_data_samples <- facets_data$CF_sample_tumor %>% unique()
 facets_data_samples[!facets_data_samples %in% dna_metadata_f$CF_sample_tumor]
 
 # Filter for samples contained in maf file, filtered metadata
-facets_data_df <- facets_data_df %>% filter(CF_sample_tumor %in% dna_metadata_f$CF_sample_tumor)
+facets_data_df <- facets_data_df %>%
+  filter(CF_sample_tumor %in% dna_metadata_f$CF_sample_tumor)
 
 facets_data_df$Patient %>% n_distinct()
 
@@ -5378,58 +5050,81 @@ facets_data_metrics %>%
 
 facets_data_metrics$ploidy_WGD %>% table() %>% prop.table() %>% round(2)
 
-facets_data %>% filter(!is.na(emflags)) %>% select(CF_sample_tumor, emflags) %>% unique() %>% factor_summary()
+facets_data %>%
+  filter(!is.na(emflags)) %>%
+  select(CF_sample_tumor, emflags) %>%
+  unique() %>%
+  factor_summary()
+
+
+facets_data %>%
+  filter(!is.na(emflags)) %>%
+  select(CF_sample_tumor, emflags) %>%
+  unique() %>%
+  factor_summary()
+
+facets_data_metrics %>% dim()
+facets_data_metrics %>% write_csv2(here(output_dir, "facets_data_metrics.csv"))
+facets_data_metrics <- read_csv2(here(output_dir, "facets_data_metrics.csv"))
 ```
 
-# FACETS metrics and Ploidy WGD
+## FACETS metrics and Ploidy WGD
 ```{r}
 facets_data_metrics %>%
   ggplot(aes(x = Purity, y = Ploidy, col = Trial)) +
   geom_point() +
-  theme_Publication()
+  theme_Publication() +
+  scale_color_manual(values = trial_colors)
 
 facets_data_metrics %>%
   ggplot(aes(x = Purity, y = Ploidy, col = Response)) +
   geom_point() +
   theme_Publication() +
-  facet_wrap(~Trial)
+  facet_wrap(~Trial) +
+  scale_color_manual(values = c(Color_NR, Color_R))
 
 facets_data_metrics %>%
   ggplot(aes(x = Purity, y = TMB, col = Trial)) +
   geom_point() +
-  theme_Publication()
+  theme_Publication() +
+  scale_color_manual(values = trial_colors)
 
 facets_data_metrics %>%
   ggplot(aes(x = Purity, y = TMB, col = Response)) +
   geom_point() +
   theme_Publication() +
-  facet_wrap(~Trial)
+  facet_wrap(~Trial) +
+  scale_color_manual(values = c(Color_NR, Color_R))
 
 facets_data_metrics %>%
   ggplot(aes(x = Ploidy, y = TMB, col = Trial)) +
   geom_point() +
   theme_Publication() +
   scale_color_manual(values = trial_colors) +
-  theme(text = element_text(family = "Arial"))
+  theme(text = element_text(family = "Arial")) +
+  scale_color_manual(values = trial_colors)
 
 facets_data_metrics %>%
   ggplot(aes(x = Ploidy, y = TMB, col = Response)) +
   geom_point() +
   theme_Publication() +
-  facet_wrap(~Trial)
+  facet_wrap(~Trial) +
+  scale_color_manual(values = c(Color_NR, Color_R))
 
 facets_data_metrics %>%
   filter(Trial == "NABUCCO") %>%
   ggplot(aes(x = Ploidy, y = TMB, col = Response)) +
   geom_point() +
   theme_Publication() +
-  facet_wrap(~Trial)
+  facet_wrap(~Trial) +
+  scale_color_manual(values = c(Color_NR, Color_R))
 
 facets_data_metrics %>%
   ggplot(aes(x = Ploidy, y = TMB, col = Response)) +
   geom_point() +
   theme_Publication() +
-  facet_wrap(~Trial, scales = "free_y")
+  facet_wrap(~Trial, scales = "free_y") +
+  scale_color_manual(values = c(Color_NR, Color_R))
 
 facets_data_metrics %>%
   ggplot(aes(x = Ploidy)) +
@@ -5441,18 +5136,16 @@ facets_data_metrics %>%
   ggplot(aes(x = Ploidy, col = Trial)) +
   geom_density() +
   theme_Publication() +
-  geom_vline(xintercept = WGD_ploidy_cutoff, linetype = "dashed")
+  geom_vline(xintercept = WGD_ploidy_cutoff, linetype = "dashed")+
+  scale_color_manual(values = trial_colors)
 
 facets_data_metrics %>%
   filter(! Trial %in% c("NICHE-MSI")) %>%
   ggplot(aes(x = Ploidy, col = Trial)) +
   geom_density() +
   theme_Publication() +
-  geom_vline(xintercept = WGD_ploidy_cutoff, linetype = "dashed")
-
-facets_data_metrics %>% dim()
-facets_data_metrics %>% write_csv2(here(output_dir, "facets_data_metrics.csv"))
-facets_data_metrics <- read_csv2(here(output_dir, "facets_data_metrics.csv"))
+  geom_vline(xintercept = WGD_ploidy_cutoff, linetype = "dashed")+
+  scale_color_manual(values = trial_colors)
 
 ```
 
@@ -5529,7 +5222,7 @@ trial_wgd_response %>%
 
 ```
 
-# FACETS segments
+## FACETS segments
 ```{r}
 facets_data %>%
   mutate(size = end - start,
@@ -5590,7 +5283,7 @@ facets_data %>% filter(type == "DUP-LOH") %>% mutate_if(is.character, as.factor)
 
 ```
 
-# Intersect segments Chr arms and cytobands
+## Intersect segments Chr arms and cytobands
 
 ```{r FACETS parse intervals}
 intervals_df <- facets_data_df %>%
@@ -5780,7 +5473,7 @@ facets_c_arms_summary_e %>% filter(cn >10) %>% mutate_if(is.character, as.factor
 
 ```
 
-# Arm coverage
+## Arm coverage
 
 ```{r, fig.height = 4, fig.width = 4}
 facets_c_arms_coverage <- facets_c_arms %>%
@@ -5828,11 +5521,12 @@ facets_c_arms %>%
   theme_Publication() + facet_wrap(~Trial)
 ```
 
-# FACETS arm status
+## FACETS arm status
 
 ```{r, fig.height = 4, fig.width = 4}
 segment_status_n_map <- data.frame(
-  segment_status = c("deep_del", "loss", "normal", "gain", "amp"), cn = c(0, 1, 2, 3, 4))
+  segment_status = c("deep_del", "loss", "normal", "gain", "amp"),
+  cn = c(0, 1, 2, 3, 4))
 
 facets_c_arms_p <- facets_c_arms %>%
   mutate(cn = ifelse(cn > 4, 4, cn)) %>%
@@ -5849,7 +5543,8 @@ facets_c_arms_p %>% write_csv2(here(output_dir, "facets_c_arms_p.csv"))
 
 # Filter out chr arms
 facets_c_arms_p <- facets_c_arms_p %>%
-  filter(!chr_arm %in% c("chrYp", "chrYq", "chr13p", "chr14p", "chr15p", "chr21p", "chr22p")) %>%
+  filter(!chr_arm %in% c("chrYp", "chrYq", "chr13p",
+                         "chr14p", "chr15p", "chr21p", "chr22p")) %>%
   mutate(sample_chr_arm = paste0(CF_sample, "_", chr_arm))
 
 facets_c_arms_p %>% mutate_if(is.character, as.factor) %>% summary()
@@ -5917,7 +5612,7 @@ facets_c_arms_wide <- facets_c_arms_p_normal  %>%
 facets_c_arms_wide$Patient[!facets_c_arms_wide$Patient %in% dna_metadata_f$Patient]
 ```
 
-# GII score
+## GII score
 
 ```{r}
 
@@ -5972,7 +5667,7 @@ adapted_gii_df %>% write_csv2(here(output_dir, "adapted_gii_df.csv"))
 
 ```
 
-# wgII score
+## wgII score
 
 ```{r}
 # Two definitions, one in % of bases affected and one in % of SNPs affected. Both would be called aberrant ploidy based on a difference of 0.6 from the median profile
@@ -6034,7 +5729,7 @@ wgII_scores_0.6_sample %>%
 
 ```
 
-# Calculate Aneuploidy score
+## Calculate Aneuploidy score
 
 ```{r, fig.height = 4, fig.width = 4}
 facets_aneuploidy_score_m <- facets_c_arms_wide %>%
@@ -6183,7 +5878,7 @@ aneuploidy_score_df_c %>%
   cor(use = "complete.obs") %>% corrplot() 
 ```
 
-# Aneuploidy Response
+## Aneuploidy Response
 
 ```{r, fig.height = 4, fig.width = 4}
 
@@ -6245,7 +5940,7 @@ facets_aneuploidy_score_df %>%
 
 ```
 
-# wgII Response
+## wgII Response
 
 ```{r, fig.height = 4, fig.width = 4}
 facets_aneuploidy_score_df %>%
@@ -6333,7 +6028,7 @@ facets_aneuploidy_score_df %>%
   expand_limits(y = c(0, 10))
 ```
 
-# SCNA loss burden
+## SCNA loss burden
 
 ```{r, fig.height = 4, fig.width = 4}
 stat.test <- compare_means(formula = scna_loss ~ Response,
@@ -6454,7 +6149,7 @@ facets_aneuploidy_score_df %>%
   guides(colour = guide_colourbar(barwidth = 10))
 ```
 
-# Arms Response Frequency
+## Arms Response Frequency
 
 ```{r, fig.width = 19, fig.height = 11}
 cnvkit_cnvs_c_arms_p <- cnvkit_cnvs_c_arms_p %>%
@@ -6686,7 +6381,7 @@ chr_arm_status_delta_df %>%
 
 ```
 
-# Condense gains and amplifications, and (deep) dels
+## Condense gains and amplifications, and (deep) dels
 
 ```{r, fig.width = 16, fig.height = 9}
 
@@ -6827,7 +6522,7 @@ facets_c_cytobands <- facets_c_cytobands %>%
 ```
 
 ```{r, fig.width = 24, fig.height = 5}
-facets_c_cytobands %>% filter(chr_arm == NA)
+facets_c_cytobands %>% filter(is.na(chr_arm))
 facets_c_cytobands %>% filter(type == "DEL") %>% view() 
 
 facets_c_cytobands$type %>% table()
@@ -6896,10 +6591,19 @@ geom_text(data = chr_label_positions, aes(y = 4, label = chr),
 # TRAF2  136,881,912 - 136,926,607 (GRCh38/hg38) q34.3 
 # CCND1 11q13.3
 facets_c_cytobands %>% filter(chr_arm_cytoband == "chr9_p21.3") %>% view()
-facets_c_cytobands %>% filter(chr_arm_cytoband == "chr9_p21.3") %>% select(cytoband, start, end, cn, type, cnlr.median) %>% factor_summary()
-facets_c_cytobands %>% filter(chr_arm_cytoband == "chr9_q34.3") %>% view()
-facets_c_cytobands %>% filter(chr_arm_cytoband == "chr9_q34.3") %>% select(cytoband, start, end, cn, type, cnlr.median) %>% factor_summary()
-facets_c_cytobands %>% filter(chr_arm_cytoband == "chr11_q13.3") %>% select(cytoband, start, end, cn, type, cnlr.median) %>% factor_summary()
+facets_c_cytobands %>% filter(chr_arm_cytoband == "chr9_p21.3") %>%
+  select(cytoband, start, end, cn, type, cnlr.median) %>%
+  factor_summary()
+
+facets_c_cytobands %>%
+  filter(chr_arm_cytoband == "chr9_q34.3") %>%
+  select(cytoband, start, end, cn, type, cnlr.median) %>%
+  factor_summary()
+
+facets_c_cytobands %>%
+  filter(chr_arm_cytoband == "chr11_q13.3") %>%
+  select(cytoband, start, end, cn, type, cnlr.median) %>%
+  factor_summary()
 
 facets_c_cytobands %>% filter(chr == "chr9") %>% pull(chr_arm_cytoband)  %>% unique()
 
@@ -6943,7 +6647,7 @@ fisher.test(table(facets_amp_del_df$Response, facets_amp_del_df$chr9_q34_3_loss)
 facets_amp_del_df %>% write_csv2(here(output_dir, "facets_amp_del_df.csv"))
 ```
 
-# Excluding dMMR
+## Excluding dMMR
 ```{r}
 facets_c_cytobands_excl_dMMR %>%
   ggplot(aes(x = log2(cn + 1))) +
@@ -7059,7 +6763,7 @@ facets_c_cytobands_excl_dMMR_del_freq[
   view()
 ```
 
-# Cytoband losses freq
+## Cytoband losses freq
 
 ```{r, fig.height = 7, fig.width = 6}
 facets_c_cytobands_excl_dMMR_del_freq[
@@ -7104,7 +6808,7 @@ facets_c_cytobands
 
 ```
 
-# Cytoband gains freq
+## Cytoband gains freq
 
 ```{r, fig.height = 7, fig.width = 6}
 facets_c_cytobands_excl_dMMR_gain_freq[
@@ -7122,7 +6826,7 @@ facets_c_cytobands_excl_dMMR_del_freq %>% filter(chr == "chr9") %>%
 
 ```
 
-# Amplifications (cn \> 5)
+## Amplifications (cn \> 5)
 
 ```{r}
 facets_c_cytobands_excl_dMMR %>% filter(cn > 5) %>% ggplot(aes(x = log2(cn))) + geom_density() + theme_Publication()
@@ -7152,10 +6856,10 @@ facets_c_cytobands_excl_dMMR_amp_freq <- facets_c_cytobands_excl_dMMR_amp_freq %
   filter(!chr_arm_cytoband %in% c("NA_NA"))
 
 facets_c_cytobands_excl_dMMR_amp %>%
-  write_csv2(here(wes_dir, "facets_c_cytobands_excl_dMMR_amp.csv"))
+  write_csv2(here(output_dir, "facets_c_cytobands_excl_dMMR_amp.csv"))
 
 facets_c_cytobands_excl_dMMR_amp_freq %>%
-  write_csv2(here(wes_dir, "facets_c_cytobands_excl_dMMR_amp_freq.csv"))
+  write_csv2(here(output_dir, "facets_c_cytobands_excl_dMMR_amp_freq.csv"))
 
 cytoband_fisher_amp_excl_dmmr <- data.frame(matrix(ncol = 0, nrow = 0))
 for (current_cytoband in unique(facets_c_cytobands_excl_dMMR_amp$chr_arm_cytoband)) {
@@ -7181,18 +6885,1219 @@ cytoband_fisher_amp_excl_dmmr$fdrq <- p.adjust(
   cytoband_fisher_amp_excl_dmmr$p.value, method = "BH")
 
 cytoband_fisher_amp_excl_dmmr %>%
-  write_csv2(here(wes_dir, "cytoband_fisher_amp_excl_dmmr.csv"))
+  write_csv2(here(output_dir, "cytoband_fisher_amp_excl_dmmr.csv"))
 ```
 
 ```{r}
-facets_c_cytobands_excl_dMMR_amp_freq[select_top_extremes(facets_c_cytobands_excl_dMMR_amp_freq$Delta_amp, top_n = 10), ]
-facets_c_cytobands_excl_dMMR_amp_freq[select_top_extremes(facets_c_cytobands_excl_dMMR_amp_freq$Delta_amp, top_n = 10), ] %>% ggplot(aes(x = reorder(chr_arm_cytoband, Delta_amp), y = Delta_amp)) + geom_col() + coord_flip() + theme_Publication()
+facets_c_cytobands_excl_dMMR_amp_freq[
+  select_top_extremes(facets_c_cytobands_excl_dMMR_amp_freq$Delta_amp,
+                      top_n = 10), ]
 
-facets_c_cytobands_excl_dMMR_del_freq %>% filter(chr == "chr9") %>% ggplot(aes(x = reorder(chr_arm_cytoband, Delta_del_hemizyg), y = Delta_del_hemizyg)) + geom_col() + coord_flip() + theme_Publication()
+facets_c_cytobands_excl_dMMR_amp_freq[
+  select_top_extremes(facets_c_cytobands_excl_dMMR_amp_freq$Delta_amp,
+                      top_n = 10), ] %>%
+  ggplot(aes(x = reorder(chr_arm_cytoband, Delta_amp), y = Delta_amp)) +
+  geom_col() + coord_flip() + theme_Publication()
 
-facets_c_cytobands_excl_dMMR_amp_freq %>% filter(chr == "chr9") %>% ggplot(aes(x = reorder(chr_arm_cytoband, Delta_amp), y = Delta_del_hemizyg)) + geom_col() + coord_flip() + theme_Publication()
+facets_c_cytobands_excl_dMMR_del_freq %>%
+  filter(chr == "chr9") %>%
+  ggplot(aes(x = reorder(chr_arm_cytoband, Delta_del_hemizyg),
+             y = Delta_del_hemizyg)) + geom_col() + coord_flip() +
+  theme_Publication()
 
-facets_c_cytobands_excl_dMMR_amp_freq %>% ggplot(aes(x = reorder(chr_arm_cytoband, Delta_amp), y = Delta_del_hemizyg)) + geom_col() + coord_flip() + theme_Publication()
+facets_c_cytobands_excl_dMMR_amp_freq %>%
+  filter(chr == "chr9") %>%
+  ggplot(aes(x = reorder(chr_arm_cytoband, Delta_amp),
+             y = Delta_del_hemizyg)) + geom_col() + coord_flip() +
+  theme_Publication()
+
+facets_c_cytobands_excl_dMMR_amp_freq %>%
+  ggplot(aes(x = reorder(chr_arm_cytoband, Delta_amp),
+             y = Delta_del_hemizyg)) + geom_col() + coord_flip() +
+  theme_Publication()
+
+```
+
+
+## Analyze HLA LOH
+```{r}
+facets_c_cytobands_HLA <- facets_c_cytobands %>%
+  filter(chr_arm == "chr6p") %>%
+  mutate(segment_size = end - start,
+         segment_size_mb = segment_size / 1e6)
+
+facets_c_cytobands_HLA_p21.3 <- facets_c_cytobands_HLA %>%
+  filter(cytoband %in% c("p21.31", "p21.32", "p21.33")) 
+
+facets_c_cytobands_HLA %>%
+  ggplot(aes(x = start, y = cn, col = cytoband)) +
+  geom_point() + theme_Publication() +
+  geom_line(group = "CF_sample")
+
+facets_c_cytobands_HLA_p21.3 %>%
+  ggplot(aes(x = start, y = cn, col = cytoband)) +
+  geom_point() + theme_Publication() +
+  geom_line(group = "CF_sample")
+
+facets_c_cytobands_HLA_p21.3  %>% factor_summary()
+
+```
+
+```{r, fig.height = 30, fig.width = 30}
+facets_c_cytobands_HLA %>%
+  mutate(cn = ifelse(cn >5, 5, cn)) %>%
+  ggplot(aes(x = start, y = cn, col = cytoband)) +
+  geom_point() + theme_Publication() +
+  geom_line(group = "CF_sample") +
+  facet_wrap(~CF_sample) +
+  theme(axis.text.x = element_blank())
+
+facets_c_cytobands_HLA_p21.3 %>%
+  mutate(cn = ifelse(cn >5, 5, cn)) %>%
+  ggplot(aes(x = start, y = cn, col = cytoband)) +
+  geom_point() + theme_Publication() +
+  geom_line(group = "CF_sample") +
+  facet_wrap(~CF_sample) +
+  theme(axis.text.x = element_blank())
+```
+
+
+```{r}
+facets_c_cytobands_HLA_p21.3 %>%
+  ggplot(aes(x = type, y = cn)) +
+  geom_boxplot() + theme_Publication()
+```
+
+
+```{r, fig.height = 8, fig.width = 8}
+facets_c_cytobands_HLA_p21.3 %>%
+  ggplot(aes(x = type, y = cn)) +
+  geom_boxplot() + theme_Publication() +
+  facet_wrap(~Trial) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+
+```{r}
+n_distinct(facets_c_cytobands_HLA$CF_sample)
+
+facets_c_cytobands_HLA %>%
+  ggplot(aes(x = start, y = cn, col = cytoband)) +
+  geom_point() + theme_Publication() + geom_line(group = "CF_sample")
+
+facets_c_cytobands_HLA %>%
+  mutate(cn = ifelse(cn > 5, 5, cn)) %>%
+  filter(cytoband %in% c("p21.31", "p21.32", "p21.33")) %>%
+  ggplot(aes(x = start, y = cn, col = cytoband)) +
+  geom_point() + theme_Publication() + geom_line(group = "CF_sample")
+
+facets_c_cytobands_HLA %>%
+  filter(type == "LOH") %>%
+  ggplot(aes(x = start, y = cn, col = cytoband)) +
+  geom_point() + theme_Publication() + geom_line(group = "CF_sample")
+
+facets_c_cytobands_HLA %>%
+  filter(type == "DUP-LOH") %>%
+  ggplot(aes(x = start, y = cn, col = cytoband)) +
+  geom_point() + theme_Publication() + geom_line(group = "CF_sample")
+
+facets_c_cytobands_HLA %>%
+  filter(type == "DEL") %>%
+  ggplot(aes(x = start, y = cn, col = cytoband)) +
+  geom_point() + theme_Publication() + geom_line(group = "CF_sample")
+
+facets_c_cytobands_HLA %>%
+  filter(type == "HEMIZYG") %>%
+  ggplot(aes(x = start, y = cn, col = cytoband)) +
+  geom_point() + theme_Publication() + geom_line(group = "CF_sample")
+
+facets_c_cytobands_HLA %>%
+  filter(cytoband %in% c("p21.31", "p21.32", "p21.33")) %>%
+  ggplot(aes(x = start, y = cn, col = cytoband)) +
+  geom_point() + theme_Publication() + geom_line(group = "CF_sample")
+
+facets_c_cytobands_HLA %>%
+  filter(type == "LOH") %>%
+  mutate(cn = ifelse(cn > 5, 5, cn)) %>%
+  filter(cytoband %in% c("p21.31", "p21.32", "p21.33")) %>%
+  ggplot(aes(x = start, y = cn, col = cytoband)) +
+  geom_point() + theme_Publication() + geom_line(group = "CF_sample")
+```
+
+```{r}
+# GRCh38 coordinates for HLA class I genes
+hla_coords <- data.frame(
+  gene = c("HLA-A", "HLA-B", "HLA-C"),
+  chr  = c("6", "6", "6"),
+  start = c(29941260, 31353867, 31268749), 
+  end   = c(29949572, 31367067, 31272130) 
+) 
+
+hla_coords
+
+# Function to find overlapping segments
+overlap_segments <- function(df, chr, start, end) {
+  df %>%
+    filter(
+      chrom == chr,
+      start <= end,
+      end >= start
+    )
+}
+
+# For each HLA gene, extract overlapping FACETS segments
+hla_segments <- lapply(1:nrow(hla_coords), function(i) {
+  gene <- hla_coords$gene[i]
+  chr  <- hla_coords$chr[i]
+  s    <- hla_coords$start[i]
+  e    <- hla_coords$end[i]
+
+  facets_c_cytobands_HLA %>%
+    filter(start <= e,
+           end >= s) %>%
+    mutate(gene = gene)
+}) %>%
+  bind_rows()
+
+# Check consistency of CN and type across cytobands per sample + gene
+HLA_consistency_check <- hla_segments %>%
+  group_by(CF_sample, gene) %>%
+  summarise(
+    n_cytobands = n_distinct(cytoband),
+    cn_values   = paste(sort(unique(cn)), collapse = ","),
+    type_values = paste(sort(unique(type)), collapse = ","),
+    HLA_gene_consistent_cn   = n_distinct(cn) == 1,
+    HLA_gene_consistent_type = n_distinct(type) == 1,
+    .groups = "drop"
+  )
+
+print(HLA_consistency_check)
+
+HLA_consistency_check %>% factor_summary()
+table(HLA_consistency_check$type_values, HLA_consistency_check$cn_values)
+
+# CN breakpoint but still duplication
+# Deep del or hemizygous, these will be grouped
+HLA_consistency_check %>%
+  filter(HLA_gene_consistent_cn == FALSE | HLA_gene_consistent_type == FALSE)
+
+# For each sample, count distinct CN and type states on chr6p
+chr6p_cytobands_summary <- facets_c_cytobands %>%
+  filter(chr_arm == "chr6p") %>%
+  group_by(CF_sample) %>%
+  summarise(
+    n_segments      = n(),
+    n_cn_states     = n_distinct(cn),
+    cn_states       = paste(sort(unique(cn)), collapse = ","),
+    n_type_states   = n_distinct(type),
+    type_states     = paste(sort(unique(type)), collapse = ","),
+    .groups = "drop"
+  ) %>%
+  left_join(facets_data_metrics %>%
+              mutate(CF_sample = CF_sample_tumor))
+
+chr6p_cytobands_summary %>% factor_summary()
+
+chr6p_summary <- facets_c_arms %>%
+  filter(chr_arm == "chr6p") %>%
+  group_by(CF_sample) %>%
+  summarise(
+    n_segments      = n(),
+    n_cn_states     = n_distinct(cn),
+    cn_states       = paste(sort(unique(cn)), collapse = ","),
+    n_type_states   = n_distinct(type),
+    type_states     = paste(sort(unique(type)), collapse = ","),
+    .groups = "drop"
+  ) %>%
+  left_join(facets_data_metrics %>%
+              mutate(CF_sample = CF_sample_tumor))
+
+print(chr6p_summary)
+
+chr6p_summary %>% factor_summary()
+
+chr6p_summary %>%
+  write_csv2(here(output_dir, "chr6p_summary.csv"))
+
+HLA_consistency_check %>%
+  write_csv2(here(output_dir, "HLA_consistency_check.csv"))
+
+HLA_consistency_check <- read_csv2(
+  here(output_dir, "HLA_consistency_check.csv"))
+```
+
+```{r}
+# HLA status flag
+HLA_consistency_flag <- HLA_consistency_check %>%
+    select(CF_sample, HLA_gene_consistent_type) %>%
+    unique() %>%
+  group_by(CF_sample) %>%
+  summarize(HLA_gene_consistent_type = !any(
+    HLA_gene_consistent_type == FALSE)) %>%
+  unique()
+
+HLA_LOH_df <- HLA_consistency_check %>%
+  select(CF_sample, gene, type_values) %>%
+  unique() %>%
+  pivot_wider(names_from = "gene", values_from = type_values)%>%
+  rename(HLA_A = "HLA-A", HLA_B = "HLA-B", HLA_C = "HLA-C") %>%
+  mutate(HLA_consistent_type = HLA_A == HLA_B & HLA_B == HLA_C) %>%
+  left_join(HLA_consistency_flag) %>%
+  mutate(HLA_grouped = "Unassigned") %>%
+  mutate(HLA_grouped = ifelse(HLA_A %in% c("LOH", "DUP-LOH") |
+                                HLA_B %in% c("LOH", "DUP-LOH") |
+                                HLA_C %in% c("LOH", "DUP-LOH") ,
+                              "HLA-LOH", HLA_grouped)) %>%
+  mutate(HLA_grouped = ifelse(HLA_A %in% c("DEL", "HEMIZYG") |
+                                HLA_B %in% c("DEL", "HEMIZYG") |
+                                HLA_C %in% c("DEL", "HEMIZYG") %in% c("DEL", "HEMIZYG"),
+                              "HLA-DEL", HLA_grouped)) %>%
+  mutate(HLA_grouped = ifelse(HLA_A %in% c("DUP", "NEUTR") &
+                                HLA_B %in% c("DUP", "NEUTR") &
+                                HLA_C %in% c("DUP", "NEUTR"),
+                              "HLA-Intact", HLA_grouped))%>%
+  mutate(HLA_Intact = ifelse(HLA_grouped %in% c("HLA-Intact"),
+                             "HLA-Intact", "HLA-Altered")) %>%
+  left_join(facets_data_metrics %>%
+                    mutate(CF_sample = CF_sample_tumor))
+
+HLA_LOH_df %>% filter(!HLA_consistent_type) %>% factor_summary()
+
+HLA_LOH_df %>%
+  select(Trial, CF_sample_tumor, HLA_grouped, HLA_Intact, HLA_A, HLA_B, HLA_C,
+         HLA_consistent_type, HLA_gene_consistent_type) %>%
+  view()
+
+table(HLA_LOH_df$HLA_A, HLA_LOH_df$HLA_grouped)
+table(HLA_LOH_df$HLA_B, HLA_LOH_df$HLA_grouped)
+table(HLA_LOH_df$HLA_C, HLA_LOH_df$HLA_grouped)
+
+table(HLA_LOH_df$Trial, HLA_LOH_df$HLA_A)
+
+table(HLA_LOH_df$Trial, HLA_LOH_df$HLA_A) %>%
+  prop.table(margin = 1) %>%
+  round(2)
+
+table(HLA_LOH_df$Trial, HLA_LOH_df$HLA_A) %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "HLA_A", "Freq")) %>%
+  ggplot(aes(x = Trial, y = Freq, fill = HLA_A)) +
+  geom_col() + theme_Publication()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+table(HLA_LOH_df$Trial, HLA_LOH_df$HLA_A) %>%
+  prop.table(margin = 1) %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "HLA_A", "Freq")) %>%
+  ggplot(aes(x = Trial, y = Freq, fill = HLA_A)) +
+  geom_col()  + theme_Publication()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+
+table(HLA_LOH_df$Trial, HLA_LOH_df$HLA_B)
+
+table(HLA_LOH_df$Trial, HLA_LOH_df$HLA_B) %>%
+  prop.table(margin = 1) %>%
+  round(2)
+
+table(HLA_LOH_df$Trial, HLA_LOH_df$HLA_B) %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "HLA_B", "Freq")) %>%
+  ggplot(aes(x = Trial, y = Freq, fill = HLA_B)) +
+  geom_col() + theme_Publication()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+table(HLA_LOH_df$Trial, HLA_LOH_df$HLA_B) %>%
+  prop.table(margin = 1) %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "HLA_B", "Freq")) %>%
+  ggplot(aes(x = Trial, y = Freq, fill = HLA_B)) +
+  geom_col()  + theme_Publication()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+table(HLA_LOH_df$Trial, HLA_LOH_df$HLA_C)
+
+table(HLA_LOH_df$Trial, HLA_LOH_df$HLA_C) %>%
+  prop.table(margin = 1) %>%
+  round(2)
+
+table(HLA_LOH_df$Trial, HLA_LOH_df$HLA_C) %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "HLA_C", "Freq")) %>%
+  ggplot(aes(x = Trial, y = Freq, fill = HLA_C)) +
+  geom_col() + theme_Publication()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+table(HLA_LOH_df$Trial, HLA_LOH_df$HLA_C) %>%
+  prop.table(margin = 1) %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "HLA_C", "Freq")) %>%
+  ggplot(aes(x = Trial, y = Freq, fill = HLA_C)) +
+  geom_col()  + theme_Publication()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+table(HLA_LOH_df$Trial, HLA_LOH_df$HLA_grouped)
+table(HLA_LOH_df$Trial, HLA_LOH_df$HLA_grouped) %>%
+  prop.table(margin = 1) %>%
+  round(2)
+
+table(HLA_LOH_df$Trial, HLA_LOH_df$HLA_grouped) %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "HLA_grouped", "Freq")) %>%
+  ggplot(aes(x = Trial, y = Freq, fill = HLA_grouped)) +
+  geom_col() + theme_Publication()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+table(HLA_LOH_df$Trial, HLA_LOH_df$HLA_grouped) %>%
+  prop.table(margin = 1) %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "HLA_grouped", "Freq")) %>%
+  ggplot(aes(x = Trial, y = Freq, fill = HLA_grouped)) +
+  geom_col()  + theme_Publication()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+table(HLA_LOH_df$Trial, HLA_LOH_df$HLA_Intact)
+table(HLA_LOH_df$Trial, HLA_LOH_df$HLA_Intact) %>%
+  prop.table(margin = 1) %>%
+  round(2)
+
+table(HLA_LOH_df$Trial, HLA_LOH_df$HLA_Intact) %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "HLA_Intact", "Freq")) %>%
+  ggplot(aes(x = Trial, y = Freq, fill = HLA_Intact)) +
+  geom_col() + theme_Publication()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+table(HLA_LOH_df$Trial, HLA_LOH_df$HLA_Intact) %>%
+  prop.table(margin = 1) %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "HLA_Intact", "Freq")) %>%
+  ggplot(aes(x = Trial, y = Freq, fill = HLA_Intact)) +
+  geom_col()  + theme_Publication()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+HLA_LOH_df %>% write_csv2(here(output_dir, "HLA_LOH_df.csv"))
+HLA_LOH_df <- read_csv2(here(output_dir, "HLA_LOH_df.csv"))
+
+```
+
+```{r}
+HLA_LOH_TMB_df <- HLA_LOH_df %>%
+  left_join(n_variants_dp20_vaf_tmb) %>%
+  mutate(TMB_status = ifelse(TMB >= 10, "TMB-H", "TMB-L"))
+
+table(HLA_LOH_TMB_df$HLA_A, HLA_LOH_TMB_df$TMB_status)
+
+table(HLA_LOH_TMB_df$HLA_A, HLA_LOH_TMB_df$TMB_status) %>%
+  prop.table(margin = 1) %>%
+  round(2)
+
+table(HLA_LOH_TMB_df$HLA_A, HLA_LOH_TMB_df$TMB_status) %>%
+  prop.table(margin = 2) %>%
+  round(2)
+
+table(HLA_LOH_TMB_df$TMB_status, HLA_LOH_TMB_df$HLA_A) %>%
+  as.data.frame() %>%
+  setNames(c("TMB_status", "HLA_A", "Freq")) %>%
+  ggplot(aes(x = TMB_status, y = Freq, fill = HLA_A)) +
+  geom_col() + theme_Publication()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+table(HLA_LOH_TMB_df$TMB_status, HLA_LOH_TMB_df$HLA_A) %>%
+  prop.table(margin = 1) %>%
+  as.data.frame() %>%
+  setNames(c("TMB_status", "HLA_A", "Freq")) %>%
+  ggplot(aes(x = TMB_status, y = Freq, fill = HLA_A)) +
+  geom_col()  + theme_Publication()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+table(HLA_LOH_TMB_df$TMB_status, HLA_LOH_TMB_df$HLA_grouped)
+table(HLA_LOH_TMB_df$TMB_status, HLA_LOH_TMB_df$HLA_grouped) %>%
+  prop.table(margin = 1) %>%
+  round(2)
+
+table(HLA_LOH_TMB_df$TMB_status, HLA_LOH_TMB_df$HLA_grouped) %>%
+  as.data.frame() %>%
+  setNames(c("TMB_status", "HLA_grouped", "Freq")) %>%
+  ggplot(aes(x = TMB_status, y = Freq, fill = HLA_grouped)) +
+  geom_col() + theme_Publication()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+table(HLA_LOH_TMB_df$TMB_status, HLA_LOH_TMB_df$HLA_grouped) %>%
+  prop.table(margin = 1) %>%
+  as.data.frame() %>%
+  setNames(c("TMB_status", "HLA_grouped", "Freq")) %>%
+  ggplot(aes(x = TMB_status, y = Freq, fill = HLA_grouped)) +
+  geom_col()  + theme_Publication()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+table(HLA_LOH_TMB_df$TMB_status, HLA_LOH_TMB_df$HLA_Intact)
+table(HLA_LOH_TMB_df$TMB_status, HLA_LOH_TMB_df$HLA_Intact) %>%
+  prop.table(margin = 1) %>%
+  round(2)
+
+table(HLA_LOH_TMB_df$TMB_status, HLA_LOH_TMB_df$HLA_Intact) %>%
+  as.data.frame() %>%
+  setNames(c("TMB_status", "HLA_Intact", "Freq")) %>%
+  ggplot(aes(x = TMB_status, y = Freq, fill = HLA_Intact)) +
+  geom_col() + theme_Publication()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+table(HLA_LOH_TMB_df$TMB_status, HLA_LOH_TMB_df$HLA_Intact) %>%
+  prop.table(margin = 1) %>%
+  as.data.frame() %>%
+  setNames(c("TMB_status", "HLA_Intact", "Freq")) %>%
+  ggplot(aes(x = TMB_status, y = Freq, fill = HLA_Intact)) +
+  geom_col()  + theme_Publication()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+
+
+```{r}
+table(HLA_LOH_TMB_df$Trial,
+      HLA_LOH_TMB_df$TMB_status, HLA_LOH_TMB_df$HLA_grouped) %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "TMB_status", "HLA_grouped", "Freq")) %>%
+  ggplot(aes(x = Trial, y = Freq, fill = HLA_grouped)) +
+  geom_col() + theme_Publication()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) + 
+  facet_wrap(~TMB_status)
+
+table(HLA_LOH_TMB_df$Trial,
+      HLA_LOH_TMB_df$TMB_status, HLA_LOH_TMB_df$HLA_grouped) %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "TMB_status", "HLA_grouped", "Freq"))
+
+table(HLA_LOH_TMB_df$Trial,
+      HLA_LOH_TMB_df$TMB_status, HLA_LOH_TMB_df$HLA_grouped) %>%
+    as.data.frame() %>%
+    setNames(c("Trial", "TMB_status", "HLA_grouped", "Freq")) %>%
+  pivot_wider(names_from = HLA_grouped, values_from = Freq) %>%
+  mutate(Total = `HLA-DEL` + `HLA-Intact` + `HLA-LOH`,
+         `HLA-DEL` = `HLA-DEL` / Total,
+         `HLA-Intact` = `HLA-Intact` / Total,
+         `HLA-LOH` = `HLA-LOH` / Total) %>%
+  pivot_longer(cols = c(`HLA-DEL`, `HLA-Intact`, `HLA-LOH`),
+                        names_to = "HLA_grouped", values_to = "Prop") %>%
+  mutate(Trial_n = sprintf("%s (%s)", Trial, Total)) %>%
+  ggplot(aes(x = Trial_n, y = Prop, fill = HLA_grouped)) +
+  geom_col()  + theme_Publication()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) + 
+  facet_wrap(~TMB_status, scales = "free")
+
+table(HLA_LOH_TMB_df$Trial,
+      HLA_LOH_TMB_df$TMB_status, HLA_LOH_TMB_df$HLA_Intact) %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "TMB_status", "HLA_Intact", "Freq")) %>%
+  ggplot(aes(x = Trial, y = Freq, fill = HLA_Intact)) +
+  geom_col() + theme_Publication()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) + 
+  facet_wrap(~TMB_status)
+
+table(HLA_LOH_TMB_df$Trial,
+      HLA_LOH_TMB_df$TMB_status, HLA_LOH_TMB_df$HLA_Intact) %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "TMB_status", "HLA_Intact", "Freq"))
+
+table(HLA_LOH_TMB_df$Trial,
+      HLA_LOH_TMB_df$TMB_status,
+      HLA_LOH_TMB_df$HLA_Intact) %>%
+    as.data.frame() %>%
+    setNames(c("Trial", "TMB_status", "HLA_Intact", "Freq")) %>%
+  pivot_wider(names_from = HLA_Intact, values_from = Freq) %>%
+  mutate(Total = `HLA-Altered` + `HLA-Intact`,
+         `HLA-Altered` = `HLA-Altered` / Total,
+         `HLA-Intact` = `HLA-Intact` / Total) %>%
+  pivot_longer(cols = c(`HLA-Altered`, `HLA-Intact`),
+                        names_to = "HLA_Intact", values_to = "Prop") %>%
+  mutate(Trial_n = sprintf("%s (%s)", Trial, Total)) %>%
+  ggplot(aes(x = Trial_n, y = Prop, fill = HLA_Intact)) +
+  geom_col()  + theme_Publication()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) + 
+  facet_wrap(~TMB_status, scales = "free")
+
+```
+
+```{r}
+table(HLA_LOH_TMB_df$Trial,
+       HLA_LOH_TMB_df$HLA_Intact,
+      HLA_LOH_TMB_df$Response, useNA = "ifany") %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "HLA_Intact", "Response", "Freq")) %>%
+  ggplot(aes(x = Response, y = Freq, fill = Trial)) +
+  geom_col() + theme_Publication() +
+  scale_fill_manual(values = trial_colors) +
+  facet_wrap(~HLA_Intact)
+
+table(HLA_LOH_TMB_df$Trial,
+       HLA_LOH_TMB_df$HLA_Intact,
+      HLA_LOH_TMB_df$Response, useNA = "ifany") %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "HLA_Intact", "Response", "Freq")) %>% 
+  filter(!HLA_Intact %in% c("HLA-Intact")) %>%
+  ggplot(aes(x = Response, y = Freq, fill = Trial)) +
+  geom_col() + theme_Publication() +
+  scale_fill_manual(values = trial_colors) +
+  facet_wrap(~HLA_Intact)
+
+table(HLA_LOH_TMB_df$Trial,
+       HLA_LOH_TMB_df$HLA_Intact,
+      HLA_LOH_TMB_df$Response, useNA = "ifany") %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "HLA_Intact", "Response", "Freq")) %>%
+  filter(!Trial %in% c("NICHE-MSI")) %>%
+  ggplot(aes(x = Response, y = Freq, fill = Trial)) +
+  geom_col() + theme_Publication() +
+  scale_fill_manual(values = trial_colors) +
+  facet_wrap(~HLA_Intact)
+
+table(HLA_LOH_TMB_df$Trial,
+       HLA_LOH_TMB_df$HLA_grouped,
+      HLA_LOH_TMB_df$Response, useNA = "ifany") %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "HLA_grouped", "Response", "Freq")) %>%
+  ggplot(aes(x = Response, y = Freq, fill = Trial)) +
+  geom_col() + theme_Publication() +
+  scale_fill_manual(values = trial_colors) +
+  facet_wrap(~HLA_grouped)
+
+table(HLA_LOH_TMB_df$Trial,
+       HLA_LOH_TMB_df$HLA_grouped,
+      HLA_LOH_TMB_df$Response, useNA = "ifany") %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "HLA_grouped", "Response", "Freq")) %>%
+  filter(!HLA_grouped %in% c("HLA-Intact")) %>%
+  ggplot(aes(x = Response, y = Freq, fill = Trial)) +
+  geom_col() + theme_Publication() +
+  scale_fill_manual(values = trial_colors) +
+  facet_wrap(~HLA_grouped)
+
+table(HLA_LOH_TMB_df$Trial,
+       HLA_LOH_TMB_df$HLA_grouped,
+      HLA_LOH_TMB_df$Response, useNA = "ifany") %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "HLA_grouped", "Response", "Freq")) %>%
+  filter(!HLA_grouped %in% c("HLA-Intact")) %>%
+  filter(!Trial %in% c("NICHE-MSI")) %>%
+  ggplot(aes(x = Response, y = Freq, fill = Trial)) +
+  geom_col() + theme_Publication() +
+  scale_fill_manual(values = trial_colors) +
+  facet_wrap(~HLA_grouped)
+
+
+table(HLA_LOH_TMB_df$Trial,
+       HLA_LOH_TMB_df$HLA_grouped,
+      HLA_LOH_TMB_df$Response, useNA = "ifany") %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "HLA_grouped", "Response", "Freq")) %>%
+  filter(!HLA_grouped %in% c("HLA-Intact")) %>%
+  ggplot(aes(x = HLA_grouped, y = Freq, fill = Trial)) +
+  geom_col() + theme_Publication() +
+  scale_fill_manual(values = trial_colors) +
+  facet_wrap(~Response)
+
+table(HLA_LOH_TMB_df$Trial,
+       HLA_LOH_TMB_df$HLA_grouped,
+      HLA_LOH_TMB_df$Response, useNA = "ifany") %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "HLA_grouped", "Response", "Freq")) %>%
+  filter(!HLA_grouped %in% c("HLA-Intact")) %>%
+  filter(!Trial %in% c("NICHE-MSI")) %>%
+  ggplot(aes(x = HLA_grouped, y = Freq, fill = Trial)) +
+  geom_col() + theme_Publication() +
+  scale_fill_manual(values = trial_colors) +
+  facet_wrap(~Response)
+```
+
+# ----------
+# Clonal TMB
+```{r}
+facets_data_df$emflags %>% table(useNA = "ifany")
+
+facets_data_df %>%
+  select(CF_sample_tumor, Trial, emflags) %>%
+  unique() %>% view()
+
+facets_data_df %>% head()
+
+combined_maf_dp20_vaf_df %>% head()
+table(combined_maf_dp20_vaf_df$Chromosome)
+table(facets_data_df$chrom)
+
+```
+
+```{r}
+facets_data_metrics %>%
+  filter(Purity < 30) %>%
+  ggplot(aes(x = Trial, y = TMB)) +
+  geom_boxplot() + geom_point() + theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) 
+
+facets_data_metrics %>%
+  filter(is.na(Purity)) %>%
+  ggplot(aes(x = Trial, y = TMB)) +
+  geom_boxplot() + geom_point() + theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) 
+
+facets_data_metrics %>%
+  ggplot(aes(x = emflags, y = Purity)) + geom_boxplot() +
+  coord_flip() + theme_Publication()
+```
+
+## Join variant VAF and FACETs information
+
+```{r}
+# Safe helper to ensure all FACETS columns exist
+fix_facets_cols <- function(df) {
+  if (!is.data.frame(df)) {
+    df <- as.data.frame(df)
+  }
+  required <- c("cf.em", "tcn.em", "lcn.em", "cnlr.median.clust", "mafR.clust", "type")
+  missing  <- setdiff(required, names(df))
+  df[missing] <- NA
+  df
+}
+
+join_facets_variants <- function(variant_sub, facets_sub) {
+
+  facets_sub <- fix_facets_cols(facets_sub)
+
+  gr_var <- GRanges(
+    seqnames = variant_sub$Chromosome,
+    ranges   = IRanges(start = variant_sub$Start_Position,
+                       end   = variant_sub$End_Position)
+  )
+
+  gr_fac <- GRanges(
+    seqnames = facets_sub$chrom,
+    ranges   = IRanges(start = facets_sub$start,
+                       end   = facets_sub$end),
+    cf.em  = facets_sub$cf.em,
+    tcn.em = facets_sub$tcn.em,
+    lcn.em = facets_sub$lcn.em,
+    cnlr.median.clust = facets_sub$cnlr.median.clust,
+    mafR.clust = facets_sub$mafR.clust,
+    type = facets_sub$type
+    
+  )
+
+  hits <- findOverlaps(gr_var, gr_fac)
+
+  joined <- cbind(
+    variant_sub[queryHits(hits), ],
+    as.data.frame(mcols(gr_fac)[subjectHits(hits), ])
+  )
+
+  joined
+}
+
+# ---- APPLY PER SAMPLE ----
+
+# Split both dataframes by sample
+variants_by_sample <- split(combined_maf_dp20_vaf_df, combined_maf_dp20_vaf_df$CF_sample_tumor, drop = FALSE)
+facets_by_sample <- split(facets_data_df,
+                          facets_data_df$CF_sample_tumor, drop = FALSE)
+
+# Intersect sample names present in both
+common_samples <- intersect(names(variants_by_sample), names(facets_by_sample))
+length(common_samples)
+
+common_samples[1:5]
+
+# Run overlap join per sample
+results_list <- map(common_samples, function(s) {
+  join_facets_variants(variants_by_sample[[s]], facets_by_sample[[s]])
+})
+
+# Combine all samples into one final dataframe
+variant_facets_cn_df <- bind_rows(results_list)
+
+variant_facets_cn_df <- variant_facets_cn_df %>%
+  left_join(facets_data_metrics) %>%
+  left_join(patient_metadata_combined %>%
+              select(Patient, Sex))
+
+dim(variant_facets_cn_df)
+dim(combined_maf_dp20_vaf_df)
+nrow(variant_facets_cn_df) / nrow(combined_maf_dp20_vaf_df) * 100
+
+# Inspect
+table(variant_facets_cn_df$Chromosome)
+
+variant_facets_cn_df %>%
+  filter(is.na(Purity)) %>%
+  ggplot(aes(x = VAF, fill = Trial, alpha = 0.5)) +
+  geom_density() +
+  scale_fill_manual(values = trial_colors) +
+  theme_Publication()
+
+variant_facets_cn_df %>%
+  filter(Chromosome == "X") %>%
+  select(Patient, Trial, Sex, Chromosome, tcn.em, type) %>%
+  unique() %>%
+  view()
+
+facets_data_df %>%
+  left_join(facets_data_metrics)  %>%
+  filter(chrom == "Y") %>%
+  left_join(patient_metadata_combined %>%
+              select(Patient, Sex)) %>%
+  select(Patient, Trial, Sex, chrom, tcn.em, type) %>%
+  unique() %>%
+  view()
+
+variant_facets_cn_df %>%
+  write_csv2(here(output_dir, "variant_facets_cn_df.csv"))
+```
+
+## Impute purity from diploid median VAF
+
+```{r}
+# First examine all variants
+vaf_summaries <- combined_maf_dp20_vaf_df %>%
+  filter(Chromosome %in% c(1:22)) %>%
+  group_by(CF_sample_tumor, Trial) %>%
+  summarize(Variants = n(),
+            mean_VAF = mean(VAF),
+            median_VAF = median(VAF),
+            q3_VAF = quantile(VAF, 0.75, na.rm = TRUE)) %>%
+  ungroup()
+
+vaf_summaries %>%
+  ggplot(aes(x = mean_VAF, y = median_VAF, col = Variants)) +
+  geom_point() + theme_Publication() +
+  geom_abline(slope = 1 , intercept = 0)
+
+vaf_summaries %>%
+  ggplot(aes(x = mean_VAF, y = q3_VAF, col = Variants)) +
+  geom_point() + theme_Publication() +
+  geom_abline(slope = 1 , intercept = 0)
+
+vaf_summaries %>%
+  ggplot(aes(x = median_VAF, y = q3_VAF, col = Variants)) +
+  geom_point() + theme_Publication() +
+  geom_abline(slope = 1 , intercept = 0)
+
+vaf_summaries %>%
+  ggplot(aes(x = Variants, y = median_VAF, col = Trial)) +
+  geom_point() + theme_Publication() +
+  scale_color_manual(values = trial_colors)
+
+vaf_summaries %>%
+  ggplot(aes(x = Variants, y = mean_VAF, col = Trial)) +
+  geom_point() + theme_Publication() +
+  scale_color_manual(values = trial_colors)
+
+vaf_summaries %>%
+  ggplot(aes(x = Variants, y = q3_VAF, col = Trial)) +
+  geom_point() + theme_Publication() +
+  scale_color_manual(values = trial_colors)
+
+vaf_summaries %>%
+  filter(Variants < 500) %>%
+  ggplot(aes(x = Variants, y = median_VAF, col = Trial)) +
+  geom_point() + theme_Publication()+
+  scale_color_manual(values = trial_colors)
+
+vaf_summaries %>%
+  filter(Variants < 500) %>%
+  ggplot(aes(x = Variants, y = q3_VAF, col = Trial)) +
+  geom_point() + theme_Publication()+
+  scale_color_manual(values = trial_colors)
+```
+
+```{r, fig.width = 40, fig.height = 10}
+# Merge summaries back into the main df for plotting
+plot_df <- combined_maf_dp20_vaf_df %>%
+  filter(Chromosome %in% c(1:22)) %>%
+  left_join(vaf_summaries, by = "CF_sample_tumor")
+
+# Plot: VAF distribution per sample with median + Q3
+ggplot(plot_df, aes(x = CF_sample_tumor, y = VAF)) +
+  geom_violin(fill = "grey85", color = "grey40", scale = "width") +
+  geom_point(aes(y = median_VAF), color = "blue", size = 2) +
+  geom_point(aes(y = q3_VAF), color = "red", size = 2) +
+  labs(
+    title = "VAF Distribution per Sample",
+    subtitle = "Blue = median VAF, Red = Q3 VAF",
+    x = "Sample",
+    y = "Variant Allele Frequency (VAF)"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, size = 7)
+  )
+
+```
+
+```{r}
+# Filter for balanced diploid copy number neutral, without LOH
+variant_facets_cn_df %>%
+  filter(tcn.em == 2) %>% 
+  filter(Chromosome %in% c(1:22)) %>%
+  select(Purity, Ploidy, type, tcn.em) %>%
+  factor_summary() 
+
+diploid_vaf_summaries <- variant_facets_cn_df %>%
+  filter(tcn.em == 2) %>% 
+  filter(type == "NEUTR") %>%
+  filter(Chromosome %in% c(1:22)) %>%
+  group_by(CF_sample_tumor, Trial) %>%
+  summarize(diploid_VAF_Variants = n(),
+            diploid_mean_VAF = mean(VAF),
+            diploid_median_VAF = median(VAF),
+            diploid_q3_VAF = quantile(VAF, 0.75, na.rm = TRUE)
+            ) %>%
+  ungroup() %>%
+  mutate(Imputed_median_purity = 2 * diploid_median_VAF) %>%
+  mutate(Imputed_median_purity = ifelse(Imputed_median_purity > 1, 1, Imputed_median_purity)) %>%
+  mutate(Imputed_purity = 2 * diploid_q3_VAF) %>%
+  mutate(Imputed_purity = ifelse(Imputed_purity > 1, 1, Imputed_purity)) 
+
+dim(vaf_summaries)
+dim(diploid_vaf_summaries)
+
+vaf_summaries %>%
+  left_join(diploid_vaf_summaries) %>%
+  factor_summary()
+
+vaf_summaries_c <- vaf_summaries %>%
+  left_join(diploid_vaf_summaries) %>%
+  left_join(facets_data_metrics) %>%
+  mutate(Purity_flag = ifelse(
+    (is.na(Purity) & ! is.na(Imputed_purity)),
+    "median_diploid_VAF_Imputed_purity", "FACETS_purity")) %>%
+  ungroup()
+
+vaf_summaries_c %>%
+  select(Trial, Purity, Imputed_purity, Purity_flag, emflags) %>%
+  view()
+
+vaf_summaries_c %>%
+  select(-c(Source_MAF, Tumor_Sample_Barcode)) %>%
+  filter(is.na(Purity)) %>%
+  factor_summary()
+
+vaf_summaries_c %>%
+  filter(is.na(Purity)) %>%
+  select(Trial, Purity, Imputed_purity, Purity_flag, emflags) %>%
+  factor_summary()
+
+ggplot(vaf_summaries_c,
+       aes(x = Imputed_median_purity, y = Imputed_purity)) +
+  geom_point(alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  labs(
+    title = "Comparison of Median-VAF Purity vs Q3-VAF Purity",
+    x = "Purity (2 × median VAF)",
+    y = "Purity (2 × Q3 VAF)"
+  ) +
+  theme_Publication()
+
+vaf_summaries_long <- vaf_summaries_c %>%
+  select(CF_sample_tumor, Purity, Imputed_median_purity,
+         Imputed_purity, emflags) %>%
+  tidyr::pivot_longer(cols = starts_with("Imputed_"),
+                      names_to = "method",
+                      values_to = "Imputed") %>%
+  mutate(Delta = Purity - Imputed) 
+
+ggplot(vaf_summaries_long,
+       aes(x = reorder(CF_sample_tumor, Imputed),
+           y = Imputed, color = method)) +
+  geom_point(alpha = 0.7) +
+  labs(
+    title = "Purity Estimates per Sample (Median vs Q3)",
+    x = "Sample (sorted by Imputed purity)",
+    y = "Purity estimate"
+  )  +
+  theme_Publication()  +
+  theme(axis.text.x = element_blank())
+
+ggplot(vaf_summaries_long,
+       aes(x = reorder(CF_sample_tumor, Purity),
+           y = Imputed, color = method)) +
+  geom_point(alpha = 0.7) +
+  labs(
+    title = "Purity Estimates per Sample (Median vs Q3)",
+    x = "Sample (sorted by FACETs purity)",
+    y = "Purity estimate"
+  ) +
+  theme_Publication() +
+  theme(axis.text.x = element_blank())
+
+```
+
+```{r}
+vaf_summaries_long %>%
+  filter(method == "Imputed_median_purity") %>%
+  mutate(Delta_perc = Delta * 100) %>%
+  select(-CF_sample_tumor) %>%
+  factor_summary()
+
+vaf_summaries_long %>%
+  filter(method == "Imputed_purity") %>%
+  mutate(Delta_perc = Delta * 100) %>%
+  select(-CF_sample_tumor) %>%
+  factor_summary()
+
+vaf_summaries_long %>%
+  ggplot(aes(x = Purity, y = Delta, col = method)) +
+  geom_point(alpha = 0.7) +
+  theme_Publication()
+
+vaf_summaries_long %>%
+  ggplot(aes(x = Purity, y = Delta, col = method)) +
+  geom_point(alpha = 0.7) +
+  theme_Publication() +
+  theme(axis.text.x = element_blank()) +
+  facet_wrap(~emflags, scales = "free")
+
+vaf_summaries_long %>%
+  ggplot(aes(x = method, y = Delta)) +
+  geom_boxplot() +
+  theme_Publication() 
+
+vaf_summaries_long %>%
+  ggplot(aes(x = method, y = Delta)) +
+  geom_boxplot() +
+  theme_Publication() +
+  facet_wrap(~emflags, scales = "free")
+
+```
+
+```{r, fig.width = 40, fig.height = 40}
+# Checking VAF distribution over all variants
+combined_maf_dp20_vaf_df %>%
+         filter(Chromosome %in% c(1:22)) %>% 
+  left_join(vaf_summaries)%>% 
+  filter(!is.na(Purity))  %>%
+  ggplot(aes(x = VAF, fill = Trial)) +
+  geom_density() +
+  facet_wrap(~ CF_sample_tumor, scales = "free_y") +
+  theme_bw() +
+  theme(
+    strip.text = element_text(size = 6),
+    axis.text.x = element_text(size = 5)
+  ) +
+  labs(
+    title = "VAF Density per Sample",
+    subtitle = "Blue = median VAF, Red = Q3 VAF, Green = 1/2 FACETs purity (if available)",
+    x = "VAF",
+    y = "Density"
+  ) +
+  geom_vline(aes(xintercept = median_VAF ), color = "blue") +
+  geom_vline(aes(xintercept = q3_VAF), color = "red") +
+  geom_vline(aes(xintercept = Purity / 2), color = "green") +
+  scale_fill_manual(values = trial_colors)
+
+# Only checking balanced diploid VAF distributions
+variant_facets_cn_df %>%
+  filter(tcn.em == 2) %>% 
+  filter(type == "NEUTR") %>% 
+  filter(!is.na(Purity)) %>% 
+  left_join(vaf_summaries_c) %>%
+  ggplot(aes(x = VAF, fill = Trial)) +
+  geom_density() +
+  facet_wrap(~ CF_sample_tumor, scales = "free_y") +
+  theme_bw() +
+  theme(
+    strip.text = element_text(size = 6),
+    axis.text.x = element_text(size = 5)
+  ) +
+  labs(
+    title = "VAF Density per Sample (Balanced Diploid Regions)",
+    subtitle = "Blue = median VAF, Red = Q3 VAF, Green = 1/2 FACETs purity (if available)",
+    x = "VAF",
+    y = "Density"
+  ) +
+  geom_vline(aes(xintercept = diploid_median_VAF), color = "blue") +
+  geom_vline(aes(xintercept = diploid_q3_VAF), color = "red") +
+  geom_vline(aes(xintercept = Purity / 2), color = "green") +
+  scale_fill_manual(values = trial_colors)
+```
+
+```{r, fig.width = 12, fig.height = 12}
+variant_facets_cn_df %>%
+  filter(tcn.em == 2) %>% 
+  filter(type == "NEUTR") %>% 
+  filter(is.na(Purity)) %>%
+  left_join(vaf_summaries_c) %>%
+  ggplot(aes(x = VAF, fill = Trial)) +
+  geom_density() + 
+  facet_wrap(~ CF_sample_tumor, scales = "free_y") +
+  theme_Publication() +
+  theme(
+    strip.text = element_text(size = 6),
+    axis.text.x = element_text(size = 5)
+  ) +
+  labs(
+    title = "VAF Density per Sample (Balanced Diploid Regions)",
+    subtitle = "Blue = median VAF, Red = Q3 VAF, Green = FACETs purity (if available)",
+    x = "VAF",
+    y = "Density"
+  ) +
+  geom_vline(aes(xintercept = diploid_median_VAF), color = "blue") +
+  geom_vline(aes(xintercept = diploid_q3_VAF), color = "red") +
+  scale_fill_manual(values = trial_colors)
+
+```
+
+```{r}
+vaf_summaries_c %>%
+  ggplot(aes(x = mean_VAF, y = diploid_mean_VAF)) +
+  geom_point(aes(col = Trial)) +
+  stat_cor() + theme_Publication() +
+  scale_color_manual(values  = trial_colors) +
+  geom_abline(slope = 1, intercept = 0)
+
+vaf_summaries_c %>%
+  ggplot(aes(x = median_VAF, y = diploid_median_VAF)) +
+  geom_point(aes(col = Trial)) +
+  stat_cor() + theme_Publication() +
+  scale_color_manual(values  = trial_colors) +
+  geom_abline(slope = 1, intercept = 0)
+
+vaf_summaries_c %>%
+  ggplot(aes(x = q3_VAF, y = diploid_q3_VAF)) +
+  geom_point(aes(col = Trial)) +
+  stat_cor() + theme_Publication() +
+  scale_color_manual(values  = trial_colors) +
+  geom_abline(slope = 1, intercept = 0)
+
+vaf_summaries_c %>%
+  ggplot(aes(x = mean_VAF, y = diploid_mean_VAF)) +
+  geom_point(aes(col = Trial)) +
+  stat_cor() + theme_Publication() +
+  scale_color_manual(values  = trial_colors) +
+  facet_wrap(~ifelse(is.na(Purity), "Missing Purity", "Estimated Purity"))+
+  geom_abline(slope = 1, intercept = 0)
+
+vaf_summaries_c %>%
+  ggplot(aes(x = median_VAF, y = diploid_median_VAF)) +
+  geom_point(aes(col = Trial)) +
+  stat_cor() + theme_Publication() +
+  scale_color_manual(values  = trial_colors) +
+  facet_wrap(~ifelse(is.na(Purity), "Missing Purity", "Estimated Purity"))+
+  geom_abline(slope = 1, intercept = 0)
+
+vaf_summaries_c %>%
+  ggplot(aes(x = Purity, y = diploid_mean_VAF)) +
+  geom_point(aes(col = Trial)) +
+  stat_cor() + theme_Publication() +
+  scale_color_manual(values  = trial_colors)+
+  geom_abline(slope = 0.5, intercept = 0)
+
+vaf_summaries_c %>%
+  ggplot(aes(x = Purity, y = diploid_median_VAF)) +
+  geom_point(aes(col = Trial)) +
+  stat_cor() + theme_Publication() +
+  scale_color_manual(values  = trial_colors)+
+  geom_abline(slope = 0.5, intercept = 0)
+
+vaf_summaries_c %>%
+  ggplot(aes(x = Purity, y = diploid_q3_VAF)) +
+  geom_point(aes(col = Trial)) +
+  stat_cor() + theme_Publication() +
+  scale_color_manual(values  = trial_colors) +
+  geom_abline(slope = 0.5, intercept = 0)
+
+vaf_summaries_c %>%
+  ggplot(aes(x = Purity, y = mean_VAF)) + geom_point(aes(col = Trial)) +
+  stat_cor() + theme_Publication() +
+  scale_color_manual(values  = trial_colors)+
+  geom_abline(slope = 0.5, intercept = 0)
+
+vaf_summaries_c %>%
+  ggplot(aes(x = Purity, y = median_VAF)) + geom_point(aes(col = Trial)) +
+  stat_cor() + theme_Publication() +
+  scale_color_manual(values  = trial_colors) +
+  geom_abline(slope = 0.5, intercept = 0)
+
+vaf_summaries_c %>%
+  ggplot(aes(x = Purity, y = q3_VAF)) + geom_point(aes(col = Trial)) +
+  stat_cor() + theme_Publication() +
+  scale_color_manual(values  = trial_colors) +
+  geom_abline(slope = 0.5, intercept = 0)
+
+vaf_summaries_c %>%
+  ggplot(aes(x = Purity, y = Imputed_median_purity)) +
+  geom_point(aes(col = Trial)) +
+  stat_cor() + theme_Publication() +
+  scale_color_manual(values  = trial_colors) +
+  geom_abline(slope = 1, intercept = 0)
+
+vaf_summaries_c %>%
+  ggplot(aes(x = Purity, y = Imputed_purity)) +
+  geom_point(aes(col = Trial)) +
+  stat_cor() + theme_Publication() +
+  scale_color_manual(values  = trial_colors) +
+  geom_abline(slope = 1, intercept = 0)
+
+```
+
+## Imputed purity from diploid median VAF (non LOH)
+```{r}
+vaf_summaries_c %>%
+  ggplot(aes(x = diploid_median_VAF, y = Imputed_purity)) +
+  geom_point(aes(col = Trial)) +
+  stat_cor() + theme_Publication() +
+  scale_color_manual(values  = trial_colors) +
+  geom_abline(slope = 2, intercept = 0) +
+  facet_wrap(~ifelse(is.na(Purity), "Missing Purity", "Estimated Purity"))
+
+vaf_summaries_c %>%
+  ggplot(aes(x = diploid_q3_VAF, y = Imputed_purity)) +
+  geom_point(aes(col = Trial)) +
+  stat_cor() + theme_Publication() +
+  scale_color_manual(values  = trial_colors) +
+  geom_abline(slope = 2, intercept = 0) +
+  facet_wrap(~ifelse(is.na(Purity), "Missing Purity", "Estimated Purity"))
+
+vaf_summaries_c %>% write_csv2(here(output_dir, "vaf_summaries_c.csv"))
+vaf_summaries_c <- read_csv2(here(output_dir, "vaf_summaries_c.csv"))
+
+```
+
+# Parse Pyclone input
+```{r}
+colnames(variant_facets_ccf_df) 
+
+# Build PyClone-VI input table
+pyclone_df <- variant_facets_ccf_df %>%
+  mutate(
+    sample_id = CF_sample_tumor,
+    mutation_id = paste0(Chromosome, ":", Start_Position),
+    ref_counts = t_ref_count,
+    alt_counts = t_alt_count,
+    normal_cn = 2,
+    minor_cn = lcn.em,
+    major_cn = tcn.em - lcn.em,
+    tumour_content = ifelse(
+    (is.na(Purity) & ! is.na(Imputed_purity)), Imputed_purity, Purity)
+  ) %>%
+  select(
+    mutation_id,
+    sample_id,
+    ref_counts,
+    alt_counts,
+    normal_cn,
+    minor_cn,
+    major_cn,
+    tumour_content
+  )
+
+pyclone_df %>% filter(is.na(tumour_content))
+
+# Create output directory
+dir.create(here("data", "processed", "pyclone_input"))
+
+# Export one TSV per sample
+for (current_sample in unique(pyclone_df$sample_id)) {
+  pyclone_df %>%
+    filter(sample_id == current_sample) %>%
+    write_tsv(here("data", "processed", "pyclone_input",
+                   paste0(current_sample, ".tsv")))
+}
 
 ```
 
@@ -7205,63 +8110,14 @@ library('BSgenome.Hsapiens.UCSC.hg38') #v 1.4.3
 package.version('BSgenome.Hsapiens.UCSC.hg38') # ow 1.4.5
 ref_genome <- "BSgenome.Hsapiens.UCSC.hg38"
 
-list.files("/shared/data/niche/Pancancer_DNA_preprocessed_Pedro/VCF_files/vcf_BELLINI") %>% length()
-list.files("/shared/data/niche/Pancancer_DNA_preprocessed_Pedro/VCF_files/vcf_IMCISION") %>% length()
-list.files("/shared/data/niche/Pancancer_DNA_preprocessed_Pedro/VCF_files/vcf_MATISSE") %>% length()
-list.files("/shared/data/niche/Pancancer_DNA_preprocessed_Pedro/VCF_files/vcf_NABUCCO") %>% length()
-list.files("/shared/data/niche/Pancancer_DNA_preprocessed_Pedro/VCF_files/vcf_NICHE") %>% length()
-list.files("/shared/data/niche/Pancancer_DNA_preprocessed_Pedro/VCF_files/vcf_OpACIN_neo") %>% length()
-list.files("/shared/data/niche/Pancancer_DNA_preprocessed_Pedro/VCF_files/vcf_PRADO") %>% length()
-list.files("/shared/data/niche/Pancancer_DNA_preprocessed_Pedro/VCF_files_filtered") %>% length()
-
-list.files(here("data", "raw"))
-
-vcf_files_full_path <- list.files(path="/shared/data/niche/Pancancer_DNA_preprocessed_Pedro/VCF_files_filtered", pattern = "pass.vcf", full.names = TRUE)
-vcf_files <- list.files(path="/shared/data/niche/Pancancer_DNA_preprocessed_Pedro/VCF_files_filtered", pattern = "pass.vcf", full.names = FALSE)
+vcf_files_full_path <- list.files(
+  path="/shared/data/niche/Pancancer_DNA_preprocessed_Pedro/VCF_files_filtered",
+  pattern = "pass.vcf", full.names = TRUE)
+vcf_files <- list.files(
+  path="/shared/data/niche/Pancancer_DNA_preprocessed_Pedro/VCF_files_filtered",
+  pattern = "pass.vcf", full.names = FALSE)
 vcf_files <- vcf_files[seq(1,length(vcf_files),2)]
 SampleName <- matrix(unlist(strsplit(vcf_files, "-vs-")), ncol=2, byrow=T)[,1]
-```
-
-```{r}
-malformed_vcfs <- c(14, 43, 312, 348, 395)
-SampleName[malformed_vcfs]
-vcf_files_full_path[malformed_vcfs]
-
-# Pseudocode below
-# parse the vcf files, filter and export (slow method) 
-# Did not fix the code to properly parse filenames and locate the cohorts, I just hard code adapted and ran it for each of the 5 samples
-if (fix_vcf_filtering) {
-    for (current_vcf_file in vcf_files_full_path[malformed_vcfs]) {
-      print(current_vcf_file)
-      # "/shared/data/niche/Pancancer_DNA_preprocessed_Pedro/VCF_files/vcf_NABUCCO/5519_21_CF33195_AACTCACC_S60-vs-5519_45_CF31087_GACAGTGC_S83-GATKFiltered.vcf"
-      # "/shared/data/niche/Pancancer_DNA_preprocessed_Pedro/VCF_files/vcf_BELLINI/6793_1_CF54491_TAACTTGGTC-GTCGTGAATC_S2-vs-6793_34_CF64315_TTACGCGCAT-CTTAACGACA_S38-GATKFiltered.vcf"
-      # "/shared/data/niche/Pancancer_DNA_preprocessed_Pedro/VCF_files/vcf_OpACIN_neo/S1224Nr33-vs-S1224Nr68-GATKFiltered.vcf"
-      #  "/shared/data/niche/Pancancer_DNA_preprocessed_Pedro/VCF_files_filtered/vcf_IMCISION/S1678Nr1-vs-S1678Nr37-GATKFiltered.vcf"
-      # "/shared/data/niche/Pancancer_DNA_preprocessed_Pedro/VCF_files/vcf_PRADO/S2697Nr23-vs-S2697Nr141-GATKFiltered.vcf"
-      current_vcf <- VariantAnnotation::readVcf(
-      "/shared/data/niche/Pancancer_DNA_preprocessed_Pedro/VCF_files/vcf_PRADO/S2697Nr23-vs-S2697Nr141-GATKFiltered.vcf")
-      
-      # Filter for variants that passed filters
-      variant_main_info <- data.frame(rowRanges(current_vcf))
-      table(variant_main_info$FILTER)
-      
-      current_vcf_filtered <- current_vcf[
-        variant_main_info$FILTER == "PASS", ]
-      
-      file.exists("/shared/data/niche/Pancancer_DNA_preprocessed_Pedro/VCF_files_filtered/5519_21_CF33195_AACTCACC_S60-vs-5519_45_CF31087_GACAGTGC_S83-GATKFiltered.pass.vcf")
-      file.exists("/shared/data/niche/Pancancer_DNA_preprocessed_Pedro/VCF_files_filtered/6793_1_CF54491_TAACTTGGTC-GTCGTGAATC_S2-vs-6793_34_CF64315_TTACGCGCAT-CTTAACGACA_S38-GATKFiltered.pass.vcf")
-      file.exists("/shared/data/niche/Pancancer_DNA_preprocessed_Pedro/VCF_files_filtered/S1224Nr33-vs-S1224Nr68-GATKFiltered.pass.vcf")
-      file.exists("/shared/data/niche/Pancancer_DNA_preprocessed_Pedro/VCF_files_filtered/S1678Nr1-vs-S1678Nr37-GATKFiltered.pass.vcf")
-      file.exists("/shared/data/niche/Pancancer_DNA_preprocessed_Pedro/VCF_files_filtered/S2697Nr23-vs-S2697Nr141-GATKFiltered.pass.vcf")
-    
-      # Export filtered vcfs
-      VariantAnnotation::writeVcf(obj = current_vcf_filtered,
-               filename = "/shared/data/niche/Pancancer_DNA_preprocessed_Pedro/VCF_files_filtered/S2697Nr23-vs-S2697Nr141-GATKFiltered.pass.vcf")
-      rm(current_vcf, variant_main_info, current_vcf_filtered)
-  }
-
-}
-
 ```
 
 ```{r}
@@ -7276,18 +8132,7 @@ plot_spectrum(type_occurrences, CT = TRUE, legend = TRUE)
 
 ## Load cosmic signatures
 ```{r}
-# Petros took the COSMIC signatures from this URL
-# Previous signature collection matched GRCh37... rounded to 4 digits it's the same matrix
-sp_url <- paste("https://cancer.sanger.ac.uk/cancergenome/assets/","signatures_probabilities.txt", sep = "")
-#cancer_signatures = get_known_signatures(muttype = "snv")
-cancer_signatures_raw = read.table(sp_url, sep = "\t", header = TRUE)
-cancer_signatures = read.table(sp_url, sep = "\t", header = TRUE)
-new_order = match(row.names(mut_mat), cancer_signatures$Somatic.Mutation.Type)
-cancer_signatures = cancer_signatures[as.vector(new_order),]
-row.names(cancer_signatures) = cancer_signatures$Somatic.Mutation.Type
-cancer_signatures = as.matrix(cancer_signatures[,4:33])
 
-# Reorder rows to match signatures and mut_mat profiles
 COSMIC_v2_SBS_GRCh37_raw <- read.table(
   here("data", "external", "COSMIC", "COSMIC_v2",
        "COSMIC_v2_SBS_GRCh37.txt"), sep = "", header = TRUE) %>%
@@ -7356,7 +8201,7 @@ cosine_sim <- cosine(
 cosine_dist <- 1 - cosine_sim
 
 # View the result
-print(cosine_dist)
+# print(cosine_dist)
 
 # Convert to long format for ggplot2
 dist_melt <- melt(cosine_dist)
@@ -7388,6 +8233,7 @@ ggplot(dist_melt, aes(x = Var1, y = Var2, fill = 1 - value)) +
 ```{r}
 fit_res <- fit_to_signatures(mut_mat, as.matrix(COSMIC_v2_SBS_GRCh38))
 fit_res %>% saveRDS(here(output_dir, "fit_res_cosmic_v2_GRCh38.rds"))
+fit_res <- readRDS(here(output_dir, "fit_res_cosmic_v2_GRCh38.rds"))
 
 fit_res_cosmic_v3.4 <- fit_to_signatures(mut_mat, as.matrix(COSMIC_v3.4_SBS_GRCh38))
 fit_res_cosmic_v3.4 %>% saveRDS(here(output_dir, "fit_res_cosmic_v3.4_GRCh38.rds"))
@@ -7413,8 +8259,10 @@ Relative_contri_Perc %>% colSums()
 
 Relative_contri_Perc_t = as.data.frame(t(Relative_contri_Perc))
 Relative_contri_Perc_t$name_vcf = rownames(Relative_contri_Perc_t)
-colnames(Relative_contri_Perc_t) <- gsub("_", ".", colnames(Relative_contri_Perc_t))
-Relative_contri_Perc_t <- Relative_contri_Perc_t %>% rename(name_vcf = name.vcf)
+colnames(Relative_contri_Perc_t) <- gsub("_", ".",
+                                         colnames(Relative_contri_Perc_t))
+Relative_contri_Perc_t <- Relative_contri_Perc_t %>%
+  rename(name_vcf = name.vcf)
 
 fit_res = as.data.frame(fit_res$contribution)
 fit_res_t = as.data.frame(t(fit_res))
@@ -7422,8 +8270,12 @@ fit_res_t$name_vcf = rownames(fit_res_t)
 colnames(fit_res_t) <- gsub("_", ".", colnames(fit_res_t))
 fit_res_t <- fit_res_t %>% rename(name_vcf = name.vcf)
 
-write.table(Relative_contri_Perc_t, here(output_dir, "Muts_Contribution_Perc_cosmic.txt"), sep="\t",quote=F, row.names = T, col.names = T)
-write.table(fit_res_t, file = here(output_dir, "Muts_Contribution_cosmic.txt"), sep="\t", quote=F)
+write.table(Relative_contri_Perc_t,
+            here(output_dir, "Muts_Contribution_Perc_cosmic.txt"),
+            sep="\t",quote=F, row.names = T, col.names = T)
+write.table(fit_res_t,
+            file = here(output_dir, "Muts_Contribution_cosmic.txt"),
+            sep="\t", quote=F)
 
 ```
 
@@ -7572,6 +8424,11 @@ mean_cosmic_percs %>%
   select(Trial, cosmic_signature, mean_percentage) %>%
   pivot_wider(names_from = cosmic_signature, values_from = mean_percentage) %>%
   summary()
+
+cosmic_combined_p %>%
+  write_csv2(here(output_dir, "cosmic_combined_p.csv"))
+cosmic_perc_combined_p %>%
+  write_csv2(here(output_dir, "cosmic_perc_combined_p.csv"))
 ```
 
 ```{r}
@@ -7769,7 +8626,7 @@ mean_cosmic_percs %>% write_csv2(here(output_dir, "mean_cosmic_percs.csv"))
 
 # Cosmic response
 
-```{r, fig.width = 10, fig.height = 10}
+```{r, fig.width = 10, fig.height = 7}
 cosmic_combined_l %>%
   ggplot(aes(x = cosmic_signature, y = cosmic_scores, fill = Response)) +
   geom_boxplot() +
@@ -7777,6 +8634,16 @@ cosmic_combined_l %>%
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
   guides(fill = FALSE) + labs(x = "COSMIC SBS", y = "Total contribution")
 
+cosmic_perc_combined_l %>%
+  ggplot(aes(x = cosmic_signature, y = percentage, fill = Response)) +
+  geom_boxplot() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) + theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  guides(fill = FALSE) + labs(x = "COSMIC SBS", y = "Relative contribution")
+```
+
+
+```{r, fig.width = 10, fig.height = 10}
 cosmic_combined_l %>%
   ggplot(aes(x = cosmic_signature, y = cosmic_scores, fill = Response)) +
   geom_boxplot() +
@@ -7842,7 +8709,36 @@ combined_maf_specific_f %>% saveRDS(
   here(output_dir, "combined_maf_specific_f.rds"))
 combined_maf_specific_f <- readRDS(
   here(wes_dir, "combined_maf_specific_f.rds"))
-   
+```
+
+```{r}
+n_variants_dp20_vaf_tmb <- read_csv2(
+  here(output_dir, "n_variants_dp20_vaf_tmb.csv"))
+
+facets_data_metrics <- read_csv2(
+  here(output_dir, "facets_data_metrics.csv"))
+
+facets_aneuploidy_score_df <- read_csv2(
+  here(output_dir, "facets_aneuploidy_score_df.csv"))
+
+pathway_level_mutation_df <- read_csv2(here(output_dir,
+                                         "pathway_level_mutation_df.csv"))
+
+cosmic_combined_p <- read_csv2(here(output_dir, "cosmic_combined_p.csv"))
+cosmic_perc_combined_p <- read_csv2(
+  here(output_dir, "cosmic_perc_combined_p.csv"))
+
+# Parsed in separate script for neoantigens and pyclone output
+pyclone_vi_clonal_summary_df <- read_csv2(
+    here(output_dir, "pyclone_vi_clonal_summary_df.csv"))
+
+pvactools_filtered_neoantigen_counts <- read_csv2(here(output_dir,
+                  "pvactools_filtered_neoantigen_counts.csv"))
+```
+
+# Define WES features DF
+
+```{r}
 wes_features_df <- n_variants_dp20_vaf_tmb %>%
   left_join(facets_data_metrics)%>%
   left_join(facets_aneuploidy_score_df)  %>%
@@ -7857,17 +8753,34 @@ wes_features_df <- n_variants_dp20_vaf_tmb %>%
                        "POLH", "ROS", "SBS5", "Smoking", "TMZ",
                        "Tobacco_chewing", "UV", "dMMR")),
             by = "CF_sample_tumor", suffix = c("_abs", "_perc"))
-  ) %>%
-  left_join(cnvkit_cnvs_aneuploidy_score_df)
+  ) 
+  # left_join(cnvkit_cnvs_aneuploidy_score_df)
+
+wes_features_df <- wes_features_df %>%
+  left_join(pvactools_filtered_neoantigen_counts) %>%
+  left_join(pyclone_vi_clonal_summary_df) %>%
+  left_join(HLA_LOH_df) %>%
+  left_join(vaf_summaries_c %>%
+    select(all_of(
+      c("CF_sample_tumor",
+        colnames(vaf_summaries_c)[!colnames(vaf_summaries_c) %in%
+                                    colnames(wes_features_df)])))) %>%
+  unique()
+
+dim(wes_features_df)
+
+wes_features_df <- wes_features_df %>%
+  mutate(HLA_alteration = ifelse(
+    HLA_grouped %in% c("HLA-LOH", "HLA-DEL"), "HLA-Altered", HLA_grouped)) %>%
+  mutate(HLA_alteration = HLA_alteration == "HLA-Altered")
 
 wes_features_df %>% filter(is.na(Aneuploidy_score))
 wes_features_df %>% filter(is.na(Purity))
 wes_features_df %>% filter(is.na(Purity)) %>% factor_summary()
 wes_features_df %>% write_csv2(here(wes_dir, "wes_features_df.csv"))
 
-prado_opacin_neo_tmb <- n_variants_dp20_vaf_tmb %>%
-  filter(Trial %in% c("PRADO", "OpACIN_neo")) 
-prado_opacin_neo_tmb %>% write_csv2(here(output_dir, "prado_opacin_neo_tmb.csv"))
+wes_features_df %>% write_csv2(here(output_dir, "wes_features_df.csv"))
+wes_features_df <- read_csv2(here(output_dir, "wes_features_df.csv"))
 ```
 
 ```{r}
@@ -7894,6 +8807,198 @@ wes_features_df %>%
   scale_color_manual(values = trial_colors)
 ggsave(here(output_dir, "TMB_dMMR_trial.png"), height = 5, width = 6)
 
+```
+
+
+```{r}
+wes_features_df %>%
+  ggplot(aes(x = TMB, y = pvactools_filtered_neoantigen_load)) +
+  geom_point() + stat_cor(method = "spearman") + theme_Publication()
+
+wes_features_df %>%
+  ggplot(aes(x = APOBEC_abs, y = pvactools_filtered_neoantigen_load)) +
+  geom_point(aes(col = Trial)) +
+  stat_cor(method = "spearman") + theme_Publication() +
+  scale_color_manual(values = trial_colors)
+
+wes_features_df %>%
+  filter(!Trial %in% "NICHE-MSI") %>%
+  ggplot(aes(x = APOBEC_abs, y = pvactools_filtered_neoantigen_load)) +
+  geom_point(aes(col = Trial)) +
+  stat_cor(method = "spearman") + theme_Publication()  +
+  scale_color_manual(values = trial_colors)
+
+wes_features_df %>%
+  filter(!Trial %in% "NICHE-MSI") %>%
+  ggplot(aes(x = APOBEC_abs, y = pvactools_filtered_neoantigen_load,
+             col = Trial)) +
+  geom_point() +
+  stat_cor(method = "spearman") + theme_Publication()  +
+  scale_color_manual(values = trial_colors)
+
+wes_features_df %>%
+  ggplot(aes(x = UV_abs, y = pvactools_filtered_neoantigen_load)) +
+  geom_point(aes(col = Trial)) +
+  stat_cor(method = "spearman") + theme_Publication() +
+  scale_color_manual(values = trial_colors)
+
+wes_features_df %>%
+  filter(!Trial %in% "NICHE-MSI") %>%
+  ggplot(aes(x = UV_abs, y = pvactools_filtered_neoantigen_load)) +
+  geom_point(aes(col = Trial)) +
+  stat_cor(method = "spearman") + theme_Publication()  +
+  scale_color_manual(values = trial_colors)
+
+wes_features_df %>%
+  filter(!Trial %in% "NICHE-MSI") %>%
+  ggplot(aes(x = UV_abs, y = pvactools_filtered_neoantigen_load,
+             col = Trial)) +
+  geom_point() +
+  stat_cor(method = "spearman") + theme_Publication()  +
+  scale_color_manual(values = trial_colors)
+```
+
+# Additional HLA TMB Trial Checks
+
+```{r}
+table(wes_features_df$HLA_grouped, wes_features_df$`HLA-A`, useNA = "ifany")
+table(wes_features_df$HLA_grouped, wes_features_df$`HLA-B`, useNA = "ifany")
+table(wes_features_df$HLA_grouped, wes_features_df$`HLA-C`, useNA = "ifany")
+
+table(wes_features_df$Trial, wes_features_df$HLA_grouped, useNA = "ifany")
+table(wes_features_df$Trial, wes_features_df$HLA_grouped, useNA = "ifany")
+table(wes_features_df$Trial, wes_features_df$HLA_grouped, useNA = "ifany")
+
+table(wes_features_df$Trial, wes_features_df$HLA_grouped,
+      wes_features_df$`HLA-A`, useNA = "ifany")
+table(wes_features_df$Trial, wes_features_df$HLA_grouped,
+      wes_features_df$`HLA-B`, useNA = "ifany")
+table(wes_features_df$Trial, wes_features_df$HLA_grouped,
+      wes_features_df$`HLA-C`, useNA = "ifany")
+```
+
+```{r}
+table(wes_features_df$HLA_Intact, wes_features_df$HLA_alteration)
+
+table(wes_features_df$HLA_Intact)
+table(wes_features_df$HLA_Intact) %>% prop.table() %>% round(2)
+
+table(wes_features_df$Trial, wes_features_df$HLA_Intact)
+table(wes_features_df$Trial, wes_features_df$HLA_Intact) %>%
+  prop.table(margin = 1) %>%
+  round(2)
+
+table(wes_features_df$TMB > 10,
+      wes_features_df$HLA_Intact) %>%
+  fisher.test()
+```
+
+```{r}
+wes_features_df %>%
+  ggplot(aes(x = HLA_Intact, y = TMB)) + facet_wrap(~Response) +
+  geom_boxplot() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  geom_hline(yintercept = 10, linetype = "dashed")
+
+wes_features_df %>%
+  ggplot(aes(x = Response, y = TMB, fill = Response)) +
+  facet_wrap(~HLA_Intact) +
+  geom_boxplot() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  geom_hline(yintercept = 10, linetype = "dashed")
+
+```
+
+```{r, fig.height = 10, fig.width = 10}
+wes_features_df %>%
+  filter(HLA_Intact == "HLA-Intact") %>%
+  ggplot(aes(x = Response, y = TMB, fill = Response)) +
+  facet_wrap(~Trial, scales = "free") +
+  geom_boxplot() + theme_Publication() + stat_compare_means(method = "wilcox") +
+  geom_hline(yintercept = 10, linetype = "dashed") +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(title = "HLA-Intact Subsets")
+
+wes_features_df %>%
+  filter(HLA_Intact == "HLA-Altered") %>%
+  ggplot(aes(x = Response, y = TMB, fill = Response)) +
+  facet_wrap(~Trial, scales = "free") +
+  geom_hline(yintercept = 10, linetype = "dashed") +
+  geom_boxplot() + theme_Publication() + stat_compare_means(method = "wilcox") +
+  scale_fill_manual(values = c(Color_NR, Color_R))+
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(title = "HLA-Altered Subsets")
+
+wes_features_df %>%
+  ggplot(aes(x = HLA_Intact, y = TMB)) + facet_wrap(~Trial, scales = "free") +
+  geom_boxplot() + theme_Publication() + stat_compare_means(method = "wilcox") +
+  geom_hline(yintercept = 10, linetype = "dashed")
+```
+
+```{r}
+wes_features_df %>%
+  ggplot(aes(x = HLA_Intact, y = TMB)) + facet_wrap(~Response) +
+  geom_boxplot() + theme_Publication() + stat_compare_means(method = "wilcox")
+
+wes_features_df %>%
+  ggplot(aes(x = Response, y = TMB, fill = Response)) + facet_wrap(~HLA_Intact) +
+  geom_boxplot() + theme_Publication() + stat_compare_means(method = "wilcox") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+```
+
+```{r}
+wes_features_df_matisse <- wes_features_df %>%
+  filter(Trial == "MATISSE")
+
+wes_features_df_matisse %>%
+  ggplot(aes(x = HLA_Intact, y = TMB)) + facet_wrap(~Response) +
+  geom_boxplot() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  labs(title = "MATISSE cSCC")
+
+wes_features_df_matisse %>%
+  ggplot(aes(x = Response, y = TMB, fill = Response)) +
+  facet_wrap(~HLA_Intact) +
+  geom_boxplot() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(title = "MATISSE cSCC")
+
+table(wes_features_df_matisse$HLA_Intact,
+      wes_features_df_matisse$Response)
+
+table(wes_features_df_matisse$HLA_Intact,
+      wes_features_df_matisse$Response) %>%
+  prop.table(margin = 1) %>%
+  round(2)
+
+table(wes_features_df_matisse$HLA_Intact,
+      wes_features_df_matisse$Response) %>%
+  prop.table(margin = 2) %>%
+  round(2)
+
+table(wes_features_df_matisse$HLA_Intact,
+      wes_features_df_matisse$Response) %>%
+  fisher.test()
+```
+
+
+```{r}
+wes_features_df %>%
+  ggplot(aes(x = TMB, y = pvactools_filtered_neoantigen_load)) + geom_point()
+```
+
+```{r}
+wes_features_df$pvactools_filtered_neoantigen_load %>% summary()
+wes_features_df$pyclone_clonal_TMB %>% summary()
+wes_features_df$Purity %>% summary()
+wes_features_df %>% select(Purity_flag) %>% factor_summary()
+
+wes_features_df %>%
+  filter(Trial == "NICHE-MSI") %>%
+  write_csv2(here("NICHE2_dMMR_wes_features_df.csv"))
 ```
 
 # ----------

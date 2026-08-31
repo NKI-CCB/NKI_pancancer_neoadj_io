@@ -1,0 +1,990 @@
+---
+title: "neoadjuvant pancancer parse WES pvactools and pyclone"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+params:
+  export: TRUE
+  output_dir: "pyclone_processed"
+  metadata: ""
+  filter_and_parse_vcfs: FALSE
+---
+
+Author comment:
+File description comment:
+The purpose of this script is to parse results from WES analysis
+Additional tools, pycline VI runs, pvactools and HLA-LA typing info
+
+# Loading Packages
+```{r, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning = FALSE, message = FALSE, dpi = 300, error = TRUE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# Install if necessary install.packages("tidyverse")
+# Install if necessary BiocManager::install("DESeq2")
+
+# library("devtools")
+# devtools::install("~/Tools/TMBleR")
+# BiocManager::install("VariantAnnotation")
+# BiocManager::install("maftools")
+
+library(tidyverse)
+library(ICAMS)
+source("helper_functions.R")
+library(VariantAnnotation)
+library(ggpubr)
+library(corrplot)
+library(dplyr)
+library(readr)
+library(stringr)
+library(purrr)
+
+library(here)
+library(ggpubr)
+MakeDataFrameFromVCF <- getFromNamespace("MakeDataFrameFromVCF", "ICAMS")
+
+set.seed(42)
+select <- dplyr::select
+rename <- dplyr::rename
+here <- here::here
+```
+
+# Setup output folder
+```{r Setup output, echo = FALSE, include = FALSE}
+export <- params$export
+filter_and_parse_vcfs <- params$filter_and_parse_vcfs
+
+# generate output directory
+output_dir <- here("data", "processed", "WES_analysis")
+metadata_dir <- here("data", "processed", "metadata")
+
+print(output_dir)
+# if output_dir does not exist, create it
+if (!dir.exists(output_dir)) {
+    dir.create(output_dir)
+
+} else {
+  print("Output folder already exists")
+}
+
+```
+
+# ----------
+# Load metadata
+
+```{r Load metadata}
+dna_metadata <- read_csv2(here(metadata_dir, "combined_dna_metadata.csv"))
+
+histology_df <- data.frame(
+  Trial = c("BELLINI", "IMCISION", "NABUCCO", "NICHE-MSS", "NICHE-MSI",
+            "OpACIN_neo", "PRADO", "MATISSE"),
+  Histology = c("TBNC", "HNSCC", "Urothelial", "Colon", "Colon",
+                "LN_melanoma", "LN_melanoma", "cSCC"))
+
+dna_metadata$Response %>% table()
+dna_metadata$Response %>% table() %>% prop.table() %>% round(2)
+dna_metadata$Trial %>% table()
+
+```
+
+# Annotation color
+```{r}
+Color_NR <- "#F8766D"
+Color_R <- "#00BA38" # "#619CFF"
+Color_NA <- "#CD9600"
+Color_Pre <- "#619CFF"
+Color_Post <- "#F564E3"
+
+# create colours for each group
+annotation_color_list = list(
+  Response = c(NR = Color_NR, R = Color_R),
+  Treatment = c(Pre = Color_Pre, Post = Color_Post),
+  Histology = c(LN_melanoma = "#00BFC4", Urothelial = "#F564E3",
+                Colon = "#F8766D", HNSCC = "#00BA38", TBNC = "#619CFF",
+                cSCC = "#CD9600"))
+
+```
+
+# -----------------------------
+# Neoantigen_pipeline_runs updated pipeline
+```{r}
+pvactools_dir <- "/shared/data/niche/Neoantigen_pipeline_runs/pvactools_output"
+list.files(pvactools_dir)
+
+```
+
+# Load metadata
+```{r}
+list.files(here("data", "processed", "metadata"))
+
+patient_metadata_combined <- read_csv2(
+  here("data", "processed", "metadata", "patient_metadata_combined.csv")) 
+
+combined_dna_metadata <- read_csv2(
+  here("data", "processed", "metadata", "combined_dna_metadata.csv")) 
+
+combined_rna_metadata <- read_csv2(
+  here("data", "processed", "metadata", "combined_rna_metadata.csv")) 
+
+combined_rna_metadata_pre <- combined_rna_metadata %>%
+  filter(Treatment == "Pre")
+
+```
+
+# Neoantigen_output
+## BELLINI Neoantigen_output
+
+```{r}
+
+bellini_pvactools_dir <- here(pvactools_dir, "BELLINI", "pvactools")
+list.files(bellini_pvactools_dir)
+
+combined_filtered_df <- data.frame(matrix(ncol = 0, nrow = 0))
+for (current_sample in list.files(bellini_pvactools_dir)) {
+  print(current_sample)
+  output_files <- list.files(here(bellini_pvactools_dir,
+                                  current_sample, "MHC_Class_I"))
+  
+  output_files[str_detect(output_files, "filtered.tsv")]
+  sample_filtered_df <- read_delim(
+    here(bellini_pvactools_dir,current_sample, "MHC_Class_I",
+         output_files[str_detect(output_files, "filtered.tsv")])) %>%
+    mutate(pvactools_sample = current_sample)
+  
+  combined_filtered_df <- combined_filtered_df %>% rbind(sample_filtered_df)
+}
+
+n_distinct(combined_filtered_df$pvactools_sample)
+table(combined_filtered_df$pvactools_sample)
+
+bellini_combined_filtered_df <- combined_filtered_df
+
+bellini_cf_samples <- bellini_combined_filtered_df$pvactools_sample
+bellini_cf_samples <- gsub("-vs-.*", "", bellini_cf_samples)
+bellini_cf_samples <- str_split(bellini_cf_samples, "_") %>% unlist()
+bellini_cf_samples <- bellini_cf_samples[str_detect(bellini_cf_samples, "CF")]
+bellini_combined_filtered_df$CF_sample <- bellini_cf_samples
+
+table(str_detect(bellini_combined_filtered_df$pvactools_sample,
+                 bellini_combined_filtered_df$CF_sample))
+```
+
+## MATISSE Neoantigen_output
+
+```{r}
+matisse_pvactools_dir <- here(pvactools_dir, "MATISSE", "pvactools")
+list.files(matisse_pvactools_dir)
+
+combined_filtered_df <- data.frame(matrix(ncol = 0, nrow = 0))
+for (current_sample in list.files(matisse_pvactools_dir)) {
+  print(current_sample)
+  output_files <- list.files(
+    here(matisse_pvactools_dir, current_sample, "MHC_Class_I"))
+  
+  output_files[str_detect(output_files, "filtered.tsv")]
+  sample_filtered_df <- read_delim(
+    here(matisse_pvactools_dir,
+         current_sample, "MHC_Class_I",
+         output_files[str_detect(output_files, "filtered.tsv")])) %>%
+    mutate(pvactools_sample = current_sample)
+  
+  combined_filtered_df <- combined_filtered_df %>% rbind(sample_filtered_df)
+}
+
+n_distinct(combined_filtered_df$pvactools_sample)
+table(combined_filtered_df$pvactools_sample)
+
+matisse_combined_filtered_df <- combined_filtered_df
+
+matisse_cf_samples <- matisse_combined_filtered_df$pvactools_sample
+matisse_cf_samples <- gsub("-vs-.*", "", matisse_cf_samples)
+matisse_cf_samples <- str_split(matisse_cf_samples, "_") %>% unlist()
+matisse_cf_samples <- matisse_cf_samples[str_detect(matisse_cf_samples, "Nr")]
+matisse_combined_filtered_df$CF_sample <- matisse_cf_samples
+
+table(str_detect(matisse_combined_filtered_df$pvactools_sample,
+                 matisse_combined_filtered_df$CF_sample))
+
+```
+
+
+## IMCISION Neoantigen_output
+
+```{r}
+imcision_pvactools_dir <- here(pvactools_dir, "IMCISION", "pvactools")
+list.files(imcision_pvactools_dir)
+
+combined_filtered_df <- data.frame(matrix(ncol = 0, nrow = 0))
+for (current_sample in list.files(imcision_pvactools_dir)) {
+  print(current_sample)
+  output_files <- list.files(
+    here(imcision_pvactools_dir, current_sample, "MHC_Class_I"))
+  
+  output_files[str_detect(output_files, "filtered.tsv")]
+  sample_filtered_df <- read_delim(
+    here(imcision_pvactools_dir, current_sample, "MHC_Class_I",
+         output_files[str_detect(output_files, "filtered.tsv")])) %>%
+    mutate(pvactools_sample = current_sample)
+  
+  combined_filtered_df <- combined_filtered_df %>% rbind(sample_filtered_df)
+}
+
+n_distinct(combined_filtered_df$pvactools_sample)
+table(combined_filtered_df$pvactools_sample)
+imcision_combined_filtered_df <- combined_filtered_df
+
+imcision_cf_samples <- imcision_combined_filtered_df$pvactools_sample
+imcision_cf_samples <- gsub("-vs-.*", "", imcision_cf_samples)
+imcision_cf_samples <- str_split(imcision_cf_samples, "_") %>% unlist()
+imcision_cf_samples <- imcision_cf_samples[
+  str_detect(imcision_cf_samples, "Nr")]
+imcision_combined_filtered_df$CF_sample <- imcision_cf_samples
+
+table(
+  str_detect(imcision_combined_filtered_df$pvactools_sample,
+             imcision_combined_filtered_df$CF_sample))
+```
+
+## NABUCCO Neoantigen_output
+
+```{r}
+nabucco_pvactools_dir <- here(pvactools_dir, "NABUCCO", "pvactools") 
+list.files(nabucco_pvactools_dir)
+
+nabucco_samples <- list.files(nabucco_pvactools_dir)
+nabucco_samples <- nabucco_samples[!str_detect(
+  nabucco_samples, "backup_incomplete")]
+length(nabucco_samples)
+
+combined_filtered_df <- data.frame(matrix(ncol = 0, nrow = 0))
+for (current_sample in nabucco_samples) {
+  print(current_sample)
+  output_files <- list.files(
+    here(nabucco_pvactools_dir, current_sample, "MHC_Class_I"))
+  
+  tumor_sample <- gsub("-vs-.*", "", current_sample)
+  output_files[str_detect(output_files, "filtered.tsv")]
+  sample_filtered_df <- read_delim(
+    here(nabucco_pvactools_dir, current_sample, "MHC_Class_I",
+         output_files[str_detect(output_files, "filtered.tsv")])) %>%
+    mutate(pvactools_sample = current_sample)
+  
+  combined_filtered_df <- combined_filtered_df %>% rbind(sample_filtered_df)
+}
+
+n_distinct(combined_filtered_df$pvactools_sample)
+table(combined_filtered_df$pvactools_sample)
+
+nabucco_combined_filtered_df <- combined_filtered_df
+
+nabucco_cf_samples <- nabucco_combined_filtered_df$pvactools_sample
+nabucco_cf_samples <- gsub("-vs-.*", "", nabucco_cf_samples)
+nabucco_cf_samples <- str_split(nabucco_cf_samples, "_") %>% unlist()
+nabucco_cf_samples <- nabucco_cf_samples[str_detect(nabucco_cf_samples, "CF")]
+nabucco_combined_filtered_df$CF_sample <- nabucco_cf_samples
+
+nabucco_combined_filtered_df %>% summary()
+
+table(str_detect(nabucco_combined_filtered_df$pvactools_sample,
+                 nabucco_combined_filtered_df$CF_sample))
+
+```
+
+## NICHE Neoantigen_output
+```{r}
+niche_pvactools_dir <- here(pvactools_dir, "NICHE", "pvactools") 
+list.files(niche_pvactools_dir)
+
+niche_samples <- list.files(niche_pvactools_dir)
+niche_samples <- niche_samples[!str_detect(niche_samples, "backups_incomplete")]
+length(niche_samples)
+
+combined_filtered_df <- data.frame(matrix(ncol = 0, nrow = 0))
+for (current_sample in niche_samples) {
+  print(current_sample)
+  output_files <- list.files(
+    here(niche_pvactools_dir, current_sample, "MHC_Class_I"))
+  
+  tumor_sample <- gsub("-vs-.*", "", current_sample)
+  output_files[str_detect(output_files, "filtered.tsv")]
+  sample_filtered_df <- read_delim(
+    here(niche_pvactools_dir, current_sample, "MHC_Class_I",
+         output_files[str_detect(output_files, "filtered.tsv")])) %>%
+    mutate(pvactools_sample = current_sample)
+  
+  combined_filtered_df <- combined_filtered_df %>% rbind(sample_filtered_df)
+}
+
+n_distinct(combined_filtered_df$pvactools_sample)
+table(combined_filtered_df$pvactools_sample)
+
+niche_combined_filtered_df <- combined_filtered_df
+
+niche_cf_samples <- niche_combined_filtered_df$pvactools_sample
+niche_cf_samples <- gsub("-vs-.*", "", niche_cf_samples)
+niche_cf_samples <- str_split(niche_cf_samples, "_") %>% unlist()
+niche_cf_samples <- niche_cf_samples[str_detect(niche_cf_samples, "CF")]
+niche_combined_filtered_df$CF_sample <- niche_cf_samples
+
+niche_combined_filtered_df %>% factor_summary()
+
+table(
+  str_detect(niche_combined_filtered_df$pvactools_sample,
+             niche_combined_filtered_df$CF_sample))
+```
+
+## NICHE2 Neoantigen_output
+```{r}
+niche2_pvactools_dir <- here(pvactools_dir, "NICHE2", "pvactools") 
+list.files(niche2_pvactools_dir)
+
+niche2_samples <- list.files(niche2_pvactools_dir)
+niche2_samples <- niche2_samples[!str_detect(niche2_samples,
+                                             "backups_incomplete")]
+length(niche2_samples)
+
+combined_filtered_df <- data.frame(matrix(ncol = 0, nrow = 0))
+for (current_sample in niche2_samples) {
+  print(current_sample)
+  output_files <- list.files(
+    here(niche2_pvactools_dir, current_sample, "MHC_Class_I"))
+  
+  tumor_sample <- gsub("-vs-.*", "", current_sample)
+  output_files[str_detect(output_files, "filtered.tsv")]
+  sample_filtered_df <- read_delim(
+    here(niche2_pvactools_dir, current_sample, "MHC_Class_I",
+         output_files[str_detect(output_files, "filtered.tsv")])) %>%
+    mutate(pvactools_sample = current_sample)
+  
+  combined_filtered_df <- combined_filtered_df %>% rbind(sample_filtered_df)
+}
+
+n_distinct(combined_filtered_df$pvactools_sample)
+table(combined_filtered_df$pvactools_sample)
+
+niche2_combined_filtered_df <- combined_filtered_df
+
+niche2_cf_samples <- niche2_combined_filtered_df$pvactools_sample
+niche2_cf_samples <- gsub("-vs-.*", "", niche2_cf_samples)
+niche2_cf_samples <- str_split(niche2_cf_samples, "_") %>% unlist()
+niche2_cf_samples <- niche2_cf_samples[str_detect(niche2_cf_samples, "CF")]
+niche2_combined_filtered_df$CF_sample <- niche2_cf_samples
+
+niche2_combined_filtered_df %>% factor_summary()
+
+table(niche2_combined_filtered_df$CF_sample)
+n_distinct(niche2_combined_filtered_df$CF_sample)
+table(str_detect(niche2_combined_filtered_df$pvactools_sample,
+                 niche2_combined_filtered_df$CF_sample))
+
+```
+
+## PRADO Neoantigen_output
+
+```{r}
+prado_pvactools_dir <- here(pvactools_dir, "PRADO", "MHC_run_relaxt") 
+
+list.files(prado_pvactools_dir)
+
+combined_filtered_df <- data.frame(matrix(ncol = 0, nrow = 0))
+for (current_sample in list.files(prado_pvactools_dir)) {
+  print(current_sample)
+  output_files <- list.files(
+    here(prado_pvactools_dir, current_sample, "MHC_Class_I"))
+  
+  output_files[str_detect(output_files, "filtered.tsv")]
+  sample_filtered_df <- read_delim(
+    here(prado_pvactools_dir, current_sample, "MHC_Class_I",
+         output_files[str_detect(output_files, "filtered.tsv")])) %>%
+    mutate(pvactools_sample = current_sample)
+  
+  combined_filtered_df <- combined_filtered_df %>% rbind(sample_filtered_df)
+}
+
+n_distinct(combined_filtered_df$pvactools_sample)
+table(combined_filtered_df$pvactools_sample)
+prado_combined_filtered_df <- combined_filtered_df
+
+prado_cf_samples <- prado_combined_filtered_df$pvactools_sample
+prado_cf_samples <- gsub("_.*", "", prado_cf_samples)
+prado_combined_filtered_df$CF_sample <- prado_cf_samples
+
+table(str_detect(prado_combined_filtered_df$pvactools_sample,
+                 prado_combined_filtered_df$CF_sample))
+```
+
+
+## Opacin_neo Neoantigen_output
+
+```{r}
+opacin_neo_pvactools_dir <- here(pvactools_dir, "OpACIN_neo", "pvactools") 
+list.files(opacin_neo_pvactools_dir)
+
+combined_filtered_df <- data.frame(matrix(ncol = 0, nrow = 0))
+for (current_sample in list.files(opacin_neo_pvactools_dir)) {
+  print(current_sample)
+  output_files <- list.files(
+    here(opacin_neo_pvactools_dir, current_sample, "MHC_Class_I"))
+  
+  tumor_sample <- gsub("-vs-.*", "", current_sample)
+  output_files[str_detect(output_files, "filtered.tsv")]
+  sample_filtered_df <- read_delim(
+    here(opacin_neo_pvactools_dir, current_sample, "MHC_Class_I",
+         output_files[str_detect(output_files, "filtered.tsv")])) %>%
+    mutate(pvactools_sample = current_sample)
+  
+  combined_filtered_df <- combined_filtered_df %>% rbind(sample_filtered_df)
+}
+
+n_distinct(combined_filtered_df$pvactools_sample)
+table(combined_filtered_df$pvactools_sample)
+
+opacin_neo_combined_filtered_df <- combined_filtered_df
+
+opacin_neo_cf_samples <- opacin_neo_combined_filtered_df$pvactools_sample
+opacin_neo_cf_samples <- gsub("-vs-.*", "", opacin_neo_cf_samples)
+opacin_neo_combined_filtered_df$CF_sample <- opacin_neo_cf_samples
+
+table(
+  str_detect(opacin_neo_combined_filtered_df$pvactools_sample,
+             opacin_neo_combined_filtered_df$CF_sample))
+
+opacin_neo_combined_filtered_df %>% summary()
+
+```
+
+
+# Combine neoantigen
+```{r}
+n_distinct(prado_combined_filtered_df$pvactools_sample)
+n_distinct(bellini_combined_filtered_df$pvactools_sample)
+n_distinct(imcision_combined_filtered_df$pvactools_sample)
+n_distinct(matisse_combined_filtered_df$pvactools_sample)
+n_distinct(opacin_neo_combined_filtered_df$pvactools_sample)
+n_distinct(nabucco_combined_filtered_df$pvactools_sample)
+n_distinct(niche_combined_filtered_df$pvactools_sample)
+n_distinct(niche2_combined_filtered_df$pvactools_sample)
+
+neoantigen_output_combined_filtered <- prado_combined_filtered_df %>%
+  full_join(bellini_combined_filtered_df) %>%
+  full_join(imcision_combined_filtered_df) %>%
+  full_join(matisse_combined_filtered_df) %>%
+  full_join(opacin_neo_combined_filtered_df) %>%
+  full_join(nabucco_combined_filtered_df) %>%
+  full_join(niche_combined_filtered_df) %>%
+  full_join(niche2_combined_filtered_df)
+
+dim(neoantigen_output_combined_filtered)
+
+# Neoantigen TMB, one per position
+neoantigen_output_combined_filtered_unique_variants <- neoantigen_output_combined_filtered %>%
+  select(Chromosome, Start, Stop, Reference, Variant, CF_sample) %>%
+  unique()
+dim(neoantigen_output_combined_filtered_unique_variants)
+
+# Impute 0 for S1224Nr40 and S2697Nr53 
+# no filtered predictions
+pvactools_filtered_neoantigen_counts <- table(
+  neoantigen_output_combined_filtered$CF_sample) %>%
+  as.data.frame() %>%
+  setNames(c("CF_sample_tumor", "pvactools_filtered_neoantigen_load")) %>%
+  left_join(
+    table(
+      neoantigen_output_combined_filtered_unique_variants$CF_sample) %>%
+      as.data.frame() %>%
+      setNames(c("CF_sample_tumor", "pvactools_unique_neoantigen_sites"))) %>%
+  add_row(CF_sample_tumor = "S1224Nr40",
+          pvactools_filtered_neoantigen_load = 0,
+          pvactools_unique_neoantigen_sites = 0) %>%
+  add_row(CF_sample_tumor = "S2697Nr53",
+          pvactools_filtered_neoantigen_load = 0,
+          pvactools_unique_neoantigen_sites = 0) %>%
+  left_join(combined_dna_metadata)
+
+```
+
+
+```{r}
+pvactools_filtered_neoantigen_counts %>%
+  filter(!is.na(Trial)) %>%
+  ggplot(aes(x = Trial, y = pvactools_filtered_neoantigen_load)) +
+  geom_boxplot() + theme_Publication()
+
+pvactools_filtered_neoantigen_counts %>%
+  filter(!is.na(Trial)) %>%
+  ggplot(aes(x = Trial, y = pvactools_unique_neoantigen_sites)) +
+  geom_boxplot() + theme_Publication()
+
+pvactools_filtered_neoantigen_counts %>%
+  filter(!is.na(Trial)) %>%
+  ggplot(aes(x = pvactools_unique_neoantigen_sites,
+             y = pvactools_filtered_neoantigen_load, col = Trial)) +
+  geom_point() + theme_Publication() + geom_abline()
+
+neoantigen_output_combined_filtered %>%
+  write_csv2(here(output_dir,
+                  "neoantigen_output_combined_filtered.csv"))
+
+pvactools_filtered_neoantigen_counts %>%
+  write_csv2(here(output_dir,
+                  "pvactools_filtered_neoantigen_counts.csv"))
+
+neoantigen_output_combined_filtered <- read_csv2(here(output_dir,
+                  "neoantigen_output_combined_filtered.csv"))
+
+pvactools_filtered_neoantigen_counts <- read_csv2(here(output_dir,
+                  "pvactools_filtered_neoantigen_counts.csv"))
+
+```
+
+# -----------------------------
+# Compare TMB variants
+
+```{r}
+ccf_vaf_clonal_summary_df <- read_csv2(
+  here("data", "processed", "WES_analysis", "ccf_vaf_clonal_tmb_df.csv"))
+
+table(ccf_vaf_clonal_summary_df$Trial)
+table(pvactools_filtered_neoantigen_counts$Trial)
+
+pvactools_filtered_neoantigen_counts_c <- pvactools_filtered_neoantigen_counts %>%
+  left_join(ccf_vaf_clonal_summary_df %>%
+              select(CF_sample_tumor, Variants, TMB, TMB_frameshift,
+                     Frameshift_load, n_variants_CCF_0.80,
+                     n_variants_CCF_0.90, n_variants_CCF_0.95)) %>%
+  mutate(delta = Variants - pvactools_unique_neoantigen_sites) %>%
+  mutate(ratio = pvactools_unique_neoantigen_sites / Variants)
+
+pvactools_filtered_neoantigen_counts_c %>%
+  select(Trial, CF_sample_tumor, Variants, pvactools_unique_neoantigen_sites,
+         pvactools_filtered_neoantigen_load, delta, ratio) %>%
+  view()
+
+tapply(pvactools_filtered_neoantigen_counts_c$ratio,
+       pvactools_filtered_neoantigen_counts_c$Trial,
+       summary)
+```
+
+# neoantigen load (peptide level, multiple per site)
+
+```{r}
+pvactools_filtered_neoantigen_counts_c  %>%
+  ggplot(aes(x = Trial, y = ratio)) +
+  geom_boxplot() + theme_Publication() +
+  geom_point() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+pvactools_filtered_neoantigen_counts_c %>%
+  ggplot(aes(x = Variants, y = pvactools_filtered_neoantigen_load)) +
+  geom_point(aes(col = Trial)) + theme_Publication() +
+  stat_cor(method = "spearman") +
+  geom_abline()
+
+pvactools_filtered_neoantigen_counts_c  %>%
+  ggplot(aes(x = Trial, y = delta)) +
+  geom_boxplot() + theme_Publication() +
+  geom_point() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+pvactools_filtered_neoantigen_counts_c %>%
+  ggplot(aes(x = Trial, y = delta)) +
+  geom_boxplot() + theme_Publication() +
+  geom_point() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+pvactools_filtered_neoantigen_counts_c %>%
+  filter(Trial %in% c("BELLINI", "IMCISION", "NICHE-MSS")) %>%
+  ggplot(aes(x = Variants, y = pvactools_filtered_neoantigen_load,
+             col = Trial)) +
+  geom_point() + theme_Publication() + stat_cor(method = "spearman") +
+  geom_abline()
+
+pvactools_filtered_neoantigen_counts_c %>%
+  filter(Trial %in% c("BELLINI", "IMCISION", "NICHE-MSS")) %>%
+  mutate(delta = pvactools_filtered_neoantigen_load - Variants) %>%
+  ggplot(aes(x = Trial, y = delta)) +
+  geom_boxplot() + theme_Publication() +
+  geom_point() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+pvactools_filtered_neoantigen_counts_c %>%
+  ggplot(aes(x = TMB, y = pvactools_filtered_neoantigen_load, col = Trial)) +
+  geom_point() + theme_Publication()
+```
+
+# Unique neoantigen sites/variants
+
+```{r}
+pvactools_filtered_neoantigen_counts_c %>%
+  ggplot(aes(x = Variants, y = pvactools_unique_neoantigen_sites)) +
+  geom_point(aes(col = Trial)) + theme_Publication() +
+  stat_cor(method = "spearman") +
+  geom_abline()
+
+pvactools_filtered_neoantigen_counts_c %>%
+  mutate(delta = Variants - pvactools_unique_neoantigen_sites) %>%
+  ggplot(aes(x = Trial, y = delta)) +
+  geom_boxplot() + theme_Publication() +
+  geom_point() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+pvactools_filtered_neoantigen_counts_c %>%
+  mutate(delta = pvactools_unique_neoantigen_sites - Variants) %>%
+  ggplot(aes(x = Trial, y = delta)) +
+  geom_boxplot() + theme_Publication() +
+  geom_point() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+pvactools_filtered_neoantigen_counts_c %>%
+  filter(Trial %in% c("BELLINI", "IMCISION", "NICHE-MSS")) %>%
+  ggplot(aes(x = Variants, y = pvactools_unique_neoantigen_sites,
+             col = Trial)) +
+  geom_point() + theme_Publication() + stat_cor(method = "spearman") +
+  geom_abline()
+
+pvactools_filtered_neoantigen_counts_c %>%
+  filter(Trial %in% c("BELLINI", "IMCISION", "NICHE-MSS")) %>%
+  mutate(delta = pvactools_unique_neoantigen_sites - Variants) %>%
+  ggplot(aes(x = Trial, y = delta)) +
+  geom_boxplot() + theme_Publication() +
+  geom_point() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+pvactools_filtered_neoantigen_counts_c %>%
+  ggplot(aes(x = TMB, y = pvactools_unique_neoantigen_sites, col = Trial)) +
+  geom_point() + theme_Publication()
+```
+
+```{r, fig.width = 10, fig.height = 10}
+
+pvactools_filtered_neoantigen_counts_c %>%
+  ggplot(aes(x = Variants, y = pvactools_filtered_neoantigen_load)) +
+  geom_point(aes(col = Trial)) + theme_Publication() +
+  stat_cor(method = "spearman") +
+  geom_abline() + facet_wrap(~Trial, scales = "free")
+
+pvactools_filtered_neoantigen_counts_c %>%
+  ggplot(aes(x = Variants, y = pvactools_unique_neoantigen_sites)) +
+  geom_point(aes(col = Trial)) + theme_Publication() +
+  stat_cor(method = "spearman") +
+  geom_abline() + facet_wrap(~Trial, scales = "free")
+```
+
+# -----------------------------
+
+# Pyclone VI runs
+```{r, eval = FALSE}
+# Pyclone Input was exported with WES script
+mkdir -p pyclone_output
+
+for f in pyclone_input/*.tsv; do
+    sample=$(basename "$f" .tsv)
+    echo "Running PyClone-VI for $sample"
+
+    pyclone-vi fit \
+        --in-file "$f" \
+        --out-file "pyclone_output/${sample}.h5"
+done
+
+for f in pyclone_output/*.h5; do
+    sample=$(basename "$f" .h5)
+    echo "Writing results for $sample"
+
+    pyclone-vi write-results-file \
+        --in-file "$f" \
+        --out-file "pyclone_output/${sample}_results.tsv"
+done
+
+```
+
+```{r}
+input_dir <- "~/pyclone_output"
+output_dir <- "pyclone_processed"
+
+dir.create(output_dir, showWarnings = FALSE)
+
+# List all PyClone-VI mutation-level result files
+files <- c(list.files(input_dir, pattern = "_results.tsv$", full.names = TRUE),
+           list.files("~/pyclone_output_missing/", pattern = "_results.tsv$",
+                      full.names = TRUE))
+
+length(files)
+
+process_sample <- function(file) {
+  
+  df <- read_tsv(file, show_col_types = FALSE)
+  
+  # Extract sample name from filename
+  sample_id <- str_replace(basename(file), "_results.tsv", "")
+  
+  # Compute cluster-level summaries
+  cluster_summary <- df %>%
+    group_by(cluster_id) %>%
+    summarise(
+      cluster_size = n(),
+      mean_CCF = mean(cellular_prevalence),
+      sd_CCF = sd(cellular_prevalence),
+      median_CCF = median(cellular_prevalence),
+      q05 = quantile(cellular_prevalence, 0.05),
+      q95 = quantile(cellular_prevalence, 0.95)
+    ) %>%
+    arrange(desc(cluster_size)) %>%
+    mutate(sample_id = sample_id)
+  
+  # Write cluster summary
+  write_tsv(
+    cluster_summary,
+    file.path(output_dir, paste0(sample_id, "_cluster_summary.tsv"))
+  )
+  
+  # Write mutation-level file (optional)
+  write_tsv(
+    df,
+    file.path(output_dir, paste0(sample_id, "_mutation_summary.tsv"))
+  )
+  
+  return(cluster_summary)
+}
+
+compile_pyclone_vi = FALSE
+if (compile_pyclone_vi) {
+  # Run for all samples
+  all_cluster_summaries <- map_df(files, process_sample)
+  
+  all_cluster_summaries %>% write_csv2(
+    here("data", "processed", "pyclone_processed", "all_cluster_summaries.csv"))
+}
+
+```
+
+```{r}
+all_cluster_summaries <- read_csv2(
+  here("data", "processed", "pyclone_processed", "all_cluster_summaries.csv"))
+
+all_cluster_summaries %>%
+  ggplot(aes(x = cluster_id, y = cluster_size, col = sample_id)) +
+  geom_point() + guides(col = FALSE) + theme_Publication()
+all_cluster_summaries %>%
+  ggplot(aes(x = cluster_id, y = mean_CCF, col = sample_id)) +
+  geom_point() + guides(col = FALSE)
+
+all_cluster_summaries_clonal <- all_cluster_summaries %>%
+  mutate(clonal_status = ifelse(mean_CCF > 0.8, "Clonal", "Subclonal")) %>%
+  group_by(sample_id) %>%
+  add_count(name = "Total", wt = cluster_size) %>%
+  ungroup()
+
+all_cluster_summaries_clonal %>%
+  mutate(cluster_prop = cluster_size / Total) %>%
+  ggplot(aes(x = clonal_status, y = cluster_prop)) +
+  geom_boxplot() +
+  theme_Publication()
+
+all_cluster_summaries_clonal %>%
+  ggplot(aes(fill = clonal_status, x = mean_CCF)) + geom_density(alpha = 0.5) +
+  theme_Publication()
+
+sample_n_cluster_summary <- table(all_cluster_summaries_clonal$clonal_status,
+                                  all_cluster_summaries_clonal$sample_id) %>%
+  as.data.frame() %>%
+  setNames(c("clonal_status", "sample_id", "Freq")) %>%
+  pivot_wider(names_from = clonal_status, values_from = Freq) %>%
+  setNames(c("sample_id", "n_clonal_clusters", y = "n_subclonal_clusters")) %>%
+  mutate(n_clusters = n_clonal_clusters + n_subclonal_clusters)
+
+sample_n_cluster_summary %>% summary()
+sample_n_cluster_summary %>% filter(n_clonal_clusters == 0)
+sample_n_cluster_summary %>% filter(n_subclonal_clusters == 0)
+```
+
+## Define pyclone_vi_clonal_summary_df
+```{r}
+pyclone_vi_clonal_summary_df <- sample_n_cluster_summary %>%
+  left_join(
+    all_cluster_summaries_clonal %>%
+      group_by(clonal_status, sample_id, Total) %>%
+      summarize(cluster_size = sum(cluster_size)) %>%
+      mutate(Fraction = cluster_size/Total) %>%
+      ungroup() %>%
+      filter(clonal_status == "Clonal") %>%
+      rename(clonal_fraction = Fraction, clonal_cluster_size = cluster_size) %>%
+      select(sample_id, Total, clonal_cluster_size, clonal_fraction) 
+    ) %>%
+  left_join(
+    all_cluster_summaries_clonal %>%
+      group_by(clonal_status, sample_id, Total) %>%
+      summarize(cluster_size = sum(cluster_size)) %>%
+      mutate(Fraction = cluster_size/Total) %>%
+      ungroup() %>%
+      filter(clonal_status == "Subclonal") %>%
+      rename(subclonal_fraction = Fraction,
+             subclonal_cluster_size = cluster_size) %>%
+      select(sample_id, subclonal_cluster_size, subclonal_fraction),
+    by = "sample_id") %>%
+  mutate(Total = ifelse(
+    is.na(clonal_cluster_size) & !is.na(subclonal_cluster_size),
+    subclonal_cluster_size, Total)) %>%
+  mutate(Total = ifelse(
+    is.na(subclonal_cluster_size) & !is.na(clonal_cluster_size),
+    clonal_cluster_size, Total)) %>%
+  mutate(clonal_cluster_size = ifelse(
+    is.na(clonal_cluster_size), 0, clonal_cluster_size)) %>%
+  mutate(clonal_fraction = ifelse(
+    is.na(clonal_fraction), 0, clonal_fraction)) %>%
+  mutate(subclonal_cluster_size = ifelse(
+    is.na(subclonal_cluster_size), 0, subclonal_cluster_size)) %>%
+  mutate(subclonal_fraction = ifelse(
+    is.na(subclonal_fraction), 0, subclonal_fraction))
+```
+
+```{r}
+
+patient_metadata_combined <- read_csv2(
+  here("data", "processed", "metadata", "patient_metadata_combined.csv")) 
+
+combined_dna_metadata <- read_csv2(
+  here("data", "processed", "metadata", "combined_dna_metadata.csv")) 
+
+combined_rna_metadata <- read_csv2(
+  here("data", "processed", "metadata", "combined_rna_metadata.csv")) 
+
+all_cluster_summaries_p <- all_cluster_summaries %>%
+  mutate(CF_sample_tumor = sample_id) %>%
+  left_join(combined_dna_metadata)
+
+all_cluster_summaries_p %>%
+  write_csv2(here("data", "processed", "pyclone_processed",
+                  "all_cluster_summaries_p.csv"))
+
+# WES target sizes
+WES_target_sizes <- data.frame(
+  Trial = c("IMCISION", "PRADO", "OpACIN_neo", "MATISSE",
+            "NICHE-MSI", "NICHE-MSS", "NABUCCO", "BELLINI"),
+  Kit = c(rep("Twist exome Refseq", 4), rep("Exome-IDT V1", 4)),
+  WES_target_size = c(rep(36.72, 4), rep(39.02, 4)))
+
+pyclone_vi_clonal_summary_df <- pyclone_vi_clonal_summary_df %>%
+  mutate(CF_sample_tumor = sample_id) %>%
+  left_join(combined_dna_metadata) %>%
+  left_join(WES_target_sizes) %>%
+  mutate(pyclone_clonal_TMB = clonal_cluster_size / WES_target_size,
+         pyclone_subclonal_TMB = subclonal_cluster_size / WES_target_size)
+
+pyclone_vi_clonal_summary_df %>%
+  write_csv2(here(output_dir, "pyclone_vi_clonal_summary_df.csv"))
+
+pyclone_vi_clonal_summary_df <- read_csv2(
+  here(output_dir, "pyclone_vi_clonal_summary_df.csv"))
+
+```
+
+## Plots pyclone TMB
+
+```{r}
+
+pyclone_vi_clonal_summary_df %>%
+  ggplot(aes(x = clonal_fraction, y = subclonal_fraction, col = n_clusters)) +
+  geom_point() + theme_Publication()
+
+pyclone_vi_clonal_summary_df %>%
+  ggplot(aes(x = n_clonal_clusters, y = clonal_fraction, col = n_clusters)) +
+  geom_point() + theme_Publication()
+
+pyclone_vi_clonal_summary_df %>%
+  ggplot(aes(x = n_subclonal_clusters, y = subclonal_fraction,
+             col = n_clusters)) +
+  geom_point() + theme_Publication()
+
+pyclone_vi_clonal_summary_df %>%
+  ggplot(aes(x = n_subclonal_clusters, y = n_clonal_clusters)) +
+  geom_pointdensity() + theme_Publication()
+
+pyclone_vi_clonal_summary_df %>%
+  filter(subclonal_fraction == 1) %>% ggplot(aes(x = n_subclonal_clusters)) +
+  geom_histogram() + theme_Publication()
+
+pyclone_vi_clonal_summary_df %>%
+  filter(clonal_fraction == 1) %>% ggplot(aes(x = n_clonal_clusters)) +
+  geom_histogram() + theme_Publication()
+
+pyclone_vi_clonal_summary_df %>%
+  ggplot(aes(x = Trial, y = n_clusters)) +
+  geom_boxplot() + theme_Publication() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+  
+pyclone_vi_clonal_summary_df %>% ggplot(aes(x = Trial, y = clonal_fraction)) +
+  geom_boxplot() + theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+```
+
+```{r}
+pyclone_vi_clonal_summary_df %>%
+  ggplot(aes(x = Trial,
+             y = pyclone_clonal_TMB, fill = Histology)) +
+  geom_boxplot() + theme_Publication() +
+  guides(fill = FALSE) +
+  labs(x = "", y = "clonal TMB (mutations/Mb)") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))+
+  scale_fill_manual(values = c("#B73A3A", "#CD9600", "#23C26F", "#00BFC4",
+                               "#009292", "#B66DFF", "#FEB5DA"))
+
+pyclone_vi_clonal_summary_df %>%
+  ggplot(aes(x = Trial,
+             y = pyclone_subclonal_TMB, fill = Histology)) +
+  geom_boxplot() + theme_Publication() +
+  guides(fill = FALSE) +
+  labs(x = "", y = "Subclonal TMB (mutations/Mb)") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))+
+  scale_fill_manual(values = c("#B73A3A", "#CD9600", "#23C26F", "#00BFC4",
+                               "#009292", "#B66DFF", "#FEB5DA"))
+pyclone_vi_clonal_summary_df %>%
+  ggplot(aes(x = pyclone_clonal_TMB,
+             y = pyclone_subclonal_TMB, color = Histology)) +
+  geom_point() + theme_Publication() +
+  guides(fill = FALSE) +
+  labs(x = "pyclone_clonal_TMB", y = "pyclone_subclonal_TMB") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))+
+  scale_fill_manual(values = c("#B73A3A", "#CD9600", "#23C26F", "#00BFC4",
+                               "#009292", "#B66DFF", "#FEB5DA")) +
+  geom_hline(yintercept = 10, linetype = "dashed") +
+  geom_vline(xintercept = 10, linetype = "dashed")
+
+
+```
+
+```{r, fig.height = 12, fig.width = 12}
+pyclone_vi_clonal_summary_df %>%
+  ggplot(aes(x = pyclone_clonal_TMB,
+             y = pyclone_subclonal_TMB, color = Histology)) +
+  geom_point() + theme_Publication() +
+  guides(fill = FALSE) +
+  labs(x = "pyclone_clonal_TMB", y = "pyclone_subclonal_TMB") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))+
+  scale_fill_manual(values = c("#B73A3A", "#CD9600", "#23C26F", "#00BFC4",
+                               "#009292", "#B66DFF", "#FEB5DA")) +
+  facet_wrap(~Trial, scales = "free") +
+  geom_hline(yintercept = 10, linetype = "dashed") +
+  geom_vline(xintercept = 10, linetype = "dashed")
+```
+
+# ----------
+# Lint script
+```{r}
+# lint("~/NKI_pancancer_neoadj_io/src/pancan_parse_pyclone_pvactools.Rmd")
+lint(
+  filename = "~/NKI_pancancer_neoadj_io/src/pancan_parse_pyclone_pvactools.Rmd",
+  linters = unused_import_linter()
+)
+```
+
+# ----------
+# sessionInfo - Package Versions
+```{r sessionInfo}
+sessionInfo()
+```

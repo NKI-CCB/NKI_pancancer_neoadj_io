@@ -1,0 +1,1053 @@
+---
+title: "Differential expression meta analysis"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+params:
+  output_dir: "differential_expression_meta"
+  metadata: "combined_rna_metadata.csv"
+  analyze_specific_trial: ""
+  run_meta_analysis: FALSE
+  generate_heatmaps: TRUE
+---
+
+Author comment: 
+
+File description comment:
+The purpose of this script is to aggregate differential expression analysis results and integrate them to derive a new response signature score
+The NKI pancancer signature score was defined as the difference between ssGSEA scores for the positive and negative component
+
+# Loading Packages
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning = FALSE, message = FALSE, dpi = 300, error = TRUE, dev = "png"
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# Install if necessary install.packages("BiocManager")
+# Install if necessary BiocManager::install("fgsea")
+library(tidyverse)
+library(ggrepel)
+library(here)
+library(DESeq2)
+library(ggpubr)
+library(rstatix)
+library(corrplot)
+source("helper_functions.R")
+library(meta)
+library(enrichR)
+library(VennDiagram)
+library(ggVennDiagram)
+library(ggpointdensity)
+library(RobustRankAggreg)
+
+set.seed(42)
+select <- dplyr::select
+rename <- dplyr::rename
+here <- here::here
+```
+
+# ----------
+
+# Setup output folder
+
+```{r Setup, echo = FALSE, include = FALSE}
+export <- params$export
+analyze_specific_trial <- params$analyze_specific_trial
+run_meta_analysis <- params$run_meta_analysis   
+generate_heatmaps <- params$generate_heatmaps
+
+# generate output directory
+output_dir <- here("data", "processed", params$output_dir)
+print(output_dir)
+output_dir_plots <- here(output_dir, "plots")
+
+data_dir <- here("data", "processed")
+combined_dir <- here(data_dir, "gene_signatures")
+meta_rna_dir <- here("data", "processed", "gene_signatures_meta") 
+
+# if output_dir does not exist, create it
+if (!dir.exists(output_dir)) {
+    dir.create(output_dir)
+    dir.create(output_dir_plots)
+} else {
+  print("Output folder already exists")
+}
+
+```
+
+# ----------
+
+# Load RNAseq data
+
+```{r load rnaseq data, include = TRUE}
+df_counts <- read_csv2(here("data", "processed", "rnaseq_data",
+                             "combined_rnaseq_counts_p.csv")) %>%
+  column_to_rownames("gene")
+
+rna_metadata <- read_csv2(
+  here("data", "processed", "metadata", params$metadata))
+
+if (analyze_specific_trial != ""){
+  rna_metadata <- rna_metadata %>% filter(Trial == analyze_specific_trial)
+}
+
+rna_metadata <- rna_metadata %>%
+  mutate(
+      Treatment = factor(Treatment, levels = c("Pre", "Post")),
+      CF_sample = as.factor(CF_sample),
+      Trial = as.factor(Trial),
+      Response = as.factor(Response),
+      Response_detail = as.factor(Response_detail),
+      MSI_MSS = as.factor(MSI_MSS),
+      BRAF = as.factor(BRAF))
+
+rna_metadata %>% mutate_if(is.character, as.factor) %>% summary()
+
+# Remove genes with all zero counts, might be detected in specific trials only
+df_counts <- df_counts[, colnames(df_counts) %in%
+                          rna_metadata$CF_sample]
+df_counts <- df_counts[rowSums(df_counts) != 0, ]
+
+unique_patient_id <- rna_metadata %>% select(Trial, Patient) %>% unique()
+table(unique_patient_id$Trial)
+ 
+paired_samples <- table(rna_metadata$Patient, rna_metadata$Treatment) %>%
+  as.data.frame() %>%
+  setNames(c("Patient", "Treatment", "Freq")) %>%
+  pivot_wider(values_from = Freq, names_from = Treatment) %>%
+  filter(Pre >  0 & Post > 0) %>%
+  left_join(unique_patient_id)
+
+histology_df <- data.frame(
+  Trial = c("BELLINI", "IMCISION", "NABUCCO", "NICHE-MSS", "NICHE-MSI",
+            "OpACIN_neo", "PRADO", "MATISSE"),
+  Histology = c("TBNC", "HNSCC", "Urothelial", "Colon", "Colon",
+                "LN_melanoma", "LN_melanoma", "CSCC"))
+
+```
+
+# Annotation color
+
+```{r}
+
+# Define colours for each group
+Color_NR <- "#F8766D"
+Color_R <- "#00BA38" # "#619CFF"
+Color_NA <- "#CD9600"
+Color_Pre <- "#619CFF"
+Color_Post <- "#F564E3"
+
+Color_HNSCC <- "#009292"
+Color_CSCC <- "#CD9600"
+Color_Urothelial <- "#B66DFF"
+Color_LN_melanoma <- "#00BFC4"
+Color_Colon <- "#F8766D"
+Color_Colon_MSI <- "#B73A3A"
+Color_Colon_MSS <- "#23C26F"
+Color_TNBC <- "#FEB5DA"
+Color_BELLINI <- "#FEB5DA"
+Color_IMCISION <- "#009292"
+Color_MATISSE <- "#CD9600"
+Color_NABUCCO <- "#B66DFF"
+Color_BELLINI <- "#FEB5DA"
+Color_NICHE_MSS <- "#23C26F"
+Color_NICHE_MSI <- "#B73A3A"
+Color_OpACIN_neo <- "#00BFC4"
+Color_PRADO <- "#619CFF"
+
+annotation_color_list = list(
+  Response = c(NR = Color_NR, R = Color_R),
+  Treatment = c(Pre = Color_Pre, Post = Color_Post),
+  Histology = c(LN_melanoma = Color_LN_melanoma, Urothelial = Color_Urothelial,
+                Colon = Color_Colon, HNSCC = Color_HNSCC, TBNC = Color_TNBC,
+                CSCC = Color_CSCC),
+  Trial = c(BELLINI = Color_BELLINI, IMCISION = Color_IMCISION,
+            MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
+            `NICHE-MSS` = Color_NICHE_MSS, `NICHE-MSI` = Color_NICHE_MSI,
+            OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO))
+
+trial_colors <- c(BELLINI = Color_BELLINI, IMCISION = Color_IMCISION,
+            MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
+            `NICHE-MSS` = Color_NICHE_MSS, `NICHE-MSI` = Color_NICHE_MSI,
+            OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO)
+
+trial_colors_combined <- c(Combined = "#999999", BELLINI = Color_BELLINI,
+                           IMCISION = Color_IMCISION,
+            MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
+            `NICHE-MSS` = Color_Colon_MSS, `NICHE-MSI` = Color_NICHE_MSI,
+            OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO)
+
+histology_msi_mss_colors <- c(`Colon-MSI`= Color_Colon_MSI,
+                              `Colon-MSS`= Color_Colon_MSS,
+                              CSCC = Color_CSCC, HNSCC = Color_HNSCC, 
+                              LN_melanoma = Color_LN_melanoma,
+                              TBNC = Color_TNBC,
+                              Urothelial = Color_Urothelial)
+
+```
+
+# ----------
+
+# Load gene sets
+
+```{r Load msigdb hallmarks, echo = FALSE}
+gene_signatures <- read_csv2(
+  here("data", "processed", "signatures", "gene_signatures.csv"))
+
+gene_signatures <- gene_signatures %>% filter(!is.na(Gene))
+
+signature_overview <- read_csv2(
+  here("data", "external", "signatures",
+       "_overview_of_signatures.csv")) 
+
+gene_signatures_meta_analysis <- signature_overview %>%
+  filter(Meta_analysis == "Yes")
+
+gene_signatures_meta_analysis %>% knitr::kable()
+
+signature_overview %>%
+  filter(!Signature == "TMB") %>%
+  select(-c(Include, Obs, Signature, Signature_abbreviation, DOI, Class)) %>%
+  mutate_if(is.character, as.factor) %>%
+  summary(maxsum = 20) # %>% knitr::kable()
+
+gene_signatures_meta_analysis %>%
+  select(-c(Include, Obs, Signature, Signature_abbreviation, DOI, Class)) %>%
+  mutate_if(is.character, as.factor) %>%
+  summary(maxsum = 20) # %>% knitr::kable()
+
+gene_signatures_l <- split(
+  gene_signatures$Gene, gene_signatures$Signature)
+gene_signatures_l <- gene_signatures_l[gene_signatures$Signature %>% unique()]
+
+print(knitr::kable(gene_signatures %>%
+        select(Signature, Class, Geneset_size) %>%
+        unique()), n = n_distinct(gene_signatures$Signature))
+
+gene_signatures_ssgsea <- gene_signatures %>% filter(use_ssgsea)
+
+gene_signatures_ssgsea_l <- split(
+  gene_signatures_ssgsea$Gene, gene_signatures_ssgsea$Signature)
+
+ssgsea_signature_names <- names(gene_signatures_ssgsea_l)
+
+gene_features <- read.csv2(
+  file = here("data", "external", "biomaRt_gene_features.csv"))
+
+gene_descriptions <- gene_features %>%
+              select(hgnc_symbol, description) %>%
+              rename("gene" = "hgnc_symbol") %>%
+              unique()
+
+```
+
+# ----------
+
+# Tissue specific genes human protein atlas
+
+```{r}
+list.files(here("data", "external", "human_protein_atlas"))
+
+breast_tissue_rna_genes <- read_delim(
+  here("data", "external", "human_protein_atlas",
+       "tissue_category_rna_breast_Tissue.tsv"))
+
+intestine_tissue_rna_genes <- read_delim(
+  here("data", "external", "human_protein_atlas",
+       "tissue_category_rna_intestine_Tissue.tsv"))
+
+lymphoid_tissue_rna_genes <- read_delim(
+  here("data", "external", "human_protein_atlas",
+       "tissue_category_rna_lymphoid.tsv"))
+
+skin_tissue_rna_genes <- read_delim(
+  here("data", "external", "human_protein_atlas",
+       "tissue_category_rna_skin_Tissue.tsv"))
+
+urinary_tissue_rna_genes <- read_delim(
+  here("data", "external", "human_protein_atlas",
+       "tissue_category_rna_urinary.tsv"))
+
+# Tissue Enriched: The gene has at least a four-fold higher mRNA level in a particular tissue compared to any other individual tissue. The gene is highly localized or specific to that single organ.
+
+# Tissue Enhanced: The gene has at least a four-fold higher mRNA level in a particular tissue compared to the average level across all other tissues. It shows elevated expression in one tissue but may also be expressed at moderate levels in multiple other organs.
+
+table(breast_tissue_rna_genes$`RNA tissue specificity`)
+table(intestine_tissue_rna_genes$`RNA tissue specificity`)
+table(lymphoid_tissue_rna_genes$`RNA tissue specificity`)
+table(skin_tissue_rna_genes$`RNA tissue specificity`)
+table(urinary_tissue_rna_genes$`RNA tissue specificity`)
+
+```
+
+# ----------
+
+# Aggregate Differential Expression Results
+
+## Load DESEq data per trial Response
+
+```{r}
+# Pre R x NR
+deseq_r1_bellini <- read_csv2(
+     here("data", "processed",
+         "differential_expression_BELLINI", "deseq.results_r1.csv")) %>%
+     mutate(Trial = "BELLINI", contrast = "Pre R x NR")
+ 
+ deseq_r1_imcision <- read_csv2(
+     here("data", "processed",
+         "differential_expression_IMCISION", "deseq.results_r1.csv")) %>%
+     mutate(Trial = "IMCISION", contrast = "Pre R x NR")
+ 
+ deseq_r1_nabucco <- read_csv2(
+     here("data", "processed",
+         "differential_expression_NABUCCO", "deseq.results_r1.csv")) %>%
+     mutate(Trial = "NABUCCO", contrast = "Pre R x NR")
+ 
+ deseq_r1_niche_mss <- read_csv2(
+     here("data", "processed",
+         "differential_expression_NICHE-MSS", "deseq.results_r1.csv")) %>%
+     mutate(Trial = "NICHE-MSS", contrast = "Pre R x NR")
+ 
+ deseq_r1_OpACIN_neo <- read_csv2(
+     here("data", "processed",
+         "differential_expression_OpACIN_neo", "deseq.results_r1.csv")) %>%
+     mutate(Trial = "OpACIN_neo", contrast = "Pre R x NR")
+ 
+  deseq_r1_prado <- read_csv2(
+     here("data", "processed",
+         "differential_expression_PRADO", "deseq.results_r1.csv")) %>%
+     mutate(Trial = "PRADO", contrast = "Pre R x NR")
+ 
+ deseq_r1_matisse <- read_csv2(
+     here("data", "processed",
+         "differential_expression_MATISSE", "deseq.results_r1.csv")) %>%
+     mutate(Trial = "MATISSE", contrast = "Pre R x NR")
+```
+
+## Combine
+
+```{r}
+deseq_r1_c <- deseq_r1_bellini %>%
+   rbind(deseq_r1_imcision) %>%
+   rbind(deseq_r1_nabucco) %>%
+   rbind(deseq_r1_niche_mss) %>%
+   rbind(deseq_r1_OpACIN_neo) %>%
+   rbind(deseq_r1_prado) %>%
+   rbind(deseq_r1_matisse)
+ 
+ deseq_r1_c <- deseq_r1_c %>% filter(!Trial %in% "Combined")
+ deseq_r1_c %>% write_csv2(here(output_dir, "deseq_r1_c.csv"))
+
+ deseq_r1 <- read_csv2(
+     here("data", "processed",
+         "differential_expression", "deseq.results_r1.csv")) %>%
+     mutate(Trial = "Combined", contrast = "Pre R x NR")
+ 
+```
+
+```{r, fig.height = 20, fig.width = 20}
+deseq_r1_c %>%
+  filter(abs(log2FoldChange) > log2(1.25)) %>%
+  select(lfcSE, stat, pvalue, padj, Trial) %>%
+  factor_summary()
+
+deseq_r1_c %>%
+  filter(abs(log2FoldChange) > 1.25) %>%
+  select(lfcSE, stat, pvalue, padj, Trial) %>%
+  factor_summary()
+
+deseq_r1_c %>%
+  ggplot(aes(x = log2FoldChange, y = -log10(pvalue), col = Trial)) +
+  geom_point() + theme_Publication() + facet_wrap(~Trial, scales = "free") +
+  geom_hline(yintercept = -log10(0.05))
+
+deseq_r1_c %>%
+  filter(abs(log2FoldChange) > log2(1.25)) %>%
+  ggplot(aes(x = log2FoldChange, y = -log10(pvalue), col = Trial)) +
+  geom_point() + theme_Publication() + facet_wrap(~Trial, scales = "free") +
+  geom_hline(yintercept = -log10(0.05))
+
+```
+
+## Check Intersections - consistent up and downregulation across trials
+
+```{r}
+deseq_r1_c <- read_csv2(here(output_dir, "deseq_r1_c.csv"))
+
+deseq_r1_c$log2FoldChange %>% summary()
+
+deseq_r1_c %>% filter(log2FoldChange >= 0) %>% summary()
+
+n_distinct(deseq_r1_c$gene)
+
+genes_with_na_log2fc <- deseq_r1_c %>% filter(is.na(log2FoldChange))
+table(genes_with_na_log2fc$gene) %>% as.data.frame() %>% filter(Freq > 1)
+# table(genes_with_na_log2fc$gene, genes_with_na_log2fc$Trial)
+
+deseq_r1_c %>% filter(is.na(log2FoldChange)) %>% select(baseMean) %>% summary()
+
+gene_n_trials <- table(deseq_r1_c$gene,
+      !is.na(deseq_r1_c$log2FoldChange)) %>%
+  as.data.frame()  %>%
+  setNames(c("gene", "not_na_log2fc", "n_trials"))%>%
+  filter(not_na_log2fc == TRUE) %>%
+  select(-not_na_log2fc)
+
+gene_n_trials %>%
+  ggplot(aes(x = n_trials)) + geom_histogram() + theme_Publication() +
+  labs(x = "n_trials (not NA log2FC)")
+```
+
+## Define deseq_r1_meta_df: log2FC across trials
+
+```{r}
+# log2Fold changes for each trial - consisten directions
+# Add mean log2FC, number of trials with response x non response enrichment, 
+deseq_r1_wide <- deseq_r1_c %>%
+  select(gene, log2FoldChange, Trial) %>%
+  pivot_wider(names_from = Trial, values_from = log2FoldChange) 
+deseq_r1_meta_df <- deseq_r1_wide
+
+dim(deseq_r1_wide)
+
+gene_direction <- deseq_r1_c %>%
+  group_by(gene) %>%
+  summarise(
+    n_responder_enrichment = sum(log2FoldChange > 0, na.rm = TRUE),
+    n_nresponder_enrichment = sum(log2FoldChange < 0, na.rm = TRUE),
+    direction_consistent = (n_responder_enrichment == 0 |
+                              n_nresponder_enrichment == 0),
+    dominant_direction = ifelse(
+      n_responder_enrichment >= n_nresponder_enrichment, "R", "NR")
+  )
+
+gene_sig_counts <- deseq_r1_c %>%
+  mutate(
+    significant_pvalue = pvalue < 0.05,
+    significant_padj = padj < 0.05) %>%
+  group_by(gene) %>%
+  summarise(
+    n_sig_pvalue = sum(as.numeric(significant_pvalue), na.rm = TRUE),
+    n_sig_padj = sum(as.numeric(significant_padj), na.rm = TRUE))
+  
+deseq_r1_meta_df <- deseq_r1_meta_df %>%
+  left_join(gene_direction) %>%
+  left_join(gene_sig_counts) %>%
+  left_join(gene_n_trials)
+
+deseq_r1_meta_df$mean_log2fc <- rowMeans(
+  deseq_r1_wide %>% column_to_rownames("gene"), na.rm = TRUE)
+deseq_r1_meta_df$median_log2fc <- rowMedians(
+  deseq_r1_wide %>% column_to_rownames("gene") %>% as.matrix(), na.rm = TRUE)
+
+deseq_r1_meta_df <- deseq_r1_meta_df %>% left_join(gene_descriptions)
+
+deseq_r1_meta_df %>% write_csv2(here(output_dir, "deseq_r1_meta_df.csv"))
+deseq_r1_meta_df <- read_csv2(here(output_dir, "deseq_r1_meta_df.csv"))
+
+```
+
+# ----------
+
+```{r}
+deseq_r1_meta_df %>%
+  ggplot(aes(x = n_trials, y = mean_log2fc)) +
+  geom_pointdensity() + theme_Publication()+
+  guides(colour = guide_colourbar(barwidth = 10))
+
+deseq_r1_meta_df %>%
+  ggplot(aes(x = n_trials, y = median_log2fc)) +
+  geom_pointdensity() + theme_Publication()+
+  guides(colour = guide_colourbar(barwidth = 10))
+
+```
+
+# Explore direction consistency
+
+```{r}
+# You may relax the filter adding '- 1' to the number of trials
+# deseq_r1_consistent_upreg <- deseq_r1_meta_df %>%
+#   filter(n_responder_enrichment >= n_distinct(deseq_r1_c$Trial)) %>%
+#   arrange(-mean_log2fc)
+
+deseq_r1_consistent_upreg <- deseq_r1_meta_df %>%
+  filter(n_trials == n_distinct(deseq_r1_c$Trial)) %>%
+  filter(direction_consistent == TRUE) %>%
+  filter(dominant_direction == "R") %>%
+  arrange(-mean_log2fc)
+
+nrow(deseq_r1_consistent_upreg)
+deseq_r1_consistent_upreg  %>% select(-description) %>% factor_summary()
+table(deseq_r1_consistent_upreg$n_sig_pvalue == 0)
+table(deseq_r1_consistent_upreg$n_sig_padj == 0)
+
+deseq_r1_consistent_downreg <-  deseq_r1_meta_df  %>%
+  filter(n_trials == n_distinct(deseq_r1_c$Trial)) %>%
+  filter(direction_consistent == TRUE) %>%
+  filter(dominant_direction == "NR") %>%
+  arrange(-mean_log2fc)
+
+deseq_r1_consistent_downreg %>% select(-description)  %>% factor_summary()
+table(deseq_r1_consistent_downreg$n_sig_pvalue == 0)
+table(deseq_r1_consistent_downreg$n_sig_padj == 0)
+```
+
+```{r}
+
+deseq_r1_consistent_upreg %>%
+  ggplot(aes(x = mean_log2fc)) + geom_histogram() +
+  theme_Publication() + geom_vline(xintercept = log2(1.25))
+
+deseq_r1_consistent_downreg %>%
+  ggplot(aes(x = mean_log2fc)) + geom_histogram() +
+  theme_Publication() + geom_vline(xintercept = -log2(1.25))
+
+deseq_r1_consistent_downreg %>%
+  filter(mean_log2fc < -log2(1.25) & median_log2fc < -log2(1.25)) %>%
+  arrange(-mean_log2fc) %>% pull(gene)
+
+deseq_r1_consistent_upreg_f <- deseq_r1_consistent_upreg %>%
+  filter(mean_log2fc > log2(1.25) & median_log2fc > log2(1.25))
+
+dim(deseq_r1_consistent_upreg_f)
+
+deseq_r1_consistent_downreg_f <- deseq_r1_consistent_downreg %>%
+  filter(mean_log2fc < -log2(1.25) & median_log2fc < -log2(1.25))
+
+dim(deseq_r1_consistent_downreg_f)
+
+```
+
+# Explore magnitude
+
+# Check mean log2fc vs number of trials
+
+```{r}
+deseq_r1_meta_df %>%
+  ggplot(aes(x = mean_log2fc, y = median_log2fc,
+             col = n_responder_enrichment)) + geom_point() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed")
+
+deseq_r1_meta_df %>%
+  ggplot(aes(x = n_responder_enrichment, y = mean_log2fc)) +
+  geom_point() + theme_Publication() +
+  geom_hline(yintercept = 0, linetype = "dashed")
+
+deseq_r1_meta_df %>%
+  filter(abs(mean_log2fc) > log2(1.25)) %>%
+  ggplot(aes(x = n_responder_enrichment, y = mean_log2fc)) +
+  geom_point() + theme_Publication() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_hline(yintercept = -log2(1.25), linetype = "dashed", col = "red") +
+  geom_hline(yintercept = log2(1.25), linetype = "dashed", col = "red") +
+  geom_hline(yintercept = -log2(1.5), linetype = "dashed", col = "red") +
+  geom_hline(yintercept = log2(1.5), linetype = "dashed", col = "red") +
+  geom_hline(yintercept = -log2(1.75), linetype = "dashed", col = "red") +
+  geom_hline(yintercept = log2(1.75), linetype = "dashed", col = "red")
+
+```
+
+```{r}
+deseq_r1 %>%
+  left_join(deseq_r1_meta_df %>% select(gene, mean_log2fc)) %>%
+  ggplot(aes(x = log2FoldChange, y = mean_log2fc)) +
+  geom_pointdensity() + theme_Publication() +
+  guides(colour = guide_colourbar(barwidth = 10))
+
+```
+
+## Venn diagrams
+
+### Upregulated
+
+```{r venn diagram upreg R, fig.height = 20, fig.width = 20}
+deseq_r1_c_upreg_any <- deseq_r1_c %>%
+  filter(log2FoldChange > 0) %>%
+  filter(!Trial %in% c("Combined"))
+
+deseq_r1_c_upreg_split <- split(deseq_r1_c_upreg_any$gene,
+                                deseq_r1_c_upreg_any$Trial)
+venn_list <- lapply(split(deseq_r1_c_upreg_any$gene,
+                          deseq_r1_c_upreg_any$Trial), unique)
+ggVennDiagram(venn_list)
+
+# Filter above log2(1.25) ~ 0.32
+deseq_r1_c_upreg <- deseq_r1_c %>%
+  filter(log2FoldChange > log2(1.25)) %>%
+  filter(!Trial %in% c("Combined"))
+
+deseq_r1_c_upreg_split <- split(deseq_r1_c_upreg$gene,
+                                deseq_r1_c_upreg$Trial)
+venn_list <- lapply(split(deseq_r1_c_upreg$gene,
+                          deseq_r1_c_upreg$Trial), unique)
+ggVennDiagram(venn_list)
+
+```
+
+```{r Venn upset plot upreg}
+deseq_r1_c_upreg <- deseq_r1_c %>% filter(log2FoldChange > 0)
+
+deseq_r1_c_upreg_split <- split(deseq_r1_c_upreg$gene,
+                                deseq_r1_c_upreg$Trial)
+venn_list <- lapply(split(deseq_r1_c_upreg$gene,
+                          deseq_r1_c_upreg$Trial), unique)
+ggVennDiagram(venn_list, force_upset = TRUE)
+
+deseq_r1_c_upreg <- deseq_r1_c %>% filter(log2FoldChange > log2(1.25))
+
+deseq_r1_c_upreg_split <- split(deseq_r1_c_upreg$gene,
+                                deseq_r1_c_upreg$Trial)
+venn_list <- lapply(split(deseq_r1_c_upreg$gene,
+                          deseq_r1_c_upreg$Trial), unique)
+ggVennDiagram(venn_list, force_upset = TRUE)
+
+```
+
+### Downregulated
+
+```{r, fig.height = 20, fig.width = 20}
+deseq_r1_c_downreg <- deseq_r1_c %>%
+  filter(log2FoldChange < 0) %>%
+  filter(!Trial %in% c("Combined"))
+
+deseq_r1_c_downreg_split <- split(deseq_r1_c_downreg$gene,
+                                  deseq_r1_c_downreg$Trial)
+venn_list <- lapply(split(deseq_r1_c_downreg$gene,
+                          deseq_r1_c_downreg$Trial), unique)
+ggVennDiagram(venn_list)
+
+deseq_r1_c_downreg <- deseq_r1_c %>%
+  filter(log2FoldChange < -(log2(1.25))) %>%
+  filter(!Trial %in% c("Combined"))
+
+deseq_r1_c_downreg_split <- split(deseq_r1_c_downreg$gene,
+                                  deseq_r1_c_downreg$Trial)
+venn_list <- lapply(split(deseq_r1_c_downreg$gene,
+                          deseq_r1_c_downreg$Trial), unique)
+ggVennDiagram(venn_list)
+```
+
+```{r Venn upset plot downreg}
+deseq_r1_c_downreg <- deseq_r1_c %>% filter(log2FoldChange < 0)
+deseq_r1_c_downreg_split <- split(deseq_r1_c_downreg$gene,
+                                  deseq_r1_c_downreg$Trial)
+venn_list <- lapply(split(deseq_r1_c_downreg$gene,
+                          deseq_r1_c_downreg$Trial), unique)
+ggVennDiagram(venn_list, force_upset = TRUE)
+
+deseq_r1_c_downreg <- deseq_r1_c %>% filter(log2FoldChange< -(log2(1.25)))
+deseq_r1_c_downreg_split <- split(deseq_r1_c_downreg$gene,
+                                  deseq_r1_c_downreg$Trial)
+venn_list <- lapply(split(deseq_r1_c_downreg$gene,
+                          deseq_r1_c_downreg$Trial), unique)
+ggVennDiagram(venn_list, force_upset = TRUE)
+
+```
+
+# Check signature genes
+```{r, fig.height = 12, fig.width = 8}
+
+meta_combined_effects_random_effects <- read_csv2(
+  here(meta_rna_dir, "meta_combined_effects_random_effects.csv")) %>%
+  arrange(TE.random) %>%
+  mutate(Variable = ifelse(Variable == "Gamma_delta_TCR_Yu",
+                           "Gamma_delta_TCRs", Variable))
+
+gene_signatures %>% 
+  filter(Signature %in% gene_signatures_meta_analysis$Signature) %>%
+  left_join(deseq_r1_meta_df %>%
+              rename(Gene = gene)) %>%
+  ggplot(aes(x = factor(Signature,
+                        levels = meta_combined_effects_random_effects$Variable),
+             y = mean_log2fc)) +
+  geom_boxplot() + theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  coord_flip() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "", x = "", y = "Mean Log2FC across trials")
+
+gene_signatures %>% 
+  filter(Signature %in% gene_signatures_meta_analysis$Signature) %>%
+  left_join(deseq_r1_meta_df %>%
+              rename(Gene = gene)) %>%
+  ggplot(aes(x = factor(Signature,
+                        levels = meta_combined_effects_random_effects$Variable),
+             y = median_log2fc)) +
+  geom_boxplot() + theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  coord_flip() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "", x = "", y = "Median Log2FC across trials")
+
+```
+
+# ----------
+
+# Check mean log2fc cutoffs x n genes
+## Response
+
+```{r}
+cutoffs <- seq(0, 2, by = 0.05)
+
+deseq_r1_meta_cutoff_R <- lapply(cutoffs, function(cut) {
+  passed <- deseq_r1_meta_df %>% filter(mean_log2fc >= cut)
+
+  data.frame(
+    cutoff = cut,
+    n_genes = nrow(passed),
+    avg_mean_log2fc = mean(passed$mean_log2fc, na.rm = TRUE)
+  )
+}) %>%
+  bind_rows()
+  
+ggplot(deseq_r1_meta_cutoff_R, aes(x = cutoff, y = n_genes)) +
+  geom_line(size = 1.2, color = "steelblue") +
+  geom_point(aes(color = avg_mean_log2fc), size = 2.5) +
+  scale_color_viridis_c() +
+  labs(
+    x = "mean_log2fc cutoff",
+    y = "Number of genes passing",
+    color = "Avg mean_log2fc",
+    title = "Filtering by mean_log2fc: cutoff vs number of genes"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+## Non response
+
+```{r}
+cutoffs <- seq(0, -2, by = -0.05)
+
+deseq_r1_meta_cutoff_NR <- lapply(cutoffs, function(cut) {
+  passed <- deseq_r1_meta_df %>% filter(mean_log2fc <= cut)
+
+  data.frame(
+    cutoff = cut,
+    n_genes = nrow(passed),
+    avg_mean_log2fc = mean(passed$mean_log2fc, na.rm = TRUE)
+  )
+}) %>%
+  bind_rows()
+  
+ggplot(deseq_r1_meta_cutoff_NR, aes(x = cutoff, y = n_genes)) +
+  geom_line(size = 1.2, color = "steelblue") +
+  geom_point(aes(color = avg_mean_log2fc), size = 2.5) +
+  scale_color_viridis_c() +
+  labs(
+    x = "mean_log2fc cutoff",
+    y = "Number of genes passing",
+    color = "Avg mean_log2fc",
+    title = "Filtering by mean_log2fc: cutoff vs number of genes"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+# ----------
+
+# Define Positive component - Response 1.25 signature
+
+```{r}
+# Not based on mean log2fc only
+# Consistency and Log2FC of genes above cutoff across all (measured, min 4) trials
+deseq_r1_c_upreg_1.25 <- deseq_r1_c %>%
+  left_join(gene_n_trials) %>%
+  filter(log2FoldChange > log2(1.25)) %>%
+  group_by(gene) %>%
+  filter(n() >= n_trials)  %>% # Direction + magnitude consistency must be equal
+  unique() %>%
+  filter(n_trials > 4) %>% # Exclude genes measured in 4 or less 4 trials (only 5,6,7)
+  ungroup() %>%
+  pull(gene) %>%
+  unique()
+
+deseq_r1_c_upreg_1.25
+length(deseq_r1_c_upreg_1.25)
+
+deseq_r1_meta_df %>%
+  filter(gene %in% deseq_r1_c_upreg_1.25)
+
+deseq_r1_meta_df %>%
+  filter(gene %in% deseq_r1_c_upreg_1.25) %>%
+  arrange(-mean_log2fc) %>%
+  write_csv2(here(output_dir, "pancan_response_signature_1.25.csv"))
+
+pancan_response_signature_1.25 <- read_csv2(
+  here(output_dir, "pancan_response_signature_1.25.csv"))
+```
+
+
+```{r}
+gene_descriptions %>%
+  filter(gene %in% deseq_r1_c_upreg_1.25)
+
+gene_descriptions %>%
+  filter(gene %in% deseq_r1_c_upreg_1.25) %>%
+  left_join(deseq_r1_meta_df)
+
+pancan_response_signature_1.25 %>%
+  left_join(gene_descriptions) %>%
+  relocate(cols = "description", .after = "gene") %>%
+  arrange(-mean_log2fc) 
+
+pancan_response_signature_1.25 %>%
+  left_join(gene_descriptions) %>%
+  relocate(cols = "description", .after = "gene") %>%
+  arrange(-mean_log2fc)  %>%
+  view()
+
+pancan_response_signature_1.25 %>%
+  filter(gene %in% breast_tissue_rna_genes$Gene)
+pancan_response_signature_1.25 %>%
+  filter(gene %in% intestine_tissue_enriched$Gene)
+pancan_response_signature_1.25 %>%
+  filter(gene %in% skin_tissue_enriched$Gene)
+pancan_response_signature_1.25 %>%
+  filter(gene %in% urinary_tissue_enriched$Gene)
+pancan_response_signature_1.25 %>%
+  filter(gene %in% lymphoid_tissue_enriched$Gene)
+
+```
+
+# Define negative component - Non-Response 1.25 signature
+
+```{r}
+# Not based on mean log2fc only
+# Consistency and Log2FC of genes above cutoff across all (measured, min 4) trials
+deseq_r1_c_downreg_1.25 <- deseq_r1_c %>%
+  left_join(gene_n_trials) %>%
+  filter(log2FoldChange < -log2(1.25)) %>%
+  group_by(gene) %>%
+  filter(n() >= n_trials)  %>%
+  unique() %>%
+  filter(n_trials > 4) %>%
+  ungroup() %>%
+  pull(gene) %>%
+  unique()
+
+deseq_r1_c_downreg_1.25
+length(deseq_r1_c_downreg_1.25)
+
+deseq_r1_meta_df %>%
+  filter(gene %in% deseq_r1_c_downreg_1.25)
+
+deseq_r1_meta_df %>%
+  filter(gene %in% deseq_r1_c_downreg_1.25) %>%
+  write_csv2(here(output_dir, "pancan_nonresponse_signature_1.25.csv"))
+
+pancan_nonresponse_signature_1.25 <- read_csv2(
+  here(output_dir, "pancan_nonresponse_signature_1.25.csv"))
+```
+
+
+```{r}
+gene_descriptions %>%
+  filter(gene %in% deseq_r1_c_downreg_1.25)
+
+gene_descriptions %>%
+  filter(gene %in% deseq_r1_c_downreg_1.25) %>%
+  left_join(deseq_r1_meta_df)
+
+deseq_r1_meta_df %>%
+  filter(gene %in% deseq_r1_c_downreg_1.25) %>%
+  left_join(gene_descriptions) %>%
+  relocate(cols = "description", .after = "gene")
+
+deseq_r1_meta_df %>%
+  filter(gene %in% deseq_r1_c_downreg_1.25) %>%
+  left_join(gene_descriptions) %>%
+  relocate(cols = "description", .after = "gene") %>% view()
+
+pancan_nonresponse_signature_1.25 %>%
+  filter(gene %in% breast_tissue_rna_genes$Gene)
+pancan_nonresponse_signature_1.25 %>%
+  filter(gene %in% intestine_tissue_enriched$Gene)
+pancan_nonresponse_signature_1.25 %>%
+  filter(gene %in% skin_tissue_enriched$Gene)
+pancan_nonresponse_signature_1.25 %>%
+  filter(gene %in% urinary_tissue_enriched$Gene)
+pancan_nonresponse_signature_1.25 %>%
+  filter(gene %in% lymphoid_tissue_enriched$Gene)
+
+```
+
+# Cross check signatures
+```{r}
+gene_signatures %>% factor_summary()
+gene_signatures %>%
+  filter(!Signature %in% c("pancancer_response_sig_1.25")) %>%
+  filter(Gene %in% pancan_response_signature_1.25$gene)
+
+gene_signatures %>%
+  filter(!Signature %in% c("pancan_nonresponse_signature_1.25")) %>%
+  filter(Gene %in% pancan_nonresponse_signature_1.25$gene )
+
+```
+
+## Enrichr
+
+```{r}
+dbs <- c("GO_Biological_Process_2021",
+         "Reactome_2022", "GO_Biological_Process_2025",
+         "KEGG_2026", "Reactome_Pathways_2024")
+```
+
+## Enrichr signatures
+
+```{r}
+deseq_r1_meta_df %>%
+  filter(gene %in% pancan_response_signature_1.25$gene) %>%
+  dim()
+
+deseq_r1_meta_df %>%
+  filter(gene %in% pancan_response_signature_1.25$gene) %>%
+  filter(!str_detect(gene, "ENSG")) %>%
+  dim()
+
+run_enrichr(
+  pancan_response_signature_1.25 %>%
+    filter(!str_detect(gene, "ENSG")),
+    dbs, "deseq_r1_c_upreg_1.25_symbol.rds")
+```
+
+```{r}
+deseq_r1_meta_df %>%
+  filter(gene %in% pancan_nonresponse_signature_1.25$gene) %>%
+  dim()
+
+deseq_r1_meta_df %>%
+  filter(gene %in% pancan_nonresponse_signature_1.25$gene) %>%
+  filter(!str_detect(gene, "ENSG")) %>%
+  dim()
+
+run_enrichr(
+  pancan_nonresponse_signature_1.25 %>%
+    filter(!str_detect(gene, "ENSG")),
+    dbs, "deseq_r1_c_downreg_1.25_symbol.rds")
+```
+
+# ----------
+
+# Plot log2FC over consistent directions
+
+```{r, fig.height = 40, fig.width = 10}
+deseq_r1_c %>%
+  filter(gene %in% deseq_r1_consistent_upreg$gene) %>%
+  left_join(deseq_r1_consistent_upreg %>%
+              select(gene, n_responder_enrichment,
+                     n_nresponder_enrichment, mean_log2fc)) %>%
+  ggplot(aes(x = reorder(gene, mean_log2fc),
+             y = log2FoldChange, col = Trial)) +
+  geom_point() + geom_hline(yintercept = 0) +
+  theme_Publication() + coord_flip() +
+  scale_color_manual(values = trial_colors_combined)
+```
+
+```{r, fig.height = 30, fig.width = 10}
+deseq_r1_c %>%
+  filter(gene %in% deseq_r1_consistent_upreg_f$gene)  %>%
+  left_join(deseq_r1_consistent_upreg_f %>%
+              select(gene, n_responder_enrichment,
+                     n_nresponder_enrichment, mean_log2fc))%>%
+  ggplot(aes(x = reorder(gene, mean_log2fc),
+             y = log2FoldChange, col = Trial)) +
+  geom_point() + geom_hline(yintercept = 0) +
+  theme_Publication() + coord_flip()+
+  scale_color_manual(values = trial_colors_combined)
+```
+
+```{r, fig.height = 40, fig.width = 10}
+deseq_r1_c %>%
+  filter(gene %in% deseq_r1_consistent_downreg$gene) %>%
+  left_join(deseq_r1_consistent_downreg %>%
+              select(gene, n_responder_enrichment,
+                     n_nresponder_enrichment, mean_log2fc)) %>%
+  ggplot(aes(x = reorder(gene, mean_log2fc),
+             y = log2FoldChange, col = Trial)) +
+  geom_point() + geom_hline(yintercept = 0) +
+  theme_Publication() + coord_flip()+
+  scale_color_manual(values = trial_colors_combined)
+
+```
+
+```{r, fig.height = 40, fig.width = 10}
+deseq_r1_c %>%
+  filter(gene %in% deseq_r1_consistent_downreg_f$gene) %>%
+  left_join(deseq_r1_consistent_downreg_f %>%
+              select(gene, n_responder_enrichment,
+                     n_nresponder_enrichment, mean_log2fc)) %>%
+  ggplot(aes(x = reorder(gene, mean_log2fc), y = log2FoldChange, col = Trial)) +
+  geom_point() + geom_hline(yintercept = 0) +
+  theme_Publication() + coord_flip()+
+  scale_color_manual(values = trial_colors_combined)
+
+```
+
+## Visualize signatures
+
+```{r, fig.height = 8, fig.width = 8}
+
+deseq_r1_c %>%
+  filter(gene %in% pancan_response_signature_1.25$gene) %>%
+  left_join(deseq_r1_meta_df %>%
+              select(gene, n_responder_enrichment,
+                     n_nresponder_enrichment, mean_log2fc)) %>%
+  ggplot(aes(x = reorder(gene, mean_log2fc),
+             y = log2FoldChange, col = Trial)) +
+  geom_point() +
+  geom_point(aes(x = gene, y = mean_log2fc, col = "black"),
+             shape = 5,
+             data = deseq_r1_meta_df %>%
+               filter(gene %in% pancan_response_signature_1.25$gene)) +
+  geom_hline(yintercept = 0) +
+  theme_Publication() + coord_flip() +
+  scale_color_manual(values = trial_colors_combined) +
+  geom_hline(yintercept = log2(1.25), linetype = "dashed") +
+  labs(x = "")
+```
+
+```{r, fig.height = 8, fig.width = 8}
+pancan_nonresponse_signature_1.25
+deseq_r1_c %>%
+  filter(gene %in% pancan_nonresponse_signature_1.25$gene) %>%
+  left_join(deseq_r1_meta_df %>%
+              select(gene, n_responder_enrichment,
+                     n_nresponder_enrichment, mean_log2fc)) %>%
+  ggplot(aes(x = reorder(gene, mean_log2fc),
+             y = log2FoldChange, col = Trial)) +
+  geom_point() +
+  geom_point(aes(x = gene, y = mean_log2fc, col = "black"),
+             shape = 5,
+             data = deseq_r1_meta_df %>%
+               filter(gene %in% pancan_nonresponse_signature_1.25$gene)) +
+  geom_hline(yintercept = 0) +
+  theme_Publication() + coord_flip() +
+  scale_color_manual(values = trial_colors_combined) +
+  geom_hline(yintercept = -log2(1.25), linetype = "dashed") +
+  labs(x = "")
+```
+
+# ----------
+
+# Lint script
+
+```{r}
+# lint("~/NKI_pancancer_neoadj_io/src/differential_expression_meta.Rmd")
+lint(
+  filename = "~/NKI_pancancer_neoadj_io/src/differential_expression_meta.Rmd",
+  linters = unused_import_linter()
+)
+```
+
+# ----------
+
+# sessionInfo - Package Versions
+
+```{r sessionInfo}
+sessionInfo()
+```

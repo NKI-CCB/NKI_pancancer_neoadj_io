@@ -1,0 +1,12 @@
+## hla pipeline / neo antigens
+
+include: "rules/common.smk"
+include: "rules/mapping.smk"
+include: "rules/hla_la.smk"
+include: "rules/annotate.smk"
+include: "rules/mhc.smk"
+
+rule all:
+    input:
+        output_rules_neoantigen()
+

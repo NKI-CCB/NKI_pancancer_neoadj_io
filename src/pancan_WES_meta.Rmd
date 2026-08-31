@@ -13,7 +13,8 @@ params:
   filter_and_parse_vcfs: FALSE
   exclude_niche_msi: TRUE
   run_meta_analysis: TRUE
-
+  response_definition: "Original" # MPR pCR
+  exclude_monotherapy: FALSE
 ---
 
 Author comment:
@@ -42,6 +43,9 @@ library(VariantAnnotation)
 library(ggpubr)
 library(paletteer)
 library(meta)
+library(ggrepel)
+library(export)
+library(lintr)
 library(forestplot)
 MakeDataFrameFromVCF <- getFromNamespace("MakeDataFrameFromVCF", "ICAMS")
 
@@ -54,8 +58,17 @@ here <- here::here
 # Setup output folder
 
 ```{r Setup output, echo = FALSE, include = FALSE}
+print(params)
+
 export <- params$export
-filter_and_parse_vcfs <- params$filter_and_parse_vcfs
+response_definition <- params$response_definition
+
+# overwrite clinical exclusion in case of MPR/pCR response
+exclude_clinical_response <- params$exclude_clinical_response
+if (params$response_definition %in% c("MPR", "pCR")) {
+  exclude_clinical_response <- TRUE
+}
+exclude_monotherapy <- params$exclude_monotherapy
 
 # generate output directory
 wes_dir <- here("data", "processed", "WES_analysis")
@@ -64,12 +77,12 @@ output_dir <- here("data", "processed", params$output_dir)
 wes_meta_dir <- output_dir
 
 print(output_dir)
+print(exclude_clinical_response)
+print(response_definition)
 
 # if output_dir does not exist, create it
 if (!dir.exists(output_dir)) {
     dir.create(output_dir)
-    dir.create(here(output_dir, "pathway_proportions"))
-    
     } else {
   print("Output folder already exists")
 }
@@ -108,10 +121,6 @@ Color_R <- "#00BA38" # "#619CFF"
 Color_NA <- "#CD9600"
 Color_Pre <- "#619CFF"
 Color_Post <- "#F564E3"
-Color_Depleted <- "#7CAE00"
-Color_Fibrotic <- "#00BFC4"
-Color_Inflamed_fibrotic <- "#C77CFF"
-Color_Inflamed_non_fibrotic <- "#F8766D"
 Color_HNSCC <- "#009292"
 Color_CSCC <- "#CD9600"
 Color_Urothelial <- "#B66DFF"
@@ -146,17 +155,17 @@ trial_colors <- c(BELLINI = Color_BELLINI, IMCISION = Color_IMCISION,
             `NICHE-MSS` = Color_NICHE_MSS, `NICHE-MSI` = Color_NICHE_MSI,
             OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO)
 
-trial_colors_combined <- c(Combined = "#999999", BELLINI = Color_BELLINI, IMCISION = Color_IMCISION,
+trial_colors_combined <- c(Combined = "#999999", BELLINI = Color_BELLINI,
+                           IMCISION = Color_IMCISION,
             MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
             `NICHE-MSS` = Color_Colon_MSS, `NICHE-MSI` = Color_NICHE_MSI,
             OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO)
 
-Bagaev_tme_colors <- c(Color_Depleted, Color_Fibrotic,
-                       Color_Inflamed_fibrotic, Color_Inflamed_non_fibrotic)
-
-histology_msi_mss_colors <- c(`Colon-MSI`= Color_Colon_MSI, `Colon-MSS`= Color_Colon_MSS,
+histology_msi_mss_colors <- c(`Colon-MSI`= Color_Colon_MSI,
+                              `Colon-MSS`= Color_Colon_MSS,
                               CSCC = Color_CSCC, HNSCC = Color_HNSCC, 
-                              LN_melanoma = Color_LN_melanoma, TBNC = Color_TNBC,
+                              LN_melanoma = Color_LN_melanoma,
+                              TBNC = Color_TNBC,
                               Urothelial = Color_Urothelial)
 
 ```
@@ -185,6 +194,82 @@ facets_aneuploidy_score_df <- read_csv2(here(wes_dir,
 facets_aneuploidy_score_df <- facets_aneuploidy_score_df %>%
   filter(CF_sample_tumor %in% wes_features_df$CF_sample_tumor)
 
+vaf_summaries_c <- read_csv2(here(wes_dir, "vaf_summaries_c.csv"))
+
+```
+
+
+## Adapt Response Definition
+```{r}
+compare_r_nr_trials <- c("Combined", "Combined_excl_dMMR", "BELLINI",
+                         "IMCISION", "MATISSE", "NABUCCO", "NICHE-MSS",
+                         "OpACIN_neo", "PRADO")
+
+if (params$response_definition %in% c("MPR")) {
+  compare_r_nr_trials <- c("Combined", "Combined_excl_dMMR", "BELLINI",
+                         "IMCISION", "MATISSE", "NABUCCO", "NICHE-MSI",
+                         "NICHE-MSS", "OpACIN_neo", "PRADO")
+}
+
+if (params$response_definition %in% c("pCR")) {
+  compare_r_nr_trials <- c("Combined", "Combined_excl_dMMR", "BELLINI",
+                          "MATISSE", "NABUCCO", "NICHE-MSI", "NICHE-MSS", 
+                         "OpACIN_neo", "PRADO")
+}
+
+patient_metadata_combined <- read_csv2(
+  here("data", "processed", "metadata", "patient_metadata_combined.csv"))
+
+wes_features_df <- wes_features_df %>%
+    mutate(Response_original = Response) %>%
+  left_join(patient_metadata_combined %>%
+              select(Patient, Response_type, Response_pCR, Response_MPR)) %>%
+  mutate(Response_analysis = response_definition,
+         exclude_clinical_response = exclude_clinical_response)
+
+# overwrite clinical exclusion in case of MPR/pCR response
+if (params$response_definition %in% c("MPR", "pCR")) {
+  exclude_clinical_response <- TRUE
+}
+
+# Automatic in case response definition is MPR and pCR
+if (exclude_clinical_response) {
+  wes_features_df <- wes_features_df %>%
+    filter(Response_type == "Pathological")
+}
+
+if (response_definition == "MPR") {
+  wes_features_df <- wes_features_df %>%
+    filter(Response_type == "Pathological") %>%
+    mutate(Response = ifelse(Response_MPR == "MPR", "R", "NR"))
+}
+
+if (response_definition == "pCR") {
+  wes_features_df <- wes_features_df %>%
+    filter(Response_type == "Pathological") %>%
+    mutate(Response = ifelse(Response_pCR == "pCR", "R", "NR"))
+}
+
+if (exclude_monotherapy) {
+  wes_features_df <- wes_features_df %>%
+    filter(Cohort == "Nivo_ipi") 
+}
+
+wes_features_df$Cohort %>% table()
+
+# Sensitivity analysis excluding NICHE2 dMMR MSI samples
+if (params$exclude_niche_msi) {
+  wes_features_df <- wes_features_df %>% filter(!Trial %in% c("NICHE-MSI"))
+}
+
+wes_features_df %>%
+  select(colnames(patient_metadata_combined)[
+    colnames(patient_metadata_combined) %in% colnames(wes_features_df)]) %>%
+  mutate_if(is.character, as.factor) %>% summary()
+
+table(wes_features_df$Trial, wes_features_df$Response)
+
+wes_features_df$Trial %>% table()
 ```
 
 # ----------
@@ -234,7 +319,8 @@ get_trial_smd_estimates <- function(data, trial_list, variable) {
   general_smd_df <- data.frame(matrix(nrow = 0, ncol = 0))
   for (current_trial in trial_list) {
     current_data = data
-    
+    print(current_trial)
+
     if (! current_trial %in% c("Combined", "Combined_excl_dMMR")) {
       current_data <- data %>% filter(Trial == current_trial)
     }
@@ -266,31 +352,57 @@ get_trial_smd_estimates <- function(data, trial_list, variable) {
 
 
 ```{r}
-compare_r_nr_trials <- c("Combined", "Combined_excl_dMMR", "BELLINI",
-                         "IMCISION", "MATISSE", "NABUCCO", "NICHE-MSS",
-                         "OpACIN_neo", "PRADO")
-
 smd_estimates_tmb <- get_trial_smd_estimates(
-  data = n_variants_tmb, trial_list = compare_r_nr_trials, variable = "TMB")
+  data = wes_features_df, trial_list = compare_r_nr_trials, variable = "TMB")
+
+smd_estimates_neoantigens <- get_trial_smd_estimates(
+  data = wes_features_df, trial_list = compare_r_nr_trials,
+  variable = "pvactools_filtered_neoantigen_load")
+
+smd_estimates_clonal_tmb <- get_trial_smd_estimates(
+  data = wes_features_df, trial_list = compare_r_nr_trials,
+  variable = "pyclone_clonal_TMB")
+
+smd_estimates_subclonal_tmb <- get_trial_smd_estimates(
+  data = wes_features_df,
+  trial_list = compare_r_nr_trials,
+  variable = "pyclone_subclonal_TMB")
+
 smd_estimates_aneuploidy_score <- get_trial_smd_estimates(
-  data = facets_aneuploidy_score_df, trial_list = compare_r_nr_trials,
+  data = wes_features_df, trial_list = compare_r_nr_trials,
   variable = "Aneuploidy_score")
+
 smd_estimates_scna_loss <-  get_trial_smd_estimates(
-  data = facets_aneuploidy_score_df, trial_list = compare_r_nr_trials,
+  data = wes_features_df, trial_list = compare_r_nr_trials,
   variable = "scna_loss")
 
 smd_estimates_ploidy <-  get_trial_smd_estimates(
-  data = facets_data_metrics, trial_list = compare_r_nr_trials,
+  data = wes_features_df, trial_list = compare_r_nr_trials,
   variable = "Ploidy")
+
+# smd_estimates_purity <-  get_trial_smd_estimates(
+#   data = facets_data_metrics, trial_list = compare_r_nr_trials,
+#   variable = "Purity")
+
+wes_features_df %>%
+  mutate(Purity = ifelse((is.na(Purity) & ! is.na(Imputed_purity)),
+    Imputed_purity, Purity)) %>%
+              select(c(Purity, Trial, mean_VAF, median_VAF,
+                     diploid_VAF_Variants, diploid_mean_VAF,
+                     diploid_median_VAF, Imputed_purity, Purity_flag)) %>% view()
+
 smd_estimates_purity <-  get_trial_smd_estimates(
-  data = facets_data_metrics, trial_list = compare_r_nr_trials,
+  data = wes_features_df %>%
+  mutate(Purity = ifelse((is.na(Purity) & ! is.na(Imputed_purity)),
+    Imputed_purity, Purity)), trial_list = compare_r_nr_trials,
   variable = "Purity")
 
 smd_estimates_wgII <-  get_trial_smd_estimates(
-  data = facets_aneuploidy_score_df, trial_list = compare_r_nr_trials,
+  data = wes_features_df, trial_list = compare_r_nr_trials,
   variable = "wgII_0.6_bases")
+
 smd_estimates_frameshift <-  get_trial_smd_estimates(
-  data = n_variants_tmb, trial_list = compare_r_nr_trials,
+  data = wes_features_df, trial_list = compare_r_nr_trials,
   variable = "TMB_frameshift")
 
 # Cosmic
@@ -301,6 +413,8 @@ smd_estimates_cosmic_dmmr <- get_trial_smd_estimates(
 smd_estimates_cosmic_apobec <- get_trial_smd_estimates(
   data = wes_features_df, trial_list = compare_r_nr_trials,
   variable = "APOBEC_abs")
+
+wes_features_df %>% filter(Trial == "NICHE-MSI") %>% select(HRD_abs) %>% summary()
 
 smd_estimates_cosmic_hrd <- get_trial_smd_estimates(
   data = wes_features_df, trial_list = compare_r_nr_trials,
@@ -334,6 +448,15 @@ smd_estimates_cosmic_hrd %>%
 smd_estimates_cosmic_uv %>%
   write_csv2(here(output_dir, "smd_estimates_cosmic_uv.csv"))
 
+smd_estimates_clonal_tmb %>%
+  write_csv2(here(output_dir, "smd_estimates_clonal_tmb.csv"))
+
+smd_estimates_subclonal_tmb %>%
+  write_csv2(here(output_dir, "smd_estimates_subclonal_tmb.csv"))
+
+smd_estimates_neoantigens %>%
+  write_csv2(here(output_dir, "smd_estimates_neoantigens.csv"))
+
 combined_wes_smd <- smd_estimates_tmb %>%
   rbind(smd_estimates_aneuploidy_score) %>%
   rbind(smd_estimates_scna_loss) %>%
@@ -344,7 +467,10 @@ combined_wes_smd <- smd_estimates_tmb %>%
   rbind(smd_estimates_cosmic_uv) %>%
   rbind(smd_estimates_cosmic_dmmr) %>%
   rbind(smd_estimates_wgII) %>%
-  rbind(smd_estimates_frameshift)
+  rbind(smd_estimates_frameshift) %>%
+  rbind(smd_estimates_clonal_tmb) %>%
+  rbind(smd_estimates_subclonal_tmb) %>%
+  rbind(smd_estimates_neoantigens)
 
 combined_wes_smd <- combined_wes_smd %>%
   mutate(effect_size_cohens_d = effect_size) %>%
@@ -359,11 +485,15 @@ combined_wes_smd <- combined_wes_smd %>%
 combined_wes_smd %>% write_csv2(here(output_dir, "combined_wes_smd.csv"))
 combined_wes_smd <- read_csv2(here(output_dir, "combined_wes_smd.csv"))
 
+compare_r_nr_trials
 combined_wes_smd$Trial <- factor(
-  combined_wes_smd$Trial, c("Combined", "Combined_excl_dMMR", "BELLINI",
-                            "IMCISION", "MATISSE", "NABUCCO", "NICHE-MSS",
-                            "OpACIN_neo", "PRADO"))
+  combined_wes_smd$Trial, compare_r_nr_trials)
 
+# c("Combined", "Combined_excl_dMMR", "BELLINI",
+                            # "IMCISION", "MATISSE", "NABUCCO", "NICHE-MSS",
+                            # "OpACIN_neo", "PRADO")
+
+# Not resuts from meta-analysis call - individual SMD estimates
 combined_wes_smd %>%
   mutate(label = cut(
     p.value,
@@ -374,7 +504,10 @@ combined_wes_smd %>%
     x = Trial,
     y = factor(
       variable, levels = rev(
-        c("TMB", "TMB_frameshift", "UV_abs", "dMMR_abs", "APOBEC_abs",
+        c("TMB", "pyclone_clonal_TMB", "pyclone_subclonal_TMB",
+          "pvactools_filtered_neoantigen_load", "TMB_frameshift",
+          "UV_abs",
+          "dMMR_abs", "APOBEC_abs",
           "HRD_abs", "Aneuploidy_score", "wgII_0.6_bases", "Ploidy",
           "scna_loss", "Purity"))),
     fill = effect_size,
@@ -390,11 +523,14 @@ combined_wes_smd %>%
   theme(legend.position = "right", legend.direction = "vertical") +
   theme(legend.key.size = unit(0.75, 'cm')) +
   labs(x = "")
+
 ggsave(here(output_dir, "combined_wes_smd.png"), width = 7, height = 4)
 ```
 
 # WES SMD meta_analysis
 ```{r, fig.height = 8, fig.width = 12}
+safe_extract <- function(x) ifelse(is.null(x), NA, x)
+
 run_smd_meta_analysis <- function(meta_analysis_df, variable_list,
                                   output_suffix, print_plot = TRUE,
                                   save_plot = TRUE) {
@@ -434,7 +570,7 @@ run_smd_meta_analysis <- function(meta_analysis_df, variable_list,
       null.effect = meta_analysis_res$null.effect, 
       k = meta_analysis_res$k,
       method = meta_analysis_res$method,
-      TE.random = meta_analysis_res$TE.random,
+      TE.random = meta_analysis_res$TE.random, # Random-effects model
       seTE.random = meta_analysis_res$seTE.random,
       statistic.random = meta_analysis_res$statistic.random,
       pval.random = meta_analysis_res$pval.random,
@@ -444,7 +580,26 @@ run_smd_meta_analysis <- function(meta_analysis_df, variable_list,
       upper.random = meta_analysis_res$upper.random,
       level.predict = meta_analysis_res$level.predict,
       lower.predict = meta_analysis_res$lower.predict,
-      upper.predict = meta_analysis_res$upper.predict
+      upper.predict = meta_analysis_res$upper.predict,
+      upper.predict = meta_analysis_res$upper.predict,
+      method.tau = meta_analysis_res$method.tau,
+      hakn = meta_analysis_res$hakn,
+      TE.fixed = meta_analysis_res$TE.fixed, # Fixed-effect model (optional)
+      seTE.fixed = meta_analysis_res$seTE.fixed,
+      lower.fixed = meta_analysis_res$lower.fixed,
+      upper.fixed = meta_analysis_res$upper.fixed,
+      pval.fixed = meta_analysis_res$pval.fixed,
+      Q = meta_analysis_res$Q, # Heterogeneity
+      df.Q = meta_analysis_res$df.Q,
+      pval.Q = meta_analysis_res$pval.Q,
+      tau = meta_analysis_res$tau,
+      tau2 = meta_analysis_res$tau^2,
+      H = meta_analysis_res$H,
+      H.lower = safe_extract(meta_analysis_res$H.lower),
+      H.upper = safe_extract(meta_analysis_res$H.upper),
+      I2 = meta_analysis_res$I2,
+      I2.lower = safe_extract(meta_analysis_res$I2.lower),
+      I2.upper = safe_extract(meta_analysis_res$I2.upper)
     )
     
     meta_analysis_signature_results <- as.data.frame(meta_analysis_res) %>%
@@ -555,7 +710,9 @@ meta_combined_effects_random_effects %>%
   mutate_at(.vars = c("TE.random", "lower.random", "upper.random"),
             .funs = function(x){round(x, digits = 3)}) %>% view()
 
-variable_order <- c("TMB", "APOBEC_abs", "UV_abs", "HRD_abs", "dMMR_abs",
+variable_order <- c("TMB", "pvactools_filtered_neoantigen_load",
+                    "pyclone_clonal_TMB", "pyclone_subclonal_TMB", 
+                    "APOBEC_abs", "UV_abs", "HRD_abs", "dMMR_abs",
                     "TMB_frameshift", "wgII_0.6_bases", 
                              "Aneuploidy_score", "Ploidy", "scna_loss",
                              "Purity")
@@ -573,6 +730,25 @@ meta_combined_effects_random_effects_f %>%
 
 ggsave(here(output_dir, "meta_combined_effects_random_effects_f.png"),
     height = 4, width = 5)
+```
+
+
+```{r, fig.width = 10, fig.height = 6}
+meta_combined_effects_random_effects_f %>%
+  ggplot(aes(x = factor(
+    Variable, levels = rev(c(variable_order))),
+    y = TE.random)) +
+  geom_point(aes(size = -log10(pval.random)), shape = 22, fill = "darkgrey") +
+  theme_Publication() +
+  coord_flip() + geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_errorbar(aes(ymin = lower.random, ymax = upper.random), width=.2) +
+  labs(x = "", y = "Meta-analysis SMD (95% CI)") +
+  guides(size = guide_legend(nrow = 3)) +
+  geom_text(
+    aes(label = pval.random, y = 0.75, hjust = 0),
+    data = meta_combined_effects_random_effects %>%
+      mutate(pval.random = sprintf("P = %s", FormatDecimals(pval.random))))
+
 ```
 
 ```{r}
@@ -597,9 +773,7 @@ meta_studies_results_smd_all %>%
     labels = c("***", "**", "*", "")
   ))  %>%
   ggplot(aes(
-    x = factor(studlab, levels = c("Combined", "Combined_excl_dMMR", "BELLINI",
-                                   "IMCISION", "MATISSE", "NABUCCO",
-                                   "NICHE-MSS", "OpACIN_neo", "PRADO")),
+    x = factor(studlab, levels = compare_r_nr_trials),
     y = factor(
       Variable, levels = rev(
         c(variable_order))),
@@ -644,6 +818,28 @@ test %>%
   geom_point() + theme_Publication() +
   geom_abline(slope = 1, intercept = 0) +
   guides(shape = guide_legend(nrow = 4), col = guide_legend(nrow = 4))
+
+```
+
+```{r}
+meta_combined_effects_random_effects_f <- meta_combined_effects_random_effects %>%
+  mutate(meta_FDR = p.adjust(pval.random, method = "BH")) %>%
+  arrange(TE.random)
+
+meta_combined_effects_random_effects_f %>%
+  ggplot(aes(x = pval.random, y = meta_FDR)) +
+  geom_point() + theme_Publication()
+
+meta_combined_effects_random_effects_f %>%
+  filter(meta_FDR < 0.05) %>%
+  ggplot(aes(x = pval.random, y = meta_FDR)) +
+  geom_point() + theme_Publication()
+
+meta_combined_effects_random_effects_f %>%
+  arrange(-TE.random) %>% 
+  select(Variable, pval.random, meta_FDR) %>%
+  mutate(pval.random = round(pval.random, 2)) %>%
+  mutate(meta_FDR = round(meta_FDR, 2))
 
 ```
 
@@ -744,7 +940,7 @@ colnames(pathway_level_mutation_df)[str_detect(colnames(pathway_level_mutation_d
 feature_odds_ratio_list <- c("RAS_RAF", "BRCA1_2",
                       "TP53", "GIE_AP", "GIE_IFNy", "SIGPW_Cell_cycle",
                       "SIGPW_Wnt_B_Cat",  "SIGPW_TGFB_signaling",
-                      "SIGPW_PI3K_signaling")
+                      "SIGPW_PI3K_signaling", "HLA_alteration")
 
 table(pathway_level_mutation_df$SETDB1)
 table(pathway_level_mutation_df$CD58)
@@ -755,14 +951,19 @@ table(pathway_level_mutation_df$SIGPW_TP53)
 table(pathway_level_mutation_df$SIGPW_RTK_RAS)
 table(pathway_level_mutation_df$SIGPW_Wnt_B_Cat)
 
-wes_features_log_or <- pathway_level_mutation_df %>%
+wes_features_log_or <- wes_features_df %>%
+  mutate(HLA_alteration = ifelse(HLA_grouped %in% c("HLA-LOH", "HLA-DEL"),
+                                 "HLA-Altered", HLA_grouped)) %>%
+  mutate(HLA_alteration = HLA_alteration == "HLA-Altered") %>%
+  mutate(ploidy_WGD = ploidy_WGD == "WGD") %>%
   mutate(JAK1_JAK2 = JAK1 | JAK2,
          RAS_RAF = BRAF | KRAS | NRAS | HRAS,
          BRCA1_2 = BRCA1 | BRCA2
-         ) %>%
-  left_join(facets_data_metrics %>%
-  select(CF_sample_tumor, ploidy_WGD, Ploidy) %>%
-  mutate(ploidy_WGD = ploidy_WGD == "WGD"))
+         )
+
+table(wes_features_log_or$HLA_grouped, wes_features_log_or$HLA_alteration)
+
+table(wes_features_log_or$HLA_alteration)
 
 table(wes_features_log_or$B2M)
 table(wes_features_log_or$JAK1_JAK2)
@@ -919,7 +1120,7 @@ run_or_meta_analysis <- function(meta_analysis_df, variable_list, output_suffix,
         null.effect = meta_analysis_res$null.effect, 
         k = meta_analysis_res$k,
         method = meta_analysis_res$method,
-        TE.random = meta_analysis_res$TE.random,
+        TE.random = meta_analysis_res$TE.random, # Random-effects model
         seTE.random = meta_analysis_res$seTE.random,
         statistic.random = meta_analysis_res$statistic.random,
         pval.random = meta_analysis_res$pval.random,
@@ -929,7 +1130,25 @@ run_or_meta_analysis <- function(meta_analysis_df, variable_list, output_suffix,
         upper.random = meta_analysis_res$upper.random,
         level.predict = meta_analysis_res$level.predict,
         lower.predict = meta_analysis_res$lower.predict,
-        upper.predict = meta_analysis_res$upper.predict
+        upper.predict = meta_analysis_res$upper.predict,
+        method.tau = meta_analysis_res$method.tau,
+        hakn = meta_analysis_res$hakn,
+        TE.fixed = meta_analysis_res$TE.fixed, # Fixed-effect model (optional)
+        seTE.fixed = meta_analysis_res$seTE.fixed,
+        lower.fixed = meta_analysis_res$lower.fixed,
+        upper.fixed = meta_analysis_res$upper.fixed,
+        pval.fixed = meta_analysis_res$pval.fixed,
+        Q = meta_analysis_res$Q, # Heterogeneity
+        df.Q = meta_analysis_res$df.Q,
+        pval.Q = meta_analysis_res$pval.Q,
+        tau = meta_analysis_res$tau,
+        tau2 = meta_analysis_res$tau^2,
+        H = meta_analysis_res$H,
+        H.lower = safe_extract(meta_analysis_res$H.lower),
+        H.upper = safe_extract(meta_analysis_res$H.upper),
+        I2 = meta_analysis_res$I2,
+        I2.lower = safe_extract(meta_analysis_res$I2.lower),
+        I2.upper = safe_extract(meta_analysis_res$I2.upper)
       )
       
       meta_log_or_results <- meta_log_or_results %>%
@@ -994,23 +1213,32 @@ meta_log_or_studies_results_combine <- read_csv2(
     here(output_dir, "meta_log_or_results_combined.csv"))
 
 meta_log_or_studies_results_combined_excl_dMMR <- read_csv2(
-    here(output_dir, "meta_log_or_results_combined_excl_dMMR.csv"))
+    here(output_dir, "meta_log_or_results_combined_excl_dmmr.csv"))
 
 meta_log_or_studies_results_random_effects <- read_csv2(
   here(output_dir, "meta_log_or_results_random_effects.csv"))
 
 meta_log_or_combined_effects_random_effects <- read_csv2(
-  here(output_dir, "meta_log_or_combined_effects_random_effects.csv"))
+  here(output_dir, "meta_log_or_combined_effects_random_effects.csv")) %>%
+  mutate(Variable = feature)
 
 meta_studies_results_or_all <- meta_log_or_studies_results_random_effects %>%
   full_join(meta_log_or_studies_results_combined_excl_dMMR) %>%
-  full_join(meta_log_or_studies_results_combine)
+  full_join(meta_log_or_studies_results_combine) %>%
+  mutate(Variable = feature)
 
-meta_studies_results_or_all %>% write_csv2(here(output_dir, "meta_studies_results_or_all.csv"))
+meta_studies_results_or_all %>%
+  write_csv2(here(output_dir, "meta_studies_results_or_all.csv"))
 
+meta_studies_results_or_all <- read_csv2(
+  here(output_dir, "meta_studies_results_or_all.csv"))
 ```
 
 ```{r}
+log_or_variable_order <- c("GIE_AP", "TP53", "BRCA1_2", "SIGPW_Wnt_B_Cat",
+                           "SIGPW_PI3K_signaling", "SIGPW_Cell_cycle",
+                           "SIGPW_TGFB_signaling", "GIE_IFNy", "RAS_RAF",
+                           "HLA_alteration")
 trial_odds_ratio_df %>%
   mutate(label = cut(
     p.value,
@@ -1019,11 +1247,9 @@ trial_odds_ratio_df %>%
   )) %>%
   # filter(gene %in% meta_combined_effects_random_effects_f$gene) %>% 
   ggplot(aes(x = factor(Trial,
-                        c("Combined", "Combined_excl_dMMR", "BELLINI",
-                          "IMCISION", "MATISSE",
-                          "NABUCCO", "NICHE-MSS", "OpACIN_neo", "PRADO")),
+                        compare_r_nr_trials),
              y = factor(feature,
-                        unique(meta_log_or_studies_results_random_effects$feature)),
+                        levels = rev(log_or_variable_order)),
              fill = log_or, 
              label = label)) +
   geom_tile() +
@@ -1044,11 +1270,9 @@ meta_studies_results_or_all %>%
   )) %>%
   # filter(gene %in% meta_combined_effects_random_effects_f$gene) %>% 
   ggplot(aes(x = factor(studlab,
-                        c("Combined", "Combined_excl_dMMR", "BELLINI",
-                          "IMCISION", "MATISSE",
-                          "NABUCCO", "NICHE-MSS", "OpACIN_neo", "PRADO")),
+                        compare_r_nr_trials),
              y = factor(feature,
-                        meta_log_or_combined_effects_random_effects$feature),
+                        levels = rev(log_or_variable_order)),
              fill = TE, 
              label = label)) +
   geom_tile() +
@@ -1066,13 +1290,10 @@ ggsave(here(output_dir, "response_log_or_combined_effects.png"),
        height = 10, width = 8)
 ```
 
-```{r}
+```{r, fig.width = 9, fig.height = 4.5}
 meta_log_or_combined_effects_random_effects %>%
   arrange(-TE.random) %>%
   pull(feature)
-log_or_variable_order <- c("GIE_AP", "TP53", "BRCA1_2", "SIGPW_Wnt_B_Cat",
-                           "SIGPW_PI3K_signaling", "SIGPW_Cell_cycle",
-                           "SIGPW_TGFB_signaling", "GIE_IFNy", "RAS_RAF")
 
 meta_log_or_combined_effects_random_effects  %>%
   ggplot(aes(x = factor(feature, levels = rev(log_or_variable_order)),
@@ -1089,6 +1310,150 @@ meta_log_or_combined_effects_random_effects  %>%
     data = meta_log_or_combined_effects_random_effects %>%
       mutate(pval.random = sprintf("P = %s", FormatDecimals(pval.random))))
 ```
+
+
+# Combine OR and SMD WES
+
+```{r}
+meta_combined_effects_random_effects_wes <- meta_combined_effects_random_effects %>%
+  arrange(TE.random) %>%
+  full_join(meta_log_or_combined_effects_random_effects %>%
+              select(-feature) %>%
+  arrange(TE.random))
+
+# "subclonal_TMB"
+order_variables <- c("TMB", "clonal_TMB", "clonal_TMB_fraction", 
+                     "APOBEC_abs", "UV_abs", "dMMR_abs",
+  "TMB_frameshift", "HRD_abs", "Ploidy",
+  "Aneuploidy_score", "wgII_0.6_bases",
+  "scna_loss", "Purity", "GIE_AP", "TP53", "BRCA1_2", "SIGPW_Wnt_B_Cat",
+  "SIGPW_PI3K_signaling", "SIGPW_Cell_cycle",
+  "SIGPW_TGFB_signaling", "GIE_IFNy", "RAS_RAF", "HLA_alteration")
+
+colnames(meta_combined_effects_random_effects)[!colnames(meta_combined_effects_random_effects) %in% colnames(meta_log_or_combined_effects_random_effects)]
+colnames(meta_log_or_combined_effects_random_effects)[!colnames(meta_log_or_combined_effects_random_effects) %in% colnames(meta_combined_effects_random_effects)]
+
+meta_combined_effects_random_effects_wes <- meta_combined_effects_random_effects_wes %>%
+  mutate(meta_FDR = p.adjust(pval.random, method = "BH"))
+
+meta_combined_effects_random_effects_wes %>%
+  ggplot(aes(x = pval.random, y = meta_FDR)) +
+  geom_point() + theme_Publication()
+
+meta_combined_effects_random_effects_wes %>%
+  filter(meta_FDR < 0.05) %>%
+  ggplot(aes(x = pval.random, y = meta_FDR)) +
+  geom_point() + theme_Publication()
+
+meta_combined_effects_random_effects_wes %>%
+  arrange(-TE.random) %>% 
+  select(Variable, pval.random, meta_FDR) %>%
+  mutate(pval.random = round(pval.random, 2)) %>%
+  mutate(meta_FDR = round(meta_FDR, 2))
+```
+
+## Heterogeneity statistics
+```{r}
+meta_combined_effects_random_effects_wes %>%
+  ggplot(aes(x = TE.random, y = TE.fixed)) + geom_point() +
+  theme_Publication() + geom_abline(slope = 1, intercept = 0)
+
+meta_combined_effects_random_effects_wes %>%
+  ggplot(aes(x = Q, y = -log10(pval.Q))) + geom_point() +
+  theme_Publication() +
+  geom_hline(yintercept = -log10(0.05)) +
+  geom_text_repel(aes(x = Q, y = -log10(pval.Q), label = Variable),
+                  data = meta_combined_effects_random_effects_wes)
+
+meta_combined_effects_random_effects_wes %>%
+  ggplot(aes(x = tau2, y = -log10(pval.Q))) + geom_point() +
+  theme_Publication() +
+  geom_hline(yintercept = -log10(0.05)) +
+  geom_text_repel(aes(x = tau2, y = -log10(pval.Q), label = Variable),
+                  data = meta_combined_effects_random_effects_wes)
+
+meta_combined_effects_random_effects_wes %>%
+  ggplot(aes(x = I2, y = -log10(pval.Q))) + geom_point() +
+  theme_Publication() +
+  geom_hline(yintercept = -log10(0.05)) +
+  geom_text_repel(aes(x = I2, y = -log10(pval.Q), label = Variable),
+                  data = meta_combined_effects_random_effects_wes)
+
+meta_combined_effects_random_effects_wes %>%
+  filter(pval.random < 0.05) %>%
+  ggplot(aes(x = I2, y = -log10(pval.Q))) + geom_point() +
+  theme_Publication() +
+  geom_hline(yintercept = -log10(0.05)) +
+  geom_text_repel(aes(x = I2, y = -log10(pval.Q), label = Variable),
+                  data = meta_combined_effects_random_effects_wes %>%
+  filter(pval.random < 0.05))
+
+meta_combined_effects_random_effects_wes %>%
+  ggplot(aes(x = Q, y = I2)) + geom_point() + theme_Publication() +
+  geom_text_repel(aes(x = Q, y = I2, label = Variable),
+                  data = meta_combined_effects_random_effects_wes)
+
+meta_combined_effects_random_effects_wes %>%
+  ggplot(aes(x = tau2, y = I2)) + geom_point() + theme_Publication() +
+  geom_text_repel(aes(x = tau2, y = I2, label = Variable),
+                  data = meta_combined_effects_random_effects_wes)
+
+meta_combined_effects_random_effects_wes %>%
+  mutate(label = cut(
+    pval.Q,
+    breaks = c(0, 0.001, 0.01, 0.05, 1),
+    labels = c("***", "**", "*", "")
+  ))  %>%
+  ggplot(aes(
+    x = factor("I2"), 
+    y = factor(
+      Variable, levels = rev(order_variables)),
+    fill = I2,
+    label = label)) +
+  geom_tile() +
+  geom_text() +
+  scale_fill_gradient2(low = "#075AFF",
+                       mid = "white",
+                       high = "#FF0000") +
+  theme_Publication() +
+  labs(y = "") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  theme(legend.position = "right", legend.direction = "vertical") +
+  theme(legend.key.size = unit(0.75, 'cm')) +
+  labs(x = "")
+
+ggsave(here(output_dir, "meta_combined_effects_random_effects_het.png"),
+    height = 9, width = 4.5)
+
+heterogeneity_plot <- meta_combined_effects_random_effects_wes %>%
+  mutate(label = cut(
+    pval.Q,
+    breaks = c(0, 0.001, 0.01, 0.05, 1),
+    labels = c("***", "**", "*", "")
+  ))  %>%
+  ggplot(aes(
+    x = factor("I2"), 
+    y = factor(
+      Variable, levels = rev(order_variables)),
+    fill = I2,
+    label = label)) +
+  geom_tile() +
+  geom_text() +
+  scale_fill_gradient2(low = "#075AFF",
+                       mid = "white",
+                       high = "#FF0000") +
+  theme_Publication() +
+  labs(y = "") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  theme(legend.position = "right", legend.direction = "vertical") +
+  theme(legend.key.size = unit(0.75, 'cm')) +
+  labs(x = "")
+
+graph2pdf(heterogeneity_plot,
+          here(output_dir, "meta_combined_effects_random_effects_het.pdf"),
+    height = 9, width = 4.5)
+```
+
 # ----------
 # Lint script
 ```{r}

@@ -1,0 +1,16 @@
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - ensembl-vep=105.0
+  - perl
+  - perl-dbi
+  - perl-dbd-sqlite
+  - perl-json
+  - perl-archive-zip
+  - perl-set-intervaltree
+  - perl-module-build
+  - perl-compress-raw-zlib>=2.201
+  - perl-io-compress
+  - curl
+  - unzip

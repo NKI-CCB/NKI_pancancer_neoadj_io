@@ -1,0 +1,901 @@
+---
+title: "Differential expression"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+params:
+  export: TRUE
+  output_dir: "differential_expression"
+  run_deseq_analysis: TRUE
+  analyze_specific_trial: ""
+  exclude_clinical_response: FALSE
+  response_definition: "Original" # MPR pCR
+
+---
+
+Author comment:
+File description comment:
+The purpose of this script is to perform differential expression analysis
+for neoadjuvant IO samples
+It receives metadata and RNAseq molecular counts as inputs
+Outputting DESeq2 results and volcano plots
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning = FALSE, message = FALSE, dpi = 300, error = TRUE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+```
+
+# Loading Packages
+```{r}
+# Install if necessary install.packages("BiocManager")
+# Install if necessary BiocManager::install("DESeq2")
+source("helper_functions.R")
+library(tidyverse)
+library(ggrepel)
+library(here)
+library(DESeq2)
+library(plotly)
+library(paletteer)
+library(enrichR)
+library(lintr)
+
+set.seed(42)
+
+select <- dplyr::select
+rename <- dplyr::rename
+here <- here::here
+```
+
+# ----------
+
+# Function definitions
+```{r}
+make_dist_heatmap <- function(vsd, annotation_file, annotation_colors,
+                              output_file,
+                             width = 8, height = 8, cutree_cols = NA) {
+
+  sample_dists <- dist(t(assay(vsd)[, rownames(annotation_file)]),
+                       method = "euclidean")
+  sample_dists_m <- as.matrix(sample_dists)
+
+  sample_dist_heatmap <- pheatmap(sample_dists_m,
+           annotation_col = annotation_file,
+           col = paletteer_d(palette = "RColorBrewer::RdYlBu", direction = -1),
+           clustering_distance_rows = sample_dists,
+           clustering_distance_cols = sample_dists,
+           show_colnames = FALSE,
+           fontsize_col = 7,
+           show_rownames = TRUE,
+           cutree_cols = cutree_cols,
+           annotation_colors = annotation_colors
+           )
+
+  save_pheatmap_pdf(x = sample_dist_heatmap,
+                    filename = here(
+                      output_dir, output_file),
+                    width = width, height = height)
+}
+
+# Volcano plot function with nominal p-values
+make_volcano_plot <- function(
+  dataset, output_filename, alpha_threshold = 0.01, log2fcthresh = 1,
+  export = TRUE, width = 6, height = 4) {
+
+   dataset <- dataset %>% mutate(
+  within_threshold = (pvalue < alpha_threshold &
+                        abs(log2FoldChange) > log2fcthresh))
+
+  plot <- dataset %>% ggplot(
+  aes(x = log2FoldChange, y = -log10(pvalue + 1e-300), shape = pvalue > 0.01)) +
+  geom_point(alpha = 0.8) +
+  geom_vline(xintercept = 0, col = "black") +
+  geom_vline(xintercept = c(-log2fcthresh, log2fcthresh), col = "red") +
+    geom_hline(yintercept = -log10(alpha_threshold), colour = "red") +
+  geom_text_repel(
+  aes(x = log2FoldChange, y = -log10(pvalue + 1e-300), label = gene),
+  data = dataset %>% filter(within_threshold), colour = "grey20",
+  min.segment.length = 0) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(
+    title = "Volcano plot Deseq2 Wald",
+    x = "Effect size: log2 (fold-change)",
+    y = "-log10 (p-value)",
+    shape = "p-value > 0.01"
+  )  +
+    scale_color_gradient2(low = "red", mid = "gray",
+                          high = "blue", midpoint = 1) +
+    theme_Publication()
+
+  print(plot)
+
+  if (export) {
+  ggsave(plot = plot, file = here(output_dir, output_filename),
+         width = width, height = height, dpi = 300)
+  }
+}
+
+# Volcano plot function with adjusted p-values (FDRq)
+make_volcano_plot_fdr <- function(
+  dataset, output_filename, alpha_threshold = 0.01, log2fcthresh = 2,
+  export = TRUE, width = 6, height = 4) {
+
+   dataset <- dataset %>% mutate(
+  within_threshold = (padj < alpha_threshold &
+                        abs(log2FoldChange) > log2fcthresh))
+
+  plot <- dataset %>% ggplot(
+  aes(x = log2FoldChange, y = -log10(padj + 1e-300), shape = padj > 0.01)) +
+  geom_point(alpha = 0.8) +
+  geom_vline(xintercept = 0, col = "black") +
+  geom_vline(xintercept = c(-log2fcthresh, log2fcthresh), col = "red") +
+    geom_hline(yintercept = -log10(alpha_threshold), colour = "red") +
+  geom_text_repel(
+  aes(x = log2FoldChange, y = -log10(padj + 1e-300), label = gene),
+  data = dataset %>% filter(within_threshold), colour = "grey20",
+  min.segment.length = 0) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(
+    title = "Volcano plot Deseq2 Wald",
+    x = "Effect size: log2 (fold-change)",
+    y = "-log10 (FDRq)",
+    shape = "FDRq > 0.01"
+  )  +
+    scale_color_gradient2(low = "red", mid = "gray",
+                          high = "blue", midpoint = 1) +
+    theme_Publication()
+
+  print(plot)
+
+  if (export) {
+  ggsave(plot = plot, file = here(output_dir, output_filename),
+         width = width, height = height, dpi = 300)
+  }
+}
+
+run_deseq <- function(count_data, design_df,
+                      output_suffix, design_formula,
+                      contrast_col, contrast_ref, contrast_exp,
+                      output_dir = output_dir, export) {
+  
+  deseq_rnaseq_data <- count_data %>% select(all_of(design_df$CF_sample))
+
+  df_diff_design <- design_df
+
+  # Change factor levels to compare contrasts (default is alphabetical)
+  df_diff_design[contrast_col] <- factor(
+    df_diff_design[, contrast_col, drop = TRUE],
+    levels = c(contrast_ref, contrast_exp))
+
+  if (sum(df_diff_design$CF_sample == colnames(deseq_rnaseq_data)) !=
+      length(df_diff_design$CF_sample)) {
+    print("sample column names and design do not match")
+    return()
+  }
+
+  deseq_dataset <- DESeqDataSetFromMatrix(
+    countData = deseq_rnaseq_data,
+    colData = df_diff_design,
+    design = as.formula(design_formula)
+  ) %>%
+    estimateSizeFactors()
+
+  # create DESeq object
+  dds_wald <- DESeq(deseq_dataset, test = "Wald")
+  saveRDS(dds_wald,
+          file = here(output_dir, sprintf("deseq_%s.rds", output_suffix)))
+
+  res_wald <- results(dds_wald, cooksCutoff = FALSE)
+  print(summary(res_wald))
+
+  df_deseq_wald <- res_wald %>%
+    as.data.frame() %>%
+    rownames_to_column("gene")
+
+  # Export
+  df_deseq_wald %>% write.csv2(
+    here(output_dir,
+              sprintf("deseq.results_%s.csv", output_suffix)),
+    row.names = FALSE)
+
+}
+
+
+select_top_extremes <- function(all_scores, top_n = 100) {
+  # function that returns TRUE/FALSE for rankings within the top_n values
+  increasing <- sort(all_scores, decreasing = FALSE)[1:top_n]
+  decreasing <- sort(all_scores, decreasing = TRUE)[1:top_n]
+  return(all_scores %in% increasing | all_scores %in% decreasing)
+}
+
+
+select_pval <- function(all_pvals, threshold = 0.01) {
+  # function that returns TRUE/FALSE for pvalues below threshold
+  return(all_pvals < threshold)
+}
+
+make_deg_heatmap <- function(count_data, samples, deg_df, annotation_df,
+                             filename, width, height, palette_length = 50) {
+
+  deg_df <- deg_df %>% arrange(stat)
+  count_data <- count_data[deg_df$gene, samples]
+
+  z_norm <- t(apply(
+    as.matrix(count_data), 1,
+    function(x) scale(x, center = TRUE, scale = TRUE)))
+
+  colnames(z_norm) <- samples
+
+  my_color <- colorRampPalette(c("blue", "white", "red"))(palette_length)
+  # length(breaks) == length(palette_length) + 1
+  # use floor and ceiling to deal with even/odd length pallettelengths
+  my_breaks <- c(seq(min(z_norm), 0,
+                    length.out = ceiling(palette_length / 2) + 1),
+                seq(max(z_norm) / palette_length, max(z_norm),
+                    length.out = floor(palette_length / 2)))
+
+  deg_heatmap <- pheatmap(z_norm,
+           annotation_col = annotation_df,
+           col = my_color,
+           breaks = my_breaks,
+           show_colnames = FALSE, cluster_rows = FALSE, cluster_cols = FALSE
+           )
+  save_pheatmap_pdf(deg_heatmap,
+                    filename,
+                    width, height)
+}
+
+```
+
+# ----------
+# Setup output folder
+```{r}
+print(params)
+
+export <- params$export
+
+# generate output directory
+output_dir <- here("data", "processed", params$output_dir)
+print(output_dir)
+
+# overwrite clinical exclusion in case of MPR/pCR response
+exclude_clinical_response <- params$exclude_clinical_response
+if (params$response_definition %in% c("MPR", "pCR")) {
+  exclude_clinical_response <- TRUE
+}
+
+# de_dir <- here("data", "processed", "differential_expression")
+de_dir <- output_dir
+analyze_specific_trial <- params$analyze_specific_trial
+response_definition <- params$response_definition
+
+run_r_vs_nr <- !(
+  analyze_specific_trial %in% c("NICHE-MSI") &
+    response_definition == "Original")
+
+print(analyze_specific_trial)
+print(run_r_vs_nr)
+print(exclude_clinical_response)
+print(response_definition)
+
+# if output_dir does not exist, create it
+if (!dir.exists(output_dir)) {
+    dir.create(output_dir)
+} else {
+  print("Output folder already exists")
+}
+
+```
+
+# ----------
+
+# Load metadata
+```{r}
+metadata <- read_csv2(
+  here("data", "processed", "metadata", "combined_rna_metadata.csv"))
+
+patient_metadata_combined <- read_csv2(
+  here("data", "processed", "metadata", "patient_metadata_combined.csv"))
+
+# Filter for specific trial
+if (analyze_specific_trial != ""){
+  metadata <- metadata %>% filter(Trial == analyze_specific_trial)
+  }
+
+metadata <- metadata %>%
+  mutate(
+      Treatment = factor(Treatment, levels = c("Pre", "Post")),
+      CF_sample = as.factor(CF_sample),
+      MSI_MSS = as.factor(MSI_MSS),
+      BRAF = as.factor(BRAF),
+      Patient = as.factor(Patient),
+      Cohort = as.factor(Cohort),
+      Response = as.factor(Response),
+      Response_detail = as.factor(Response),
+      Trial = as.factor(Trial))
+
+```
+
+## Adapt Response Definition
+```{r}
+metadata <- metadata %>%
+    mutate(Response_original = Response) %>%
+  left_join(patient_metadata_combined %>%
+              select(Patient, Response_type, Response_pCR, Response_MPR)) %>%
+  mutate(Response_analysis = response_definition,
+         exclude_clinical_response = exclude_clinical_response)
+
+# Automatic in case response definition is MPR and pCR
+if (exclude_clinical_response) {
+  metadata <- metadata %>%
+    filter(Response_type == "Pathological")
+}
+
+if (response_definition == "MPR") {
+  metadata <- metadata %>%
+    filter(Response_type == "Pathological") %>%
+    mutate(Response = ifelse(Response_MPR == "MPR", "R", "NR"))
+}
+
+if (response_definition == "pCR") {
+  metadata <- metadata %>%
+    filter(Response_type == "Pathological") %>%
+    mutate(Response = ifelse(Response_pCR == "pCR", "R", "NR"))
+}
+
+```
+
+# ----------
+# Load RNAseq data
+```{r load RNA data}
+df_counts <- read_csv2(
+  here("data", "processed", "rnaseq_data",
+       "combined_rnaseq_counts_p.csv")) %>%
+  column_to_rownames("gene")
+
+rpm_counts <- read_csv2(here("data", "processed", "rnaseq_data",
+                             "combined_rnaseq_rpm.csv")) %>%
+  column_to_rownames("gene")
+
+# Remove genes with all zero counts, might be detected in specific trials only
+df_counts <- df_counts[, colnames(df_counts) %in%
+                          metadata$CF_sample]
+df_counts <- df_counts[rowSums(df_counts) != 0, ]
+
+rpm_counts <- rpm_counts[, colnames(rpm_counts) %in%
+                          metadata$CF_sample]
+rpm_counts <- rpm_counts[rowSums(rpm_counts) != 0, ]
+
+gene_features <- read.csv2(
+  file = here("data", "external", "biomaRt_gene_features.csv"))
+
+gene_descriptions <- gene_features %>%
+              select(hgnc_symbol, description) %>%
+              rename("gene" = "hgnc_symbol") %>%
+              unique()
+
+```
+
+# Filter for samples with RNA data
+```{r}
+metadata <- metadata %>% filter(CF_sample %in% colnames(df_counts))
+```
+
+```{r}
+table(metadata$Response)
+table(metadata$Response, metadata$Response_MPR)
+table(metadata$Response, metadata$Response_pCR)
+table(metadata$Response, metadata$Response_original)
+
+metadata %>%
+  select(Trial, Response, Response_type, Response_MPR, Response_pCR,
+         Response_original, Response_analysis) %>%
+  factor_summary()
+
+table(metadata$Treatment, metadata$Response)
+
+unique_patient_id <- metadata %>% select(Trial, Patient) %>% unique()
+table(unique_patient_id$Trial)
+
+```
+
+# Data structure - sample distances
+```{r sample distances}
+z_norm <- t(apply(
+  as.matrix(df_counts[, colnames(df_counts) %in% metadata$CF_sample]), 1,
+                  function(x) scale(x, center = TRUE, scale = TRUE)))
+
+colnames(z_norm) <- colnames(df_counts)[
+  colnames(df_counts) %in% metadata$CF_sample]
+
+annot_df <- metadata %>%
+  tibble::column_to_rownames("CF_sample") %>%
+  select(Treatment, Response, Trial)
+
+sample_dists <- dist(t(z_norm), method = "euclidean")
+sample_dists_m <- as.matrix(sample_dists)
+
+# create colours for each group
+response_col <- c("#F8766D", "#00BA38")
+names(response_col) <- unique(annot_df$Response)
+treatment_col <- c("#F564E3", "#619CFF")
+names(treatment_col) <- unique(annot_df$Treatment)
+annotation_col <- list(Response = response_col, Treatment = treatment_col)
+annotation_col = list(
+  Response = c(NR="#F8766D", R="#00BA38"),
+  Treatment = c(Pre="#F564E3", Post="#619CFF"))
+
+sample_dist_heatmap <- pheatmap(sample_dists_m,
+           annotation_col = annot_df,
+           col = paletteer_d(palette = "RColorBrewer::RdYlBu", direction = -1),
+           clustering_distance_rows = sample_dists,
+           clustering_distance_cols = sample_dists,
+           show_colnames = FALSE,
+           show_rownames = FALSE,
+           annotation_colors = annotation_col
+           )
+
+dds <- DESeqDataSetFromMatrix(
+  countData = df_counts[, colnames(df_counts) %in%
+                          metadata$CF_sample],
+  colData = metadata,
+  design = ~1
+)
+
+vsd <- vst(dds, blind = FALSE)
+
+colSums(assay(vsd)) %>% as.data.frame() %>% summary()
+```
+
+```{r, fig.width = 14, fig.height = 14}
+make_dist_heatmap(vsd = vsd, annotation_file = annot_df,
+                  annotation_colors = annotation_col,
+                  output_file = "distance_pheatmap_batch.pdf",
+                             width = 10, height = 8)
+```
+
+# ----------
+
+# PCA
+```{r PCA}
+pca <- prcomp(t(z_norm))
+percent_var <- pca$sdev^2 / sum(pca$sdev^2)
+
+percent_var <- percent_var %>%
+  as.data.frame() %>%
+  setNames("Var_exp") %>%
+  rownames_to_column("PC") %>%
+  mutate(Cumvar = cumsum(Var_exp), PC = as.numeric(PC))
+
+percent_var %>%
+  filter(PC < 50) %>%
+  ggplot(aes(x = PC, y = Var_exp)) +
+  geom_col() +
+  geom_point(aes(x = PC, y = Cumvar)) +
+  labs(x = "Principal Component", y = "(Cumulative) Variance Explained") +
+  theme_Publication()
+
+n_pcs <- 20
+
+pca_heatmap <- pheatmap(t(pca$x[, 1:n_pcs]),
+         annotation_col = annot_df,
+         col = paletteer_d(palette = "RColorBrewer::RdYlBu", direction = -1),
+         show_colnames = FALSE,
+         cluster_rows = FALSE,
+         annotation_colors = annotation_col
+         )
+```
+
+```{r PCA on VSD data}
+# PCA on VSD
+ntop <- 500
+rv <- rowVars(assay(vsd))
+pca_selection <- order(rv, decreasing = TRUE)[seq_len(min(ntop,
+        length(rv)))]
+pca <- prcomp(t(assay(vsd)[pca_selection, ]))
+percent_var <- pca$sdev^2 / sum(pca$sdev^2)
+
+percent_var <- percent_var %>%
+  as.data.frame() %>%
+  setNames("Var_exp") %>%
+  rownames_to_column("PC") %>%
+  mutate(Cumvar = cumsum(Var_exp), PC = as.numeric(PC))
+
+percent_var %>%
+  filter(PC < 50) %>%
+  ggplot(aes(x = PC, y = Var_exp)) +
+  geom_col() +
+  geom_point(aes(x = PC, y = Cumvar)) +
+  labs(x = "Principal Component", y = "(Cumulative) Variance Explained") +
+  theme_Publication()
+
+pc1_var <- percent_var[1, 2] %>% round(2) * 100
+pc2_var <- percent_var[2, 2] %>% round(2) * 100
+
+# 10 PCs seems enough
+n_pcs <- 10
+
+pca_heatmap <- pheatmap(t(pca$x[, 1:n_pcs]),
+         annotation_col = annot_df,
+         col = paletteer_d(palette = "RColorBrewer::RdYlBu", direction = -1),
+         show_colnames = FALSE,
+         cluster_rows = FALSE,
+         cutree_cols = 5,
+         annotation_colors = annotation_col
+         )
+
+save_pheatmap_pdf(x = pca_heatmap,
+                  filename = here(
+                    output_dir, "pca_pheatmap.pdf"),
+                  width = 8, height = 7)
+
+saveRDS(pca, here(output_dir, "pca.RDS"))
+```
+
+```{r PCA plots}
+pca_data <- plotPCA(vsd,
+                    intgroup = c("Treatment",
+                                 "Response", "Patient", "Trial"),
+                    returnData = TRUE)
+
+plotPCA(vsd, intgroup = c("Response")) +
+  theme_Publication() +
+  geom_point(size = 0.5)
+ggsave(file = file.path(output_dir, "pca_response.png"),
+       width = 6, height = 6, dpi = 300)
+
+plotPCA(vsd, intgroup = c("Treatment")) +
+  theme_Publication()
+ggsave(file = file.path(output_dir, "pca_treatment.png"),
+       width = 6, height = 6, dpi = 300)
+
+plotPCA(vsd, intgroup = c("Treatment", "Response")) +
+  theme_Publication()
+ggsave(file = file.path(output_dir, "pca_treatment_response.png"),
+       width = 6, height = 6, dpi = 300)
+
+if (analyze_specific_trial == ""){
+  plotPCA(vsd, intgroup = c("Trial")) +
+  theme_Publication() +
+  geom_point(size = 0.5)
+  ggsave(file = file.path(output_dir, "pca_trial.png"),
+         width = 6, height = 6, dpi = 300)
+  
+  plotPCA(vsd, intgroup = c("Histology")) +
+    theme_Publication() +
+    geom_point(size = 0.5)
+  ggsave(file = file.path(output_dir, "pca_histology.png"),
+         width = 6, height = 6, dpi = 300)
+  
+  plotPCA(vsd, intgroup = c("Treatment", "Trial")) +
+    theme_Publication()
+  
+  pca_data %>%
+    ggplot(aes(x = PC1, y = PC2, col = Trial, shape = Treatment)) +
+    geom_point() +
+    theme_Publication() +
+    guides(col = guide_legend(nrow = 3, byrow = TRUE),
+           shape = guide_legend(nrow = 2, byrow = TRUE)) +
+    labs(x = sprintf("PC1: %s%% variance", pc1_var),
+         y = sprintf("PC2: %s%% variance", pc2_var))
+  ggsave(file = file.path(output_dir, "pca_trial_treatment.png"),
+         width = 6, height = 6, dpi = 300)
+  
+  pca_data %>%
+    ggplot(aes(x = PC1, y = PC2, col = Trial, shape = Response)) +
+    geom_point() +
+    theme_Publication()  +
+    guides(col = guide_legend(nrow = 3, byrow = TRUE),
+           shape = guide_legend(nrow = 2, byrow = TRUE)) +
+    labs(x = sprintf("PC1: %s%% variance", pc1_var),
+         y = sprintf("PC2: %s%% variance", pc2_var))
+  ggsave(file = file.path(output_dir, "pca_trial_response.png"),
+         width = 6, height = 6, dpi = 300)
+}
+
+```
+
+```{r PCA loadings, fig.height = 8, fig.width = 6}
+# Check the loadings PC1
+loadings <- as.data.frame(pca$rotation) %>% arrange(PC1)
+
+loadings[c(1:20, (nrow(loadings) - 20):nrow(loadings)), ] %>%
+  rownames_to_column("Gene") %>%
+  ggplot(aes(x = reorder(Gene, PC1), y = PC1)) +
+  geom_col() +
+  coord_flip() +
+  labs(x = "Top 40 PC1 Loadings") +
+  theme_Publication()
+
+# Check the loadings PC2
+
+loadings <- as.data.frame(pca$rotation) %>% arrange(PC2)
+
+loadings[c(1:20, c(nrow(loadings) - 20):nrow(loadings)), ] %>%
+  rownames_to_column("Gene") %>%
+  ggplot(aes(x = reorder(Gene, PC2), y = PC2)) +
+  geom_col() +
+  coord_flip() +
+  labs(x = "Top 40 PC2 Loadings") +
+  theme_Publication()
+
+```
+
+# ----------
+# DESeq2
+```{r Treatment_DE, echo = TRUE}
+run_deseq_analysis <-  params$run_deseq_analysis
+alpha_threshold <- 0.05
+log2fcthresh <- 1
+
+```
+
+# ----------
+
+## Responders x non-responders DE
+```{r Responder_DE, echo = TRUE}
+design_r1 <- metadata %>%
+  select(Treatment, Patient, CF_sample, Response, Trial) %>%
+  filter(Treatment %in% c("Pre"))
+
+table(design_r1$Trial, design_r1$Response)
+
+run_deseq_analysis <-  params$run_deseq_analysis
+
+# metadata <- metadata %>% filter(Trial == analyze_specific_trial)
+
+response_design_formula <- "~ Response"
+
+if (analyze_specific_trial == ""){
+  response_design_formula <- "~ Trial + Response"
+}
+
+if (run_deseq_analysis & run_r_vs_nr) {
+  print(Sys.time())
+  run_deseq(count_data = df_counts, design_df = design_r1,
+            output_suffix = "r1",
+            design_formula = response_design_formula,
+            contrast_col = "Response",
+            contrast_ref = "NR", contrast_exp = "R",
+            output_dir = output_dir, export)
+  print(Sys.time())
+
+}
+
+if (run_r_vs_nr) {
+  deseq_r1 <- read_csv2(
+  here(de_dir, "deseq.results_r1.csv")) %>%
+  left_join(gene_descriptions) %>%
+  mutate(ranking = -log10(pvalue) * log2FoldChange)
+  
+  make_volcano_plot_fdr(deseq_r1,
+                        alpha_threshold = alpha_threshold,
+                        log2fcthresh = log2fcthresh,
+                 "volcano_fdr_r1.png", export)
+  
+}
+
+# Run naive direct response formula - all samples pooled analysis
+if (analyze_specific_trial == "") {
+  response_design_formula <- "~ Response"
+  
+  run_deseq_analysis <- TRUE
+  if (run_deseq_analysis & run_r_vs_nr) {
+    run_deseq(count_data = df_counts, design_df = design_r1,
+              output_suffix = "r1_not_modelling_trial",
+              design_formula = response_design_formula,
+              contrast_col = "Response",
+              contrast_ref = "NR", contrast_exp = "R",
+              output_dir = output_dir, export)
+  }
+
+  deseq_r1_not_modelling_trial <- read_csv2(
+    here(de_dir, "deseq.results_r1_not_modelling_trial.csv")) %>%
+    left_join(gene_descriptions) %>%
+    mutate(ranking = -log10(pvalue) * log2FoldChange)
+  
+  make_volcano_plot_fdr(deseq_r1_not_modelling_trial,
+                        alpha_threshold = alpha_threshold,
+                        log2fcthresh = log2fcthresh,
+                 "volcano_fdr_r1_not_modelling_trial.png", export)
+  
+}
+
+```
+
+# ----------
+
+# Get Differentially expressed genes
+```{r Get top DEG}
+# Either top_n with padj < threshold, or all genes with padj < threshold
+top_n <- 100
+
+if (run_r_vs_nr){
+  deseq_r1_fdrq <- deseq_r1[
+  select_pval(deseq_r1$padj, 0.05), ] %>%
+  filter(!is.na(gene)) %>%
+  arrange(padj)
+  
+  deseq_r1_top <- deseq_r1[
+    select_top_extremes(deseq_r1$stat, top_n), ] %>%
+    arrange(stat) %>%
+    filter(padj < 0.05)
+  
+  print(nrow(deseq_r1_fdrq))
+  print(nrow(deseq_r1_top))
+  
+  deseq_r1_fdrq %>% write.csv2(
+    here(output_dir, "deseq_r1_fdrq.csv"), row.names = FALSE)
+
+  deseq_r1_top %>% write.csv2(
+    here(output_dir, "deseq_r1_top.csv"), row.names = FALSE)
+  
+}
+```
+
+# ----------
+
+# Plot DEG Z-score heatmaps
+```{r DEG heatmaps, fig.width = 10, fig.height = 17}
+
+annot_df <- metadata %>%
+  tibble::column_to_rownames("CF_sample") %>%
+  select(Treatment, Response, Trial) %>%
+  mutate_if(is.numeric, as.factor)
+
+if (run_r_vs_nr){
+  make_deg_heatmap(assay(vsd),
+                   samples = as.character(
+                     (design_r1 %>% arrange(Response))$CF_sample),
+                   deg_df = deseq_r1_top,
+                   annotation_df = annot_df,
+                   filename = here(output_dir, "DEG_r1.pdf"),
+                   height = 23)
+  
+  # DEG heatmap filter less genes
+  make_deg_heatmap(assay(vsd),
+                   samples = as.character(
+                     (design_r1 %>% arrange(Response))$CF_sample),
+                   deg_df = deseq_r1_top[
+                     select_top_extremes(deseq_r1_top$stat, 25), ],
+                   annotation_df = annot_df,
+                   filename = here(output_dir, "DEG_r1_f.pdf"),
+                   height = 8)
+}
+```
+
+# ----------
+# EnrichR Pathway Enrichment on Top DE genes
+```{r, results = "asis"}
+setEnrichrSite("Enrichr") # Human genes
+# Check all_dbs <- listEnrichrDbs()
+
+dbs <- c("GO_Biological_Process_2021",
+         "Reactome_2022", "GO_Biological_Process_2025",
+         "KEGG_2026", "Reactome_Pathways_2024")
+```
+
+
+```{r enrichr Response, results = "asis"}
+if (run_r_vs_nr){
+  # print("enrichr r1  \n")
+  # print(nrow(deseq_r1_fdrq))
+  # run_enrichr(deseq_r1_fdrq, dbs, "enrichr_r1.rds")
+
+  ## Directional enrichr
+  print("enrichr r1 lfc > 0:  \n")
+  print(nrow(deseq_r1_fdrq %>% filter(log2FoldChange > 0)))
+
+  run_enrichr(deseq_r1_fdrq %>% filter(log2FoldChange > 0),
+            dbs, "enrichr_r1_up_fdrq.rds")
+  
+  print("enrichr r1 lfc < 0:  \n")
+  print(nrow(deseq_r1_fdrq %>% filter(log2FoldChange < 0)))
+
+  run_enrichr(deseq_r1_fdrq %>% filter(log2FoldChange < 0),
+            dbs, "enrichr_r1_down_fdrq.rds")
+  
+  enrichr_r1 <- readRDS(here(output_dir, "enrichr_r1.rds"))
+}
+
+```
+
+# ----------
+
+# Plot RPM boxplots
+```{r RPM boxplots}
+if (run_r_vs_nr){
+  deseq_r1_top10 <- deseq_r1_top[
+    select_top_extremes(deseq_r1_top$stat, 5), ]
+
+  filter_top_genes <- deseq_r1_top10$gene
+  
+  
+  rpm_counts %>% select(metadata$CF_sample)
+  
+  rpm_counts_f <- rpm_counts[filter_top_genes,
+                             as.character(metadata$CF_sample)]
+  
+  pseudolog2_rpm_counts <- log2(rpm_counts_f + 1)
+  pseudolog2_rpm_counts <- pseudolog2_rpm_counts %>%
+    t() %>%
+    as.data.frame() %>%
+    rownames_to_column("CF_sample") %>%
+    left_join(metadata)
+  
+  colnames(pseudolog2_rpm_counts) <- gsub(" |-", "_",
+                                          colnames(pseudolog2_rpm_counts))
+  
+  for (current_gene in deseq_r1_top10$gene) {
+    print(current_gene)
+    gene_col <- gsub(" |-", "_", current_gene)
+    
+    if (analyze_specific_trial == "") {
+        plot <- pseudolog2_rpm_counts %>%
+          filter(Treatment == "Pre") %>%
+          ggplot(aes_string(x = "Response", y = gene_col, fill = "Trial")) +
+          geom_boxplot(outlier.shape = NA) +
+          geom_point(position = position_jitterdodge(jitter.width = 0.15),
+                     aes(group = Response,
+                       col = Response), size = 2.5) +
+            labs(col = "Response") +
+            expand_limits(y = 0) +
+            labs(x = "",
+                 y = sprintf("%s log2 (RPM+1)", current_gene),
+                 title = "Pre-treatment") +
+            theme(axis.text.x = element_text(
+              angle = 90, vjust = 0.5, hjust = 1)) +
+            theme_Publication() +
+            theme(legend.spacing.x = unit(0.3, "cm")) +
+      theme(legend.key.size = unit(0.75, 'cm')) +
+      scale_color_manual(values = c("#F8766D", "#00BA38")) +
+      guides(fill = guide_legend(nrow = 3, byrow = TRUE),
+             col = guide_legend(nrow = 2, byrow = TRUE))
+        print(plot)
+    }
+    
+    if (analyze_specific_trial != "") {
+      plot <- pseudolog2_rpm_counts %>%
+          filter(Treatment == "Pre") %>%
+          ggplot(aes_string(x = "Response", y = gene_col, fill = "Response")) +
+          geom_boxplot(outlier.shape = NA) +
+          geom_point(position = position_jitterdodge(jitter.width = 0.15),
+                     aes(group = Response), size = 1.5) +
+            labs(col = "Response") +
+            expand_limits(y = 0) +
+            labs(x = "",
+                 y = sprintf("%s log2 (RPM+1)", current_gene),
+                 title = "Pre-treatment") +
+            theme(axis.text.x = element_text(
+              angle = 90, vjust = 0.5, hjust = 1)) +
+            theme_Publication() +
+            theme(legend.spacing.x = unit(0.3, "cm")) +
+      theme(legend.key.size = unit(0.75, 'cm')) +
+      scale_fill_manual(values = c("#F8766D", "#00BA38"))
+      print(plot)
+    }
+  }
+}
+
+```
+
+# ----------
+
+# Lint script
+
+```{r}
+# lint("~/NKI_pancancer_neoadj_io/src/differential_expression.Rmd")
+lint(filename = "~/NKI_pancancer_neoadj_io/src/differential_expression.Rmd",
+  linters = unused_import_linter()
+)
+```
+
+# ----------
+# sessionInfo - Package Versions
+```{r sessionInfo}
+sessionInfo()
+```

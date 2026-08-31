@@ -1,0 +1,38 @@
+# 1: sample names, 2: group (tumor/normal), 3: patient (common id)
+samples: "samplesheets/bellini_samples.csv"
+
+threads_set:
+  threads_sys1: 7
+
+cores: 30
+snakemake: "--rerun-incomplete"
+
+# set folder fastq files (without "/" at the end)
+fastq_folder:
+  "/data_pool_2/PanCancer/BELINNI/DNAseq/fastq_files/"
+
+# set output folder results (without "/" at the end)
+output_folder:
+  "/data_pool_2/PanCancer/Neoantigen_pipeline_runs/BELLINI"
+
+# set output folder DNA pipeline (without "/" at the end)
+output_DNA_folder:
+  "/data_pool_2/PanCancer/Preprocessed_all_BELLINI/"
+
+# fill in correct read name (R1 and R2), characters after sample name before .fastq.gz
+read_name:
+  R1: "_R1_001"
+  R2: "_R2_001"
+
+params:
+  bwa:
+    ref: "/data_pool_2/PanCancer/Reference_files/homo_sapiens/GRCh38_ensembl_105_primary_bwa/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz"
+    threads: 10
+  hlala:
+    ref: "/data_pool_2/PanCancer/Reference_files/homo_sapiens/GRCh38_1000gen/GRCh38_full_analysis_set_plus_decoy_hla.fa"
+  pvactools:
+    vaf_threshold: 0.05
+  vep:
+    cache_dir: "/data_pool_2/PanCancer/Reference_files/homo_sapiens/GRCh38_VEP_direct"
+    fasta: "/data_pool_2/PanCancer/Reference_files/homo_sapiens/GRCh38_VEP_direct/homo_sapiens/105_GRCh38/Homo_sapiens.GRCh38.dna.toplevel.fa.gz"
+    plugin_dir: "/shared/data/niche/Neoantigen_pipeline_v2/vep/plugins"

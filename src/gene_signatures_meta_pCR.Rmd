@@ -7,16 +7,15 @@ output:
     toc: true
     number_sections: true
 params:
-  output_dir: "gene_signatures_meta"
+  output_dir: "gene_signatures_meta_pCR"
   metadata: "combined_rna_metadata.csv"
   analyze_specific_trial: ""
   run_meta_analysis: TRUE
   generate_heatmaps: TRUE
-  use_demo: TRUE
-  exclude_niche_msi: FALSE
-  exclude_clinical_response: FALSE
-  response_definition: "Original" # MPR pCR
+  use_demo: FALSE
+  response_definition: "pCR" # MPR pCR Original
   exclude_monotherapy: FALSE
+  exclude_niche_msi: FALSE
 ---
 
 Author comment:
@@ -48,21 +47,32 @@ source("helper_functions.R")
 library(meta)
 library(fgsea)
 library(export)
+library(lintr)
+
 set.seed(42)
 select <- dplyr::select
 rename <- dplyr::rename
 here <- here::here
-
 ```
 
 # ----------
 
 # Setup output folder
-```{r Setup, echo = FALSE, include = FALSE}
+```{r, echo = FALSE, include = FALSE}
+print(params)
+
 export <- params$export
 analyze_specific_trial <- params$analyze_specific_trial
 run_meta_analysis <- params$run_meta_analysis   
 generate_heatmaps <- params$generate_heatmaps
+response_definition <- params$response_definition
+
+# overwrite clinical exclusion in case of MPR/pCR response
+exclude_clinical_response <- params$exclude_clinical_response
+if (params$response_definition %in% c("MPR", "pCR")) {
+  exclude_clinical_response <- TRUE
+}
+exclude_monotherapy <- params$exclude_monotherapy
 
 # generate output directory
 output_dir <- here("data", "processed", params$output_dir)
@@ -70,14 +80,14 @@ print(output_dir)
 output_dir_plots <- here(output_dir, "plots")
 
 data_dir <- here("data", "processed")
-
+input_dir <- "processed"
 if (params$use_demo) {
-  data_dir <- here("data", "processed_demo")
+  # data_dir <- here("data", "processed_demo")
   input_dir <- "processed_demo"
 }
 
-combined_dir <- here(data_dir, "gene_signatures")
-combined_dir_excl_dmmr <- here(data_dir, "gene_signatures_excl_dmmr")
+combined_dir <- here(data_dir, "gene_signatures_pCR")
+combined_dir_excl_dmmr <- here(data_dir, "gene_signatures_pCR_excl_dmmr")
 
 # if output_dir does not exist, create it
 if (!dir.exists(output_dir)) {
@@ -182,7 +192,8 @@ trial_colors <- c(BELLINI = Color_BELLINI, IMCISION = Color_IMCISION,
             `NICHE-MSS` = Color_NICHE_MSS, `NICHE-MSI` = Color_NICHE_MSI,
             OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO)
 
-trial_colors_combined <- c(Combined = "#999999", BELLINI = Color_BELLINI, IMCISION = Color_IMCISION,
+trial_colors_combined <- c(Combined = "#999999", BELLINI = Color_BELLINI,
+                           IMCISION = Color_IMCISION,
             MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
             `NICHE-MSS` = Color_Colon_MSS, `NICHE-MSI` = Color_NICHE_MSI,
             OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO)
@@ -190,9 +201,11 @@ trial_colors_combined <- c(Combined = "#999999", BELLINI = Color_BELLINI, IMCISI
 Bagaev_tme_colors <- c(Color_Depleted, Color_Fibrotic,
                        Color_Inflamed_fibrotic, Color_Inflamed_non_fibrotic)
 
-histology_msi_mss_colors <- c(`Colon-MSI`= Color_Colon_MSI, `Colon-MSS`= Color_Colon_MSS,
+histology_msi_mss_colors <- c(`Colon-MSI`= Color_Colon_MSI,
+                              `Colon-MSS`= Color_Colon_MSS,
                               CSCC = Color_CSCC, HNSCC = Color_HNSCC, 
-                              LN_melanoma = Color_LN_melanoma, TBNC = Color_TNBC,
+                              LN_melanoma = Color_LN_melanoma,
+                              TBNC = Color_TNBC,
                               Urothelial = Color_Urothelial)
 
 ```
@@ -200,23 +213,32 @@ histology_msi_mss_colors <- c(`Colon-MSI`= Color_Colon_MSI, `Colon-MSS`= Color_C
 # ----------
 
 # Load gene sets
-```{r Load msigdb hallmarks, echo = FALSE}
+```{r Load msigdb hallmarks}
 gene_signatures <- read_csv2(
   here("data", input_dir, "signatures", "gene_signatures.csv"))
 
 gene_signatures <- gene_signatures %>% filter(!is.na(Gene))
 
 signature_overview <- read_csv2(
-  here("data", input_dir, "signatures",
-       "_overview_of_signatures_20260212.csv")) 
+  here("data", input_dir, "gene_signatures",
+       "_overview_of_signatures.csv")) 
+  # mutate(ifelse(Signature == "B_catenin_signature_pancan_22_Luke_et_al", ))
+
+signature_overview$Signature <- gsub(
+  "B_catenin_signature_pancan_22_Luke_et_al",
+  "B_catenin_signature_Luke_et_al", signature_overview$Signature)
+
+# signature_overview$Signature <- gsub(
+#   "Gamma_delta_TCR_Yu",
+#   "Gamma_delta_TCRs", signature_overview$Signature)
 
 gene_signatures_meta_analysis <- signature_overview %>%
   filter(Meta_analysis == "Yes")
 
 # Export
-gene_signatures %>%
-  filter(Signature %in% gene_signatures_meta_analysis$Signature) %>%
-  write_csv2(here(figures_dir, "gene_signatures_meta_supp_table.csv"))
+# gene_signatures %>%
+#   filter(Signature %in% gene_signatures_meta_analysis$Signature) %>%
+#   write_csv2(here(figures_dir, "gene_signatures_meta_supp_table.csv"))
 
 gene_signatures_meta_analysis %>% knitr::kable()
 
@@ -248,7 +270,7 @@ ssgsea_signature_names <- names(gene_signatures_ssgsea_l)
 
 ```
 
-# Load ssGSEA data
+# Load ssGSEA and RPM data
 ```{r}
 # combined analysis
 ssgsea_results <- read_csv2(here(combined_dir, "ssgsea_results.csv")) %>%
@@ -267,55 +289,176 @@ signature_response_ssgsea_raw <- read_csv2(
   here(combined_dir, "signature_response_ssgsea.csv")) %>%
   mutate(Trial = "Combined")
 
-signature_response_ssgsea_excl_dmmr <- read_csv2(
-  here(combined_dir_excl_dmmr, "signature_response_ssgsea.csv")) %>%
-  mutate(Trial = "Combined_excl_dMMR")
+# signature_response_ssgsea_excl_dmmr <- read_csv2(
+#   here(combined_dir_excl_dmmr, "signature_response_ssgsea.csv")) %>%
+#   mutate(Trial = "Combined_excl_dMMR")
 
+signature_rpm_data <- read_csv2(
+  here(combined_dir, "signature_rpm_data.csv"))
+
+# signature_response_rpm_expression_excl_dmmr <- read_csv2(
+#   here(combined_dir_excl_dmmr, "signature_response_rpm_expression.csv")) %>%
+#   mutate(Trial = "Combined_excl_dMMR")
+```
+
+
+## Adapt Response Definition
+```{r}
+compare_r_nr_trials <- c("Combined", "Combined_excl_dMMR", "BELLINI",
+                         "IMCISION", "MATISSE", "NABUCCO", "NICHE-MSS",
+                         "OpACIN_neo", "PRADO")
+
+if (params$response_definition %in% c("MPR")) {
+  compare_r_nr_trials <- c("Combined", "Combined_excl_dMMR", "BELLINI",
+                         "IMCISION", "MATISSE", "NABUCCO",
+                         "NICHE-MSS", "OpACIN_neo", "PRADO")
+}
+
+if (params$response_definition %in% c("pCR")) {
+  compare_r_nr_trials <- c("Combined", "Combined_excl_dMMR", "BELLINI",
+                          "MATISSE", "NABUCCO", "NICHE-MSI", "NICHE-MSS", 
+                         "OpACIN_neo", "PRADO")
+}
+
+patient_metadata_combined <- read_csv2(
+  here("data", "processed", "metadata", "patient_metadata_combined.csv"))
+
+ssgsea_results_df <- ssgsea_results_df %>%
+    mutate(Response_original = Response) %>%
+  left_join(patient_metadata_combined %>%
+              select(Patient, Response_type, Response_pCR, Response_MPR)) %>%
+  mutate(Response_analysis = response_definition,
+         exclude_clinical_response = exclude_clinical_response)
+
+signature_rpm_data_df <- signature_rpm_data %>%
+    mutate(Response_original = Response) %>%
+  left_join(patient_metadata_combined %>%
+              select(Patient, Response_type, Response_pCR, Response_MPR)) %>%
+  mutate(Response_analysis = response_definition,
+         exclude_clinical_response = exclude_clinical_response)
+
+# overwrite clinical exclusion in case of MPR/pCR response
+if (params$response_definition %in% c("MPR", "pCR")) {
+  exclude_clinical_response <- TRUE
+}
+
+# Automatic in case response definition is MPR and pCR
+if (exclude_clinical_response) {
+  ssgsea_results_df <- ssgsea_results_df %>%
+    filter(Response_type == "Pathological")
+  
+}
+
+if (response_definition == "MPR") {
+  ssgsea_results_df <- ssgsea_results_df %>%
+    filter(Response_type == "Pathological") %>%
+    mutate(Response = ifelse(Response_MPR == "MPR", "R", "NR"))
+  
+  signature_rpm_data_df <- signature_rpm_data_df %>%
+    filter(Response_type == "Pathological") %>%
+    mutate(Response = ifelse(Response_MPR == "MPR", "R", "NR"))
+}
+
+if (response_definition == "pCR") {
+  ssgsea_results_df <- ssgsea_results_df %>%
+    filter(Response_type == "Pathological") %>%
+    mutate(Response = ifelse(Response_pCR == "pCR", "R", "NR"))
+  
+  signature_rpm_data_df <- signature_rpm_data_df %>%
+    filter(Response_type == "Pathological")%>%
+    mutate(Response = ifelse(Response_pCR == "pCR", "R", "NR"))
+}
+
+if (exclude_monotherapy) {
+  ssgsea_results_df <- ssgsea_results_df %>%
+    filter(Cohort == "Nivo_ipi") 
+  
+  signature_rpm_data_df <- signature_rpm_data_df  %>%
+    filter(Cohort == "Nivo_ipi") 
+}
+
+ssgsea_results_df$Cohort %>% table()
+
+# Sensitivity analysis excluding NICHE2 dMMR MSI samples
+if (params$exclude_niche_msi) {
+  ssgsea_results_df <- ssgsea_results_df %>%
+    filter(!Trial %in% c("NICHE-MSI"))
+  
+  signature_rpm_data_df <- signature_rpm_data_df %>%
+    filter(!Trial %in% c("NICHE-MSI"))
+}
+
+ssgsea_results_df %>%
+  select(colnames(patient_metadata_combined)[
+    colnames(patient_metadata_combined) %in% colnames(ssgsea_results_df)]) %>%
+  mutate_if(is.character, as.factor) %>% summary()
+
+table(ssgsea_results_df$Trial, ssgsea_results_df$Response)
+
+ssgsea_results_df$Trial %>% table()
+
+ssgsea_results_df_pre <- ssgsea_results_df %>% filter(Treatment == "Pre")
+
+table(ssgsea_results_df_pre$Trial, ssgsea_results_df_pre$Response)
+
+ssgsea_results_df_pre$Trial %>% table()
+
+```
+
+# Load ssGSEA data expression contrasts
+
+```{r}
 ## Individual trials Response
 signature_response_ssgsea_bellini <- read_csv2(
-  here(data_dir, "gene_signatures_bellini",
+  here(data_dir, "gene_signatures_pCR_BELLINI",
        "signature_response_ssgsea.csv")) %>%
   mutate(Trial = "BELLINI") 
  
-signature_response_ssgsea_imcision <- read_csv2(
-  here(data_dir, "gene_signatures_imcision",
-       "signature_response_ssgsea.csv")) %>%
-  mutate(Trial = "IMCISION") 
+# signature_response_ssgsea_imcision <- read_csv2(
+#   here(data_dir, "gene_signatures_pCR_IMCISION",
+#        "signature_response_ssgsea.csv")) %>%
+#   mutate(Trial = "IMCISION") 
 
 signature_response_ssgsea_nabucco <- read_csv2(
-  here(data_dir, "gene_signatures_nabucco",
+  here(data_dir, "gene_signatures_pCR_NABUCCO",
        "signature_response_ssgsea.csv")) %>%
   mutate(Trial = "NABUCCO") 
 
 signature_response_ssgsea_niche_mss <- read_csv2(
-  here(data_dir, "gene_signatures_niche_mss",
+  here(data_dir, "gene_signatures_pCR_NICHE-MSS",
        "signature_response_ssgsea.csv")) %>%
   mutate(Trial = "NICHE-MSS") 
 
+signature_response_ssgsea_niche_msi <- read_csv2(
+  here(data_dir, "gene_signatures_pCR_NICHE-MSI",
+       "signature_response_ssgsea.csv")) %>%
+  mutate(Trial = "NICHE-MSI")
+
 signature_response_ssgsea_opacin_neo <- read_csv2(
-  here(data_dir, "gene_signatures_opacin_neo",
+  here(data_dir, "gene_signatures_pCR_OpACIN_neo",
        "signature_response_ssgsea.csv")) %>%
   mutate(Trial = "OpACIN_neo") 
 
 signature_response_ssgsea_prado <- read_csv2(
-  here(data_dir, "gene_signatures_prado",
+  here(data_dir, "gene_signatures_pCR_PRADO",
        "signature_response_ssgsea.csv")) %>%
   mutate(Trial = "PRADO") 
 
 signature_response_ssgsea_matisse <- read_csv2(
-  here(data_dir, "gene_signatures_matisse",
+  here(data_dir, "gene_signatures_pCR_MATISSE",
        "signature_response_ssgsea.csv")) %>%
   mutate(Trial = "MATISSE") 
 
 signature_response_ssgsea_c <- signature_response_ssgsea_bellini %>%
-  rbind(signature_response_ssgsea_imcision) %>%
+  # rbind(signature_response_ssgsea_imcision) %>%
   rbind(signature_response_ssgsea_nabucco) %>%
   rbind(signature_response_ssgsea_niche_mss) %>%
+  rbind(signature_response_ssgsea_niche_msi) %>%
   rbind(signature_response_ssgsea_opacin_neo) %>%
   rbind(signature_response_ssgsea_prado)  %>%
   rbind(signature_response_ssgsea_matisse) %>%
-  rbind(signature_response_ssgsea_raw) %>%
-  rbind(signature_response_ssgsea_excl_dmmr)
+  rbind(signature_response_ssgsea_raw) # %>%
+  # rbind(signature_response_ssgsea_excl_dmmr)
 
 signature_response_ssgsea_c <- signature_response_ssgsea_c %>%
   mutate(mean_delta = mean_responders - mean_nresponders,
@@ -335,64 +478,65 @@ annot_df <- ssgsea_results_df %>%
 
 ```
 
-# Load RPM data
+# Load RPM data expression contrasts
+
 ```{r}
-signature_rpm_data <- read_csv2(
-  here(combined_dir, "signature_rpm_data.csv"))
 
 signature_response_rpm_expression_raw <- read_csv2(
   here(combined_dir, "signature_response_rpm_expression.csv")) %>%
   mutate(Trial = "Combined")
 
-signature_response_rpm_expression_excl_dmmr <- read_csv2(
-  here(combined_dir_excl_dmmr, "signature_response_rpm_expression.csv")) %>%
-  mutate(Trial = "Combined_excl_dMMR")
-
 ## Individual trials Response
 signature_response_rpm_expression_bellini <- read_csv2(
-  here(data_dir, "gene_signatures_bellini",
+  here(data_dir, "gene_signatures_pCR_BELLINI",
        "signature_response_rpm_expression.csv")) %>%
   mutate(Trial = "BELLINI") 
  
-signature_response_rpm_expression_imcision <- read_csv2(
-  here(data_dir, "gene_signatures_imcision",
-       "signature_response_rpm_expression.csv")) %>%
-  mutate(Trial = "IMCISION") 
+# signature_response_rpm_expression_imcision <- read_csv2(
+#   here(data_dir, "gene_signatures_pCR_IMCISION",
+#        "signature_response_rpm_expression.csv")) %>%
+#   mutate(Trial = "IMCISION") 
 
 signature_response_rpm_expression_nabucco <- read_csv2(
-  here(data_dir, "gene_signatures_nabucco",
+  here(data_dir, "gene_signatures_pCR_NABUCCO",
        "signature_response_rpm_expression.csv")) %>%
   mutate(Trial = "NABUCCO") 
 
 signature_response_rpm_expression_niche_mss <- read_csv2(
-  here(data_dir, "gene_signatures_niche_mss",
+  here(data_dir, "gene_signatures_pCR_NICHE-MSS",
        "signature_response_rpm_expression.csv")) %>%
   mutate(Trial = "NICHE-MSS") 
 
+signature_response_rpm_expression_niche_msi <- read_csv2(
+  here(data_dir, "gene_signatures_pCR_NICHE-MSI",
+       "signature_response_rpm_expression.csv")) %>%
+  mutate(Trial = "NICHE-MSI") 
+
 signature_response_rpm_expression_opacin_neo <- read_csv2(
-  here(data_dir, "gene_signatures_opacin_neo",
+  here(data_dir, "gene_signatures_pCR_OpACIN_neo",
        "signature_response_rpm_expression.csv")) %>%
   mutate(Trial = "OpACIN_neo") 
 
 signature_response_rpm_expression_prado <- read_csv2(
-  here(data_dir, "gene_signatures_prado",
+  here(data_dir, "gene_signatures_pCR_PRADO",
        "signature_response_rpm_expression.csv")) %>%
   mutate(Trial = "PRADO") 
 
 signature_response_rpm_expression_matisse <- read_csv2(
-  here(data_dir, "gene_signatures_matisse",
+  here(data_dir, "gene_signatures_pCR_MATISSE",
        "signature_response_rpm_expression.csv")) %>%
   mutate(Trial = "MATISSE") 
 
 signature_response_rpm_expression_c <- signature_response_rpm_expression_bellini %>%
-  rbind(signature_response_rpm_expression_imcision) %>%
+  # rbind(signature_response_rpm_expression_imcision) %>%
   rbind(signature_response_rpm_expression_nabucco) %>%
   rbind(signature_response_rpm_expression_niche_mss) %>%
+  rbind(signature_response_rpm_expression_niche_msi) %>%
   rbind(signature_response_rpm_expression_opacin_neo) %>%
   rbind(signature_response_rpm_expression_prado)  %>%
   rbind(signature_response_rpm_expression_matisse) %>%
-  rbind(signature_response_rpm_expression_raw) %>%
-  rbind(signature_response_rpm_expression_excl_dmmr)
+  rbind(signature_response_rpm_expression_raw) # %>%
+  # rbind(signature_response_rpm_expression_excl_dmmr)
 
 signature_response_rpm_expression_c <- signature_response_rpm_expression_c %>%
   mutate(mean_delta = mean_responders - mean_nresponders,
@@ -436,6 +580,7 @@ signature_response_c <- signature_response_ssgsea_c %>%
   rbind(signature_response_rpm_expression_c %>%
   filter(!signature %in% signature_response_ssgsea_c$signature) %>%
     mutate(signature_score = "log(RPM+1)"))
+
 ```
 
 ```{r}
@@ -608,128 +753,6 @@ graph2pdf(x = pca_trial_plot,
 pca_data %>% write_csv2(here(output_dir, "pca_data.csv"))
 ```
 
-# PCA loadings
-```{r}
-# Check Hallmark enrichment on PC1 and PC2 loadings
-run_fgsea <- function(deseq_data, gene_sets, enriched_lfc_group,
-                      decreased_lfc_group, ranking, output_suffix,
-                     export = TRUE) {
-  # Using log2 fold change as a ranking metric
-  prernk_deseq <- deseq_data %>% select(gene, ranking) %>% deframe()
-
-  n_genesets <- length(msigdb_hallmarks_set)
-
-  fgseares_deseq <- fgsea(pathways = msigdb_hallmarks_set,
-                  stats    = prernk_deseq,
-                  minSize  = 1,
-                  maxSize  = 500,
-                  nPermSimple = 10000)
-
-  fgseares_deseq <- fgseares_deseq %>%
-    mutate(within_threshold = padj < 0.01, "Enriched_in" = ifelse(
-      NES > 0,
-      enriched_lfc_group,
-      decreased_lfc_group)) %>%
-    left_join(msigdb_hallmarks_names) %>%
-    arrange(NES)
-
-  fgseares_deseq$Enriched_in <- factor(
-    fgseares_deseq$Enriched_in,
-    levels = c(enriched_lfc_group, decreased_lfc_group))
-
-  fgseares_deseq %>% select(NES, pval, padj) %>% summary()
-
-  # Plot results
-  plot <- fgsea_plot(fgseares_deseq)
-  print(plot)
-
-  fgseares_deseq_p <- fgseares_deseq %>%
-                       select(name, padj, NES, Enriched_in) %>%
-                       arrange(NES) %>%
-                       mutate(padj = padj,
-                              NES = NES)
-
-  print(knitr::kable(fgseares_deseq_p, row.names = TRUE), n = n_genesets)
-
-  cat("  \n")
-  cat("Leading Edge:  \n")
-
-  leading_edge <- fgseares_deseq$leadingEdge
-  names(leading_edge)  <- fgseares_deseq$name
-  print(leading_edge)
-
-  if (export) {
-    ggsave(plot = plot,
-         here(output_dir_plots, sprintf("fGSEA_%s.png", output_suffix)),
-         width = 6, height = 5, dpi = 300)
-
-    write_rds(fgseares_deseq,
-               file = here(output_dir, sprintf("fGSEA_%s.rds", output_suffix)))
-    }
-}
-
-fgsea_plot <- function(fgseares_deseq) {
-  plot <- fgseares_deseq %>% ggplot(aes(x = log10(padj), y = NES)) +
-  geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) +
-  geom_hline(yintercept = 0, col = "black") +
-  geom_text_repel(
-  aes(x = log10(padj), y = NES, label = name),
-  data = fgseares_deseq %>%
-    filter(within_threshold |
-             name %in% c("EMT", "Inflammatory Response", "IFN-a Response",
-                         "IFN-y Response", "TNF-a Signaling via NKFB",
-                         "IL2-STAT5 Signaling")),
-  colour = "grey20", force = 3, force_pull = 2,
-  min.segment.length = 0, max.overlaps = 20
-  ) +
-  labs(x = "log10 (FDRq)", y = "Normalized Enrichment Score",
-       col = "Enriched in") +
-  scale_y_continuous(limits = c(-ceiling_dec(max(abs(fgseares_deseq$NES))),
-                                ceiling_dec(max(abs(fgseares_deseq$NES))))) +
-  scale_x_continuous(trans = "reverse") +
-    scale_fill_manual(values = c("red", "blue")) +
-    guides(alpha = FALSE, size = FALSE) +
-    theme_Publication()
-}
-
-loadings <- as.data.frame(pca$rotation) %>% arrange(PC1)
-
-msigdb_hallmarks_set <- read.csv2(
-  file = here("data", "external", "signatures", "msigdb_hallmarks_set.csv"))
-msigdb_hallmarks_set <- split(
-  msigdb_hallmarks_set$gene_symbol, msigdb_hallmarks_set$gs_name)
-
-msigdb_hallmarks_names <- read.csv2(
-  file = here("data", "external", "signatures", "names_hallmarks.csv"))
-
-run_fgsea(loadings %>% arrange(PC1) %>% rownames_to_column("gene"),
-         gene_sets = msigdb_hallmarks_set,
-         enriched_lfc_group = "PC1 high",
-         decreased_lfc_group = "PC1 low",
-         ranking = "PC1",
-         output_suffix = "PC1_loadings")
-
-fgsea_PC1_loadings <- read_rds(here(output_dir, "fGSEA_PC1_loadings.rds"))
-
-fgsea_PC1_loadings[, c("pathway", "NES", "pval", "size", "Enriched_in")]
-
-fgsea_PC1_loadings[select_top_extremes(fgsea_PC1_loadings$NES, 5),
-                   c("pathway", "NES", "pval", "size", "Enriched_in")]
-
-run_fgsea(loadings %>% arrange(PC2) %>% rownames_to_column("gene"),
-         gene_sets = msigdb_hallmarks_set,
-         enriched_lfc_group = "PC2 high",
-         decreased_lfc_group = "PC2 low",
-         ranking = "PC2",
-         output_suffix = "PC2_loadings")
-fgsea_PC2_loadings <- read_rds(here(output_dir, "fGSEA_PC2_loadings.rds"))
-
-fgsea_PC2_loadings[, c("pathway", "NES", "pval", "size", "Enriched_in")] %>%
-  view()
-fgsea_PC2_loadings[select_top_extremes(fgsea_PC2_loadings$NES, 5),
-                   c("pathway", "NES","pval", "size", "Enriched_in")] 
-```
-
 # ----------
 # Compare signature scores between histologies
 ```{r}
@@ -893,6 +916,8 @@ ggsave(here(output_dir_plots, "response_ssgsea_pre.png"),
 # ----------
 # Meta analysis
 ```{r}
+safe_extract <- function(x) ifelse(is.null(x), NA, x)
+
 run_smd_meta_analysis <- function(meta_analysis_df, variable_list,
                                   output_suffix, print_plot = FALSE,
                                   save_plot = FALSE) {
@@ -993,8 +1018,7 @@ run_smd_meta_analysis <- function(meta_analysis_df, variable_list,
        title_text = sprintf("%s R vs. NR %s", current_variable, output_suffix),
                       filename = here(
                         output_dir,
-                        sprintf("meta_analysis_wes_%s_%s.pdf",
-                                current_variable, output_suffix)),
+                        sprintf("meta_analysis_wes_%s_%s.pdf", current_variable, output_suffix)),
                       width = 12, height = 7)
     }
     
@@ -1047,11 +1071,11 @@ meta_studies_results_combined <- read_csv2(
 meta_combined_effects_combined <- read_csv2(
   here(output_dir, "meta_combined_effects_combined.csv"))
 
-meta_studies_results_combined_excl_dMMR <- read_csv2(
-    here(output_dir, "meta_studies_results_combined_excl_dmmr.csv"))
+# meta_studies_results_combined_excl_dMMR <- read_csv2(
+#     here(output_dir, "meta_studies_results_combined_excl_dMMR.csv"))
 
-meta_combined_effects_combined_excl_dMMR <- read_csv2(
-    here(output_dir, "meta_combined_effects_combined_excl_dmmr.csv"))
+# meta_combined_effects_combined_excl_dMMR <- read_csv2(
+#     here(output_dir, "meta_combined_effects_combined_excl_dMMR.csv"))
 
 meta_studies_results_random_effects <- read_csv2(
   here(output_dir, "meta_studies_results_random_effects.csv"))
@@ -1060,9 +1084,9 @@ meta_combined_effects_random_effects <- read_csv2(
   here(output_dir, "meta_combined_effects_random_effects.csv"))
 
 meta_studies_results_rna_all <- meta_studies_results_random_effects %>%
-  full_join(meta_studies_results_combined) %>%
-  full_join(meta_studies_results_combined_excl_dMMR)
-
+  full_join(meta_studies_results_combined)
+ # %>%
+ #  full_join(meta_studies_results_combined_excl_dMMR)
 meta_studies_results_rna_all %>%
   write_csv2(here(output_dir, "meta_studies_results_smd_all.csv"))
 
@@ -1070,14 +1094,20 @@ meta_studies_results_rna_all <- meta_studies_results_rna_all %>%
   left_join(gene_signatures_meta_analysis %>%
               select(Signature, Signature_abbreviation) %>%
               setNames(c("Variable", "label")))
+
 ```
 
-```{r, fig.height = 11, fig.width = 9}
+```{r}
 meta_combined_effects_random_effects_f <- meta_combined_effects_random_effects %>%
   mutate(meta_FDR = p.adjust(pval.random, method = "BH")) %>%
   arrange(TE.random)
 
 meta_combined_effects_random_effects_f %>%
+  ggplot(aes(x = pval.random, y = meta_FDR)) +
+  geom_point() + theme_Publication()
+
+meta_combined_effects_random_effects_f %>%
+  filter(meta_FDR < 0.05) %>%
   ggplot(aes(x = pval.random, y = meta_FDR)) +
   geom_point() + theme_Publication()
 
@@ -1089,8 +1119,7 @@ meta_combined_effects_random_effects_f %>%
 
 ```
 
-
-## Investigate Heterogeneity statistics
+## Heterogeneity statistics
 ```{r}
 meta_combined_effects_random_effects_f %>%
   ggplot(aes(x = TE.random, y = TE.fixed)) + geom_point() +
@@ -1118,6 +1147,15 @@ meta_combined_effects_random_effects_f %>%
                   data = meta_combined_effects_random_effects_f)
 
 meta_combined_effects_random_effects_f %>%
+  filter(pval.random < 0.05) %>%
+  ggplot(aes(x = I2, y = -log10(pval.Q))) + geom_point() +
+  theme_Publication() +
+  geom_hline(yintercept = -log10(0.05)) +
+  geom_text_repel(aes(x = I2, y = -log10(pval.Q), label = Variable),
+                  data = meta_combined_effects_random_effects_f %>%
+  filter(pval.random < 0.05))
+
+meta_combined_effects_random_effects_f %>%
   ggplot(aes(x = Q, y = I2)) + geom_point() + theme_Publication() +
   geom_text_repel(aes(x = Q, y = I2, label = Variable),
                   data = meta_combined_effects_random_effects_f)
@@ -1130,6 +1168,15 @@ meta_combined_effects_random_effects_f %>%
 ```
 
 ```{r, fig.height = 11, fig.width = 9}
+meta_combined_effects_random_effects %>%
+  arrange(pval.random) %>%
+  select(c(Variable, Contrast, TE.random, pval.random,
+           lower.random, upper.random)) %>%
+  mutate(pval.random = round(pval.random, 5)) %>%
+  mutate_at(.vars = c("TE.random", "lower.random", "upper.random"),
+            .funs = function(x){round(x, digits = 3)}) %>% view()
+
+# reorder((Variable, TE.random))
 meta_combined_effects_random_effects_f %>%
   ggplot(aes(x = factor(
     Variable, levels = meta_combined_effects_random_effects_f$Variable),
@@ -1144,17 +1191,19 @@ meta_combined_effects_random_effects_f %>%
 ggsave(here(output_dir, "meta_combined_effects_random_effects_f.png"),
     height = 4, width = 5)
 
+#"Combined_excl_dMMR", "IMCISION", 
+
 meta_studies_results_rna_all %>%
   mutate(label = cut(
     pval,
     breaks = c(0, 0.001, 0.01, 0.05, 1),
     labels = c("***", "**", "*", "")
-  ))  %>%
+  )) %>%
   ggplot(aes(
-    x = factor(studlab, levels = c("Combined", "Combined_excl_dMMR",
-                                   "BELLINI", "IMCISION", "MATISSE",
-                                   "NABUCCO", "NICHE-MSS", "OpACIN_neo",
-                                   "PRADO")),
+    x = factor(studlab, levels = c("Combined", "BELLINI",
+                                   "MATISSE", "NABUCCO",
+                                   "NICHE-MSS", "NICHE-MSI",
+                                   "OpACIN_neo", "PRADO")), 
     y = factor(
       Variable, levels = meta_combined_effects_random_effects_f$Variable),
     fill = TE,
@@ -1168,12 +1217,66 @@ meta_studies_results_rna_all %>%
   labs(y = "") +
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
   theme(legend.position = "right", legend.direction = "vertical") +
-  theme(legend.key.size = unit(0.75, "cm")) +
+  theme(legend.key.size = unit(0.75, 'cm')) +
   labs(x = "")
 
 ggsave(here(output_dir, "meta_combined_effects_random_effects_pval.png"),
     height = 9, width = 8)
 
+meta_combined_effects_random_effects_f %>%
+  mutate(label = cut(
+    pval.Q,
+    breaks = c(0, 0.001, 0.01, 0.05, 1),
+    labels = c("***", "**", "*", "")
+  ))  %>%
+  ggplot(aes(
+    x = factor("I2"), 
+    y = factor(
+      Variable, levels = meta_combined_effects_random_effects_f$Variable),
+    fill = I2,
+    label = label)) +
+  geom_tile() +
+  geom_text() +
+  scale_fill_gradient2(low = "#075AFF",
+                       mid = "white",
+                       high = "#FF0000") +
+  theme_Publication() +
+  labs(y = "") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  theme(legend.position = "right", legend.direction = "vertical") +
+  theme(legend.key.size = unit(0.75, 'cm')) +
+  labs(x = "")
+
+ggsave(here(output_dir, "meta_combined_effects_random_effects_het.png"),
+    height = 9, width = 4.5)
+
+heterogeneity_plot <- meta_combined_effects_random_effects_f %>%
+  mutate(label = cut(
+    pval.Q,
+    breaks = c(0, 0.001, 0.01, 0.05, 1),
+    labels = c("***", "**", "*", "")
+  ))  %>%
+  ggplot(aes(
+    x = factor("I2"), 
+    y = factor(
+      Variable, levels = meta_combined_effects_random_effects_f$Variable),
+    fill = I2,
+    label = label)) +
+  geom_tile() +
+  geom_text() +
+  scale_fill_gradient2(low = "#075AFF",
+                       mid = "white",
+                       high = "#FF0000") +
+  theme_Publication() +
+  labs(y = "") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  theme(legend.position = "right", legend.direction = "vertical") +
+  theme(legend.key.size = unit(0.75, 'cm')) +
+  labs(x = "")
+
+graph2pdf(heterogeneity_plot,
+          here(output_dir, "meta_combined_effects_random_effects_het.pdf"),
+    height = 9, width = 4.5)
 ```
 
 ```{r meta analysis, fig.height = 8.5, fig.width = 12, results = "asis"}
@@ -1247,19 +1350,19 @@ if (run_meta_analysis) {
        allstudies = TRUE)
 
     save_forestplot_pdf(forest_plot_data = meta_analysis_res,
-                        digits.mean = 2, digits.sd = 2,
-                        label.e = "R", label.c = "NR",
-                        leftlabs = c("Study", "N", "Mean", "SD", "N",
+                     digits.mean = 2, digits.sd = 2,
+                     label.e = "R", label.c = "NR",
+                     leftlabs = c("Study", "N", "Mean", "SD", "N",
                                   "Mean", "SD"),
-                        allstudies = TRUE,
-                        filename = here(
-                          output_dir_plots,
-                          sprintf("meta_analysis_pre_%s.pdf",
-                                  current_gene_signature)),
-                        width = 12, height = 7)
+                     allstudies = TRUE,
+                      filename = here(
+                        output_dir_plots,
+                        sprintf("meta_analysis_pre_%s.pdf",
+                                current_gene_signature)),
+                      width = 12, height = 7)
     cat("  \n")
   }
-
+    
   meta_studies_results %>%
     write_csv2(here(output_dir, "meta_studies_results.csv"))
   meta_combined_effects %>%
@@ -1285,36 +1388,38 @@ meta_combined_effects_f %>%
            lower.random, upper.random)) %>%
   mutate(pval.random = round(pval.random, 5)) %>%
   mutate_at(.vars = c("TE.random", "lower.random", "upper.random"),
-            .funs = function(x) {round(x, digits = 3)}) %>%
-  view()
+            .funs = function(x){round(x, digits = 3)}) %>% view()
 
 meta_combined_effects %>%
   ggplot(aes(x = reorder(Signature, TE.random), y = TE.random)) +
   geom_point(aes(size = -log10(pval.random)), shape = 22, fill = "darkgrey") +
   theme_Publication() +
   coord_flip() + geom_hline(yintercept = 0, linetype = "dashed") +
-  geom_errorbar(aes(ymin = lower.random, ymax = upper.random), width = .2) +
+  geom_errorbar(aes(ymin = lower.random, ymax = upper.random), width=.2) +
   labs(x = "", y = "Meta-analysis SMD (95% CI)")
 ggsave(here(output_dir_plots, "meta_combined_effects.png"),
-       height = 8, width = 8)
+    height = 8, width = 8)
 
 meta_combined_effects_f %>%
   ggplot(aes(x = reorder(Signature, TE.random), y = TE.random)) +
   geom_point(aes(size = -log10(pval.random)), shape = 22, fill = "darkgrey") +
   theme_Publication() +
   coord_flip() + geom_hline(yintercept = 0, linetype = "dashed") +
-  geom_errorbar(aes(ymin = lower.random, ymax = upper.random), width = .2) +
+  geom_errorbar(aes(ymin = lower.random, ymax = upper.random), width=.2) +
   labs(x = "", y = "Meta-analysis SMD (95% CI)")
 ggsave(here(output_dir_plots, "meta_combined_effects_f.png"),
     height = 8, width = 8)
 
+# "IMCISION", 
 signature_response_c %>%
   filter(contrast == "Pre R x NR") %>%
   filter(signature %in% meta_combined_effects$Signature) %>% 
   ggplot(aes(x = factor(Trial,
-                        c("Combined", "BELLINI", "IMCISION", "MATISSE",
-                          "NABUCCO", "NICHE-MSS", "OpACIN_neo", "PRADO")),
-             y = factor(signature, meta_combined_effects$Signature),
+                        c("Combined", "BELLINI", "MATISSE",
+                          "NABUCCO", "NICHE-MSS", "NICHE-MSI",
+                          "OpACIN_neo", "PRADO")),
+             y = factor(signature,
+                                   meta_combined_effects$Signature),
              fill = effect_size)) +
   geom_tile() +
   scale_fill_gradient2(low = "#075AFF",
@@ -1329,12 +1434,12 @@ ggsave(here(output_dir_plots, "response_pre.png"),
 
 signature_response_c %>%
   filter(contrast == "Pre R x NR") %>%
-  filter(signature %in% meta_combined_effects_f$Signature) %>%
+  filter(signature %in% meta_combined_effects_f$Signature) %>% 
   ggplot(aes(x = factor(Trial,
                         c("Combined", "BELLINI", "IMCISION", "MATISSE",
                           "NABUCCO", "NICHE-MSS", "OpACIN_neo", "PRADO")),
              y = factor(signature,
-                        meta_combined_effects_f$Signature),
+                                   meta_combined_effects_f$Signature),
              fill = effect_size)) +
   geom_tile() +
   scale_fill_gradient2(low = "#075AFF",
@@ -1355,28 +1460,28 @@ signatures_to_plot <- meta_combined_effects_f$Signature
 
 for (current_signature in signatures_to_plot) {
   print(current_signature)
-
+  
   if (current_signature %in% colnames(ssgsea_results_df)) {
     plot <- ssgsea_results_df %>% ggplot(aes_string(x = "Trial",
-                                                    y = current_signature,
-                                                    fill = "Response")) +
+                                     y = current_signature,
+                                     fill = "Response")) +
       geom_boxplot() +
-      theme_Publication() +
+      theme_Publication()  +
       theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
       scale_fill_manual(values = c("#F8766D", "#00BA38")) +
-      facet_wrap(~Treatment, scales = "free_x") +
-      labs(y = sprintf("%s\nssGSEA", current_signature))
+    facet_wrap(~Treatment, scales = "free_x") +
+    labs(y = sprintf("%s\nssGSEA", current_signature))
     print(plot)
   }
-
-  plot <- signature_rpm_data %>% ggplot(aes_string(x = "Trial",
+  
+  plot <- signature_rpm_data_df %>% ggplot(aes_string(x = "Trial",
                                    y = current_signature,
                                    fill = "Response")) +
     geom_boxplot() +
-    theme_Publication() +
+    theme_Publication()  +
     theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
     scale_fill_manual(values = c("#F8766D", "#00BA38")) +
-    facet_wrap(~Treatment, scales = "free_x") +
+  facet_wrap(~Treatment, scales = "free_x") +
     labs(y = sprintf("%s\nmean log2(RPM+1)", current_signature))
   print(plot)
 }
@@ -1391,46 +1496,46 @@ plot <- ssgsea_results_df_pre %>%
   ggplot(aes_string(x = "Trial",
                     y = current_signature,
                     fill = "Response")) +
-  geom_boxplot() +
-  theme_Publication() +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
-  scale_fill_manual(values = c("#F8766D", "#00BA38")) +
-  labs(y = sprintf("Proliferation ssGSEA", current_signature), x = "") +
+      geom_boxplot() +
+      theme_Publication()  +
+      theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+      scale_fill_manual(values = c("#F8766D", "#00BA38"))+
+    labs(y = sprintf("Proliferation ssGSEA", current_signature), x = "") +
   theme(axis.title.x = element_blank())
 print(plot)
   
 graph2pdf(plot, here(output_dir, "proliferation_ssgsea.pdf"),
           width = 5, height = 4.5)
 
-current_signature <- "H_E2F_Targets"
+current_signature = "H_E2F_Targets"
 plot <- ssgsea_results_df_pre %>%
   filter(!Trial %in% "NICHE-MSI") %>%
   ggplot(aes_string(x = "Trial",
                     y = current_signature,
                     fill = "Response")) +
-  geom_boxplot() +
-  theme_Publication() +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
-  scale_fill_manual(values = c("#F8766D", "#00BA38")) +
-  labs(y = sprintf("E2F TargetsH ssGSEA", current_signature), x = "") +
+      geom_boxplot() +
+      theme_Publication()  +
+      theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+      scale_fill_manual(values = c("#F8766D", "#00BA38"))+
+    labs(y = sprintf("E2F TargetsH ssGSEA", current_signature), x = "") +
   theme(axis.title.x = element_blank())
 print(plot)
-
+  
 graph2pdf(plot, here(output_dir, "H_E2F_Targets_ssgsea.pdf"),
           width = 5, height = 4.5)
 
 # Wnt B catenin
-current_signature <- "B_catenin_signature_Luke_et_al"
+current_signature = "B_catenin_signature_Luke_et_al"
 plot <- ssgsea_results_df_pre %>%
   filter(!Trial %in% "NICHE-MSI") %>%
   ggplot(aes_string(x = "Trial",
                     y = current_signature,
                     fill = "Response")) +
-  geom_boxplot() +
-  theme_Publication() +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
-  scale_fill_manual(values = c("#F8766D", "#00BA38")) +
-  labs(y = sprintf("B catenin signature ssGSEA", current_signature), x = "") +
+      geom_boxplot() +
+      theme_Publication()  +
+      theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+      scale_fill_manual(values = c("#F8766D", "#00BA38"))+
+    labs(y = sprintf("B catenin signature ssGSEA", current_signature), x = "") +
   theme(axis.title.x = element_blank())
 print(plot)
 
@@ -1443,8 +1548,8 @@ graph2pdf(plot, here(output_dir, "B_catenin_ssgsea.pdf"),
 # ----------
 # Lint script
 ```{r}
-# lint("~/NKI_pancancer_neoadj_io/src/gene_signatures_meta.Rmd")
-lint(filename = "~/NKI_pancancer_neoadj_io/src/gene_signatures_meta.Rmd",
+# lint("~/NKI_pancancer_neoadj_io/src/gene_signatures_meta_pCR.Rmd")
+lint(filename = "~/NKI_pancancer_neoadj_io/src/gene_signatures_meta_pCR.Rmd",
   linters = unused_import_linter()
 )
 ```

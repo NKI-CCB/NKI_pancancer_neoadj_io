@@ -11,7 +11,7 @@ params:
   output_dir: "gene_signatures_bellini"
   metadata: "combined_rna_metadata.csv"
   analyze_specific_trial: "BELLINI"
-  use_demo: TRUE
+  use_demo: FALSE
 ---
 
 Author comment:
@@ -36,7 +36,7 @@ BiocManager::version()
 library(tidyverse)
 library(ggrepel)
 library(here)
-library(pheatmap)
+dna_metadata_flibrary(pheatmap)
 library(GSVA)
 library(DESeq2)
 library(paletteer)
@@ -113,7 +113,7 @@ corr_func <- function(var1, var2, data) {
 
 # ----------
 # Setup output folder
-```{r Setup, echo = FALSE, include = FALSE}
+```{r Setup}
 export <- params$export
 analyze_specific_trial <- params$analyze_specific_trial
 

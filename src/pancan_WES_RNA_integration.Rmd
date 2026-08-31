@@ -10,6 +10,7 @@ params:
   export: TRUE
   output_dir: "WES_RNA_integration"
   metadata: "combined_rna_metadata.csv"
+  
 ---
 
 Author comment:
@@ -42,6 +43,7 @@ library(corrplot)
 library(ggalluvial)
 library(biomaRt)
 library(plotly)
+library(lintr)
 
 set.seed(42)
 select <- dplyr::select
@@ -596,13 +598,16 @@ median_til_score_pre
 
 ```{r}
 # colnames(wes_rna_features_df)
+# GIE_AP genetic immune evasion antigen presentation
+# GIE_IFNy genetic immune evasion IFNy pathway
 pca_wes_features <- c("TMB", "Ploidy", "ploidy_WGD", "Aneuploidy_score",
-                      "GIE_IFNy", "GIE_AP")
+                      "GIE_IFNy", "GIE_AP", "Purity")
 
 bagaev_signatures <- gene_signatures %>%
   filter(Ref == "Bagaev et al. 2021")
 
 wes_rna_pca <- wes_rna_features_df %>%
+  mutate(Purity = ifelse(!is.na(Purity), Purity, Imputed_purity)) %>%
   select(all_of(c("CF_sample", pca_wes_features,
                   unique(bagaev_signatures$Signature)))) %>%
   mutate(GIE_IFNy = ifelse(GIE_IFNy == TRUE, 1, 0),
@@ -748,23 +753,23 @@ loadings %>%
 ## Mutation association vs TIL scores
 ```{r, fig.height = 10, fig.width = 10}
 ssgsea_wes_results_df %>%
-  ggplot(aes(x = as.factor(ap_mut), y = TIL_score, fill = ap_mut)) +
+  ggplot(aes(x = as.factor(GIE_AP), y = TIL_score, fill = GIE_AP)) +
   geom_boxplot() +
-  geom_point(aes(col = ap_mut)) +
+  geom_point(aes(col = GIE_AP)) +
   theme_Publication() +
   guides(col = FALSE)
 
 ssgsea_wes_results_df %>%
-  ggplot(aes(x = as.factor(ap_mut), y = TIL_score, fill = ap_mut)) +
+  ggplot(aes(x = as.factor(GIE_AP), y = TIL_score, fill = GIE_AP)) +
   geom_boxplot() +
-  geom_point(aes(col = ap_mut)) +
+  geom_point(aes(col = GIE_AP)) +
   theme_Publication() +
   guides(col = FALSE) +
   facet_wrap(~Treatment)
 
 ssgsea_wes_results_df %>%
-  mutate(treatment_ap_mut = paste0(Treatment, ap_mut)) %>%
-  ggplot(aes(x = as.factor(treatment_ap_mut), y = TIL_score, fill = ap_mut)) +
+  mutate(treatment_GIE_AP = paste0(Treatment, GIE_AP)) %>%
+  ggplot(aes(x = as.factor(treatment_GIE_AP), y = TIL_score, fill = GIE_AP)) +
   geom_boxplot() +
   geom_point(aes(col = Trial)) +
   theme_Publication() +
@@ -772,7 +777,7 @@ ssgsea_wes_results_df %>%
   facet_wrap(~Trial)
 
 ssgsea_wes_results_df %>%
-  ggplot(aes(x = as.factor(ap_mut), y = TIL_score, fill = ap_mut)) +
+  ggplot(aes(x = as.factor(GIE_AP), y = TIL_score, fill = GIE_AP)) +
   geom_boxplot() +
   geom_point(aes(col = Trial)) +
   theme_Publication() +
@@ -780,14 +785,14 @@ ssgsea_wes_results_df %>%
   facet_wrap(~Trial)
 
 ssgsea_wes_results_df %>%
-  ggplot(aes(x = as.factor(ifn_mut), y = TIL_score, fill = ifn_mut)) +
+  ggplot(aes(x = as.factor(GIE_IFNy), y = TIL_score, fill = GIE_IFNy)) +
   geom_boxplot() +
-  geom_point(aes(col = ifn_mut)) +
+  geom_point(aes(col = GIE_IFNy)) +
   theme_Publication() +
   guides(col = FALSE)
 
 ssgsea_wes_results_df %>%
-  ggplot(aes(x = as.factor(ifn_mut), y = TIL_score, fill = ifn_mut)) +
+  ggplot(aes(x = as.factor(GIE_IFNy), y = TIL_score, fill = GIE_IFNy)) +
   geom_boxplot() +
   geom_point(aes(col = Trial)) +
   theme_Publication() +
@@ -796,7 +801,7 @@ ssgsea_wes_results_df %>%
 
 
 ssgsea_wes_results_df %>%
-  ggplot(aes(x = as.factor(ifn_mut), y = TIL_score, fill = ifn_mut)) +
+  ggplot(aes(x = as.factor(GIE_IFNy), y = TIL_score, fill = GIE_IFNy)) +
   geom_boxplot() +
   geom_point(aes(col = Trial)) +
   theme_Publication() +
@@ -860,14 +865,14 @@ save_pheatmap_pdf(x = wes_rna_cor_data_pre %>%
 
 ```{r}
 ssgsea_wes_results_df %>%
-  ggplot(aes(x = ap_mut, y = TIL_score, fill = ap_mut)) +
+  ggplot(aes(x = GIE_AP, y = TIL_score, fill = GIE_AP)) +
   geom_boxplot() +
-  geom_point(aes(col = ap_mut)) +
+  geom_point(aes(col = GIE_AP)) +
   theme_Publication() +
   guides(col = FALSE)
 
 ssgsea_wes_results_df %>%
-  ggplot(aes(x = ap_mut, y = TIL_score, col = Trial)) +
+  ggplot(aes(x = GIE_AP, y = TIL_score, col = Trial)) +
   geom_boxplot() +
   geom_point() +
   theme_Publication() +

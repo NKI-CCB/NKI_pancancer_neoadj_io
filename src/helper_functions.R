@@ -26,6 +26,8 @@ using_bioconductor_packages <- function(...) {
   }
 }
 
+safe_extract <- function(x) ifelse(is.null(x), NA, x)
+
 save_forestplot_pdf <- function(forest_plot_data,
                                 filename, width = 12, height = 7,
                                 title_text = NULL, 
@@ -451,25 +453,387 @@ print_stat_groups <- function(data){
           knitr::kable())
 }
 
-# Scatter <- ggplot(mtcars, aes(mpg,disp,color=factor(carb))) + geom_point(size=3) + labs(title="Scatter Plot")
-# grid.arrange(Scatter,(Scatter +scale_colour_Publication()+ theme_Publication()),nrow=1)
-# 
-# Bar <- ggplot(mtcars, aes(factor(carb),fill=factor(carb))) + geom_bar(alpha=0.7) + labs(title="Bar Plot")
-# 
-# grid.arrange(Bar,(Bar + scale_fill_Publication() +theme_Publication()),nrow=1)
-# 
-# Bubble <- ggplot(mtcars, aes(mpg,disp,color=factor(carb),size=hp)) + geom_point(alpha=0.7) + labs(title="Bubble Plot") + scale_size_continuous(range = c(3,10))
-# 
-# grid.arrange(Bubble,(Bubble +scale_colour_Publication()+ theme_Publication()),nrow=1)
-# 
-# mtcars$Index <- 1:nrow(mtcars)
-# dat <- melt(mtcars,id.vars = c("Index"),measure.vars = c("drat","wt"))
-# Line <- ggplot(dat,aes(Index,value,colour=variable))+geom_line(size=1.3) + labs(title="Line Plot") 
-# grid.arrange(Line,(Line +scale_colour_Publication()+ theme_Publication()),nrow=1)
-# 
-# P <- ggplot(data = mpg,aes(cty, hwy,color=class))+geom_point(size=3) + facet_wrap(~ manufacturer,scales="free")+
-#   labs(title="Plot With Facets")
-# P
-# 
-# P + scale_colour_Publication() + theme_Publication()
+
+calc_stat_r_vs_nr_general <- function(data, contrast,
+                                      variable) {
+  
+  data_r <- data[data$Response == "R", variable, drop = TRUE]
+  
+  mean_r <- mean(data_r, na.rm = TRUE)
+  sd_r <- sd(data_r, na.rm = TRUE)
+  median_r <- median(data_r, na.rm = TRUE)
+  n_r <- length(data_r)
+  
+  data_nr <- data[data$Response == "NR", variable, drop = TRUE]
+  
+  mean_nr <- mean(data_nr, na.rm = TRUE)
+  sd_nr <- sd(data_nr, na.rm = TRUE)
+  median_nr <- median(data_nr, na.rm = TRUE)
+  n_nr <- length(data_nr)
+  
+  wilcoxon_test <- wilcox.test(data_r, data_nr,
+                               alternative = "two.sided")
+  n_total <- n_r + n_nr
+  
+  stat_df <- wilcoxon_test %>%
+    broom::tidy() %>%
+    mutate(
+      "contrast" = contrast,
+      "variable" = variable,
+      "n" = n_total,
+      "mean_responders" = mean_r,
+      "sd_responders" = sd_r,
+      "median_responders" = median_r,
+      "n_responders" = n_r,
+      "mean_nresponders" = mean_nr,
+      "sd_nresponders" = sd_nr,
+      "median_nresponders" = median_nr,
+      "n_nresponders" = n_nr)
+  
+  return(stat_df)
+}
+
+get_trial_smd_estimates <- function(data, trial_list, variable) {
+  
+  general_smd_df <- data.frame(matrix(nrow = 0, ncol = 0))
+  for (current_trial in trial_list) {
+    current_data = data
+    print(current_trial)
+    if (! current_trial %in% c("Combined", "Combined_excl_dMMR")) {
+      current_data <- data %>% filter(Trial == current_trial)
+    }
+    
+    if (current_trial == "Combined_excl_dMMR") {
+      current_data <- data %>% filter(Trial != c("NICHE-MSI"))
+    }
+    
+    current_variable_smd_estimates = calc_stat_r_vs_nr_general(
+      data = current_data,
+      contrast = sprintf("%s R x NR", current_trial),
+      variable = variable)
+    
+    current_variable_smd_estimates <- current_variable_smd_estimates %>%
+      mutate(Trial = current_trial)
+    general_smd_df <- general_smd_df %>% rbind(current_variable_smd_estimates)
+  }
+  general_smd_df <- general_smd_df %>%
+    mutate(mean_delta = mean_responders - mean_nresponders,
+           pooled_sd = sqrt((sd_responders^2 + sd_nresponders^2) / 2),
+           effect_size = mean_delta / pooled_sd)
+  
+  general_smd_df <- general_smd_df %>%
+    relocate(c(Trial, contrast, variable, n, n_responders, n_nresponders, 
+               p.value, method), .before = statistic)
+  general_smd_df
+}
+
+safe_extract <- function(x) ifelse(is.null(x), NA, x)
+
+run_smd_meta_analysis <- function(meta_analysis_df, variable_list,
+                                  output_suffix, print_plot = TRUE,
+                                  save_plot = TRUE) {
+  
+  meta_studies_results <- data.frame(matrix(nrow = 0, ncol = 0))
+  meta_combined_effects <- data.frame(matrix(nrow = 0, ncol = 0))
+  current_variable <- "TMB" 
+  for (current_variable in unique(variable_list)) {
+    print(current_variable)
+    cat("  \n")
+    
+    current_contrast = "R x NR"
+    
+    meta_analysis_df_var <- meta_analysis_df %>%
+      filter(variable == current_variable)
+    
+    meta_analysis_res <- metacont(n.e = meta_analysis_df_var$n_responders,
+                                  mean.e = meta_analysis_df_var$mean_responders,
+                                  sd.e = meta_analysis_df_var$sd_responders,
+                                  n.c = meta_analysis_df_var$n_nresponders,
+                                  mean.c = meta_analysis_df_var$mean_nresponders,
+                                  sd.c = meta_analysis_df_var$sd_nresponders,
+                                  studlab = meta_analysis_df_var$Trial,
+                                  sm = "SMD",
+                                  method.smd = "Hedges",
+                                  prediction = TRUE,
+                                  common = FALSE,
+                                  random = TRUE,
+                                  title = sprintf(
+                                    "%s %s", current_variable, current_contrast))
+    
+    meta_random_eff <- data.frame(
+      Variable = current_variable,
+      Contrast = current_contrast, 
+      sm = meta_analysis_res$sm,
+      level.ma = meta_analysis_res$level.ma,
+      null.effect = meta_analysis_res$null.effect, 
+      k = meta_analysis_res$k,
+      method = meta_analysis_res$method,
+      TE.random = meta_analysis_res$TE.random, # Random-effects model
+      seTE.random = meta_analysis_res$seTE.random,
+      statistic.random = meta_analysis_res$statistic.random,
+      pval.random = meta_analysis_res$pval.random,
+      method.random.ci = meta_analysis_res$method.random.ci,
+      df.random = meta_analysis_res$df.random,
+      lower.random = meta_analysis_res$lower.random,
+      upper.random = meta_analysis_res$upper.random,
+      level.predict = meta_analysis_res$level.predict,
+      lower.predict = meta_analysis_res$lower.predict,
+      upper.predict = meta_analysis_res$upper.predict,
+      method.tau = meta_analysis_res$method.tau,
+      hakn = meta_analysis_res$hakn,
+      TE.fixed = meta_analysis_res$TE.fixed, # Fixed-effect model (optional)
+      seTE.fixed = meta_analysis_res$seTE.fixed,
+      lower.fixed = meta_analysis_res$lower.fixed,
+      upper.fixed = meta_analysis_res$upper.fixed,
+      pval.fixed = meta_analysis_res$pval.fixed,
+      Q = meta_analysis_res$Q, # Heterogeneity
+      df.Q = meta_analysis_res$df.Q,
+      pval.Q = meta_analysis_res$pval.Q,
+      tau = meta_analysis_res$tau,
+      tau2 = meta_analysis_res$tau^2,
+      H = meta_analysis_res$H,
+      H.lower = safe_extract(meta_analysis_res$H.lower),
+      H.upper = safe_extract(meta_analysis_res$H.upper),
+      I2 = meta_analysis_res$I2,
+      I2.lower = safe_extract(meta_analysis_res$I2.lower),
+      I2.upper = safe_extract(meta_analysis_res$I2.upper)
+    )
+    
+    meta_analysis_signature_results <- as.data.frame(meta_analysis_res) %>%
+      mutate(Variable = current_variable,
+             Contrast = current_contrast)
+    
+    meta_studies_results <- meta_studies_results %>%
+      rbind(meta_analysis_signature_results)
+    
+    meta_combined_effects <- meta_combined_effects %>%
+      rbind(meta_random_eff)
+    
+    if (print_plot) {
+      print(meta_analysis_res)
+      
+      forest(meta_analysis_res, studlab = TRUE, common = FALSE, random = TRUE,
+             digits.mean = 1, digits.sd = 1,
+             label.e = "R", label.c = "NR",
+             leftlabs = c("Study", "N", "Mean", "SD", "N", "Mean", "SD"),
+             allstudies = TRUE)
+    }
+    
+    if (save_plot) {
+      save_forestplot_pdf(forest_plot_data = meta_analysis_res,
+                          digits.mean = 1, digits.sd = 1,
+                          label.e = "R", label.c = "NR",
+                          leftlabs = c("Study", "N", "Mean", "SD", "N", "Mean", "SD"),
+                          allstudies = TRUE,
+                          title_text = sprintf("%s R vs. NR %s", current_variable, output_suffix),
+                          filename = here(
+                            output_dir,
+                            sprintf("meta_analysis_wes_%s_%s.pdf",
+                                    current_variable, output_suffix)),
+                          width = 12, height = 7)
+    }
+    
+    cat("  \n")
+  }
+  
+  meta_studies_results %>%
+    write_csv2(here(output_dir, sprintf("meta_studies_results_%s.csv",
+                                        output_suffix)))
+  meta_combined_effects %>%
+    write_csv2(here(output_dir, sprintf("meta_combined_effects_%s.csv",
+                                        output_suffix)))
+}
+
+get_trial_or_estimates <- function(data, trial_list, variable_list) {
+  
+  feature_odds_ratio_df_all <- data.frame(matrix(nrow = 0, ncol = 0))
+  
+  for (current_trial in trial_list) {
+    current_data = data
+    print(current_trial)
+    
+    if (! current_trial %in% c("Combined", "Combined_excl_dMMR")) {
+      current_data <- data %>% filter(Trial == current_trial)
+    }
+    
+    if (current_trial == "Combined_excl_dMMR") {
+      current_data <- data %>% filter(Trial != c("NICHE-MSI"))
+    }
+    
+    trial_feature_odds_ratio_df <- data.frame(matrix(nrow = 0, ncol = 0))
+    
+    for (current_feature in variable_list) {
+      
+      current_data_pos <- current_data[current_data[, current_feature, drop = TRUE], ]
+      current_data_neg <- current_data[!current_data[, current_feature, drop = TRUE], ]
+      print(
+        sprintf("current_feature: %s, n_pos = %s, n_neg = %s",
+                current_feature, nrow(current_data_pos), nrow(current_data_neg)))       
+      
+      if (nrow(current_data_pos) > 0 & nrow(current_data_neg) > 0) {
+        test <- fisher.test(table(current_data[, current_feature, drop = TRUE],
+                                  current_data$Response))
+        
+        odds_ratio_df <- broom::tidy(test) %>%
+          mutate(feature = current_feature,
+                 n_feature_pos = nrow(current_data_pos),
+                 n_feature_neg = nrow(current_data_neg),
+                 total = n_feature_pos + n_feature_neg,
+                 n_pos_r = nrow(current_data_pos %>%
+                                  filter(Response == "R")),
+                 n_pos_nr = nrow(current_data_pos %>%
+                                   filter(Response == "NR")),
+                 n_neg_r = nrow(current_data_neg %>%
+                                  filter(Response == "R")),
+                 n_neg_nr = nrow(current_data_neg %>%
+                                   filter(Response == "NR")),
+                 log_or = log(estimate),
+                 log_or_se = sqrt((1/n_pos_r + 1/n_pos_nr + 1/n_neg_r + 1/n_neg_nr))) %>%
+          relocate(c(log_or, log_or_se), .after = estimate)
+        
+      } 
+      else {
+        odds_ratio_df <- data.frame(
+          estimate = NA,
+          p.value = NA,
+          conf.low = NA,
+          conf.high = NA,
+          method = "Not tested",
+          alternative = "NA",
+          feature = current_feature,
+          n_feature_pos = nrow(current_data_pos),
+          n_feature_neg = nrow(current_data_neg),
+          total = nrow(current_data_pos) + nrow(current_data_neg),
+          n_pos_r = nrow(current_data_pos %>%
+                           filter(Response == "R")),
+          n_pos_nr = nrow(current_data_pos %>%
+                            filter(Response == "NR")),
+          n_neg_r = nrow(current_data_neg %>%
+                           filter(Response == "R")),
+          n_neg_nr = nrow(current_data_neg %>%
+                            filter(Response == "NR")),
+          log_or = NA,
+          log_or_se = NA) %>%
+          relocate(c(log_or, log_or_se), .after = estimate)
+      }
+      
+      trial_feature_odds_ratio_df <- trial_feature_odds_ratio_df %>% rbind(odds_ratio_df) 
+    }
+    
+    trial_feature_odds_ratio_df <- trial_feature_odds_ratio_df %>%
+      mutate(Trial = current_trial) %>%
+      relocate(c(Trial, feature), .before = estimate)
+    
+    # Add trial odds ratio data to others
+    feature_odds_ratio_df_all <- feature_odds_ratio_df_all %>%
+      rbind(trial_feature_odds_ratio_df)
+  }
+  
+  feature_odds_ratio_df_all
+}
+
+
+run_or_meta_analysis <- function(meta_analysis_df, variable_list, output_suffix,
+                                 print_plot = TRUE, save_plot = TRUE) {
+  meta_log_or_results <- data.frame(matrix(nrow = 0, ncol = 0))
+  meta_log_or_combined_effects <- data.frame(matrix(nrow = 0, ncol = 0))
+  
+  # current_feature <- "TP53"
+  for (current_feature in feature_odds_ratio_list) {
+    print(current_feature)
+    meta_analysis_res <- metagen(TE = log_or, seTE = log_or_se,
+                                 sm = "OR", random = TRUE, fixed = FALSE,
+                                 studlab = Trial,
+                                 data = meta_analysis_df %>%
+                                   filter(feature == current_feature))
+    if (print_plot) {
+      print(meta_analysis_res)
+      forest(meta_analysis_res, studlab = TRUE, common = FALSE, random = TRUE,
+             digits.TE = 2, digits.se = 2,)
+    }
+    
+    if (save_plot) {
+      save_forestplot_pdf(
+        forest_plot_data = meta_analysis_res,
+        digits.TE = 2, digits.se = 2,
+        allstudies = TRUE,
+        title_text = sprintf("%s Response OR %s",
+                             current_feature, output_suffix),
+        filename = here(output_dir,
+                        sprintf("meta_analysis_response_or_%s_%s.pdf",
+                                current_feature, output_suffix)),
+        width = 12, height = 7)
+    }
+    
+    meta_log_or_eff <- data.frame(
+      feature = current_feature,
+      Contrast = "Response_OR", 
+      sm = meta_analysis_res$sm,
+      level.ma = meta_analysis_res$level.ma,
+      null.effect = meta_analysis_res$null.effect, 
+      k = meta_analysis_res$k,
+      method = meta_analysis_res$method,
+      TE.random = meta_analysis_res$TE.random, # Random-effects model
+      seTE.random = meta_analysis_res$seTE.random,
+      statistic.random = meta_analysis_res$statistic.random,
+      pval.random = meta_analysis_res$pval.random,
+      method.random.ci = meta_analysis_res$method.random.ci,
+      df.random = meta_analysis_res$df.random,
+      lower.random = meta_analysis_res$lower.random,
+      upper.random = meta_analysis_res$upper.random,
+      level.predict = meta_analysis_res$level.predict,
+      lower.predict = meta_analysis_res$lower.predict,
+      upper.predict = meta_analysis_res$upper.predict,
+      method.tau = meta_analysis_res$method.tau,
+      hakn = meta_analysis_res$hakn,
+      TE.fixed = meta_analysis_res$TE.fixed, # Fixed-effect model (optional)
+      seTE.fixed = meta_analysis_res$seTE.fixed,
+      lower.fixed = meta_analysis_res$lower.fixed,
+      upper.fixed = meta_analysis_res$upper.fixed,
+      pval.fixed = meta_analysis_res$pval.fixed,
+      Q = meta_analysis_res$Q, # Heterogeneity
+      df.Q = meta_analysis_res$df.Q,
+      pval.Q = meta_analysis_res$pval.Q,
+      tau = meta_analysis_res$tau,
+      tau2 = meta_analysis_res$tau^2,
+      H = meta_analysis_res$H,
+      H.lower = safe_extract(meta_analysis_res$H.lower),
+      H.upper = safe_extract(meta_analysis_res$H.upper),
+      I2 = meta_analysis_res$I2,
+      I2.lower = safe_extract(meta_analysis_res$I2.lower),
+      I2.upper = safe_extract(meta_analysis_res$I2.upper)
+    )
+    
+    meta_log_or_results <- meta_log_or_results %>%
+      rbind(as.data.frame(meta_analysis_res) %>%
+              mutate(feature = current_feature,
+                     Contrast = "Response_OR"))
+    
+    meta_log_or_combined_effects <- meta_log_or_combined_effects %>%
+      rbind(meta_log_or_eff)
+  }
+  
+  meta_log_or_results %>%
+    write_csv2(here(output_dir,
+                    sprintf("meta_log_or_results_%s.csv",
+                            output_suffix)))
+  meta_log_or_combined_effects %>%
+    write_csv2(here(output_dir,
+                    sprintf("meta_log_or_combined_effects_%s.csv",
+                            output_suffix)))
+  
+  meta_log_or_combined_effects %>%
+    ggplot(aes(x = reorder(feature, TE.random), y = TE.random)) +
+    geom_point(aes(size = -log10(pval.random)), shape = 22, 
+               fill = "darkgrey") +
+    theme_Publication() +
+    coord_flip() + geom_hline(yintercept = 0, linetype = "dashed") +
+    geom_errorbar(aes(ymin = lower.random, ymax = upper.random), width = .2) +
+    labs(x = "", y = "Meta-analysis log OR (95% CI)")
+  
+  ggsave(here(
+    output_dir, sprintf("meta_or_combined_effects_%s.png", output_suffix)),
+    height = 8, width = 8)     
+}
+
 

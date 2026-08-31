@@ -411,8 +411,7 @@ tmb_group_trial_response %>%
   select(Trial, TMB_group, Proportion) %>%
   mutate(Proportion = round(Proportion, 2)) %>%
   pivot_wider(names_from = TMB_group, values_from = Proportion) %>%
-  left_join(response_rates) %>%
-  view()
+  left_join(response_rates)
 
 tmb_group_trial_response %>%
   ggplot(aes(x = reorder(Trial_TMB_group, Proportion),
@@ -640,6 +639,27 @@ test_boundaries_l %>%
   geom_vline(xintercept = log(1 + model_tmb_0_rr), linetype = "dashed", col = "gray") +
   geom_vline(xintercept = log(1 + yarchoan_tmb_0_rr), linetype = "dashed", col = "gray") + 
   geom_hline(yintercept = 0, col = "gray", linetype = "dashed")
+```
+
+
+# Fit constrained model - previous Yarchoan slope
+```{r}
+# Fit with percentage
+# model <- lm(Response_rate * 100 ~ log(median_TMB), data = tmb_response_rate)
+model
+summary(model)
+coef(model) %>% round(1)
+confint(model)
+confint(model, level = 0.9)
+
+# Constrained model: slope fixed at 10.8
+model_constrained <- lm(Response_rate * 100 ~ offset(10.8 * log(median_TMB)), data = tmb_response_rate)
+summary(model_constrained)
+model_constrained
+coef(model_constrained) %>% round(1)
+
+# Compare models
+anova(model, model_constrained)
 ```
 
 # ----------

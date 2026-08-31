@@ -1,0 +1,2947 @@
+---
+title: "Pancan External cohort analysis"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+params:
+  export: TRUE
+  output_dir: "pancan_external_data_analysis"
+  metadata: ""
+  filter_and_parse_vcfs: FALSE
+  load_all_germline: FALSE
+---
+
+Author comment:
+File description comment:
+The purpose of this script is to parse results from WES analysis
+vcf files, quality logs, comparing with RNAseq data
+filter_and_parse_vcfs
+
+It receives parsed WES results and metadata as inputs
+filters variants in germline and somatic
+Studies mutation associations with response
+
+# Loading Packages
+```{r, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning = FALSE, message = FALSE, dpi = 300, error = TRUE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# Install if necessary install.packages("BiocManager")
+# Install if necessary BiocManager::install("GenVisR")
+
+# library("devtools")
+# devtools::install("~/Tools/TMBleR")
+# BiocManager::install("VariantAnnotation")
+
+library(tidyverse)
+library(readxl)
+source("helper_functions.R")
+library(VariantAnnotation)
+library(ggpubr)
+library(ggrepel)
+library(corrplot)
+library(reshape2)
+library(here)
+library(scales)
+library(lme4)
+library(org.Hs.eg.db)
+library("recount3")
+library(GEOquery)
+library("TCGAbiolinks")
+library(ROCit)
+library(PRROC)
+library(pheatmap)
+library(GSVA)
+library(DESeq2)
+library(rstatix)
+library(biomaRt)
+
+MakeDataFrameFromVCF <- getFromNamespace("MakeDataFrameFromVCF", "ICAMS")
+
+set.seed(42)
+select <- dplyr::select
+rename <- dplyr::rename
+summarize <- dplyr::summarize
+here <- here::here
+```
+
+# Setup output folder
+```{r Setup output, echo = FALSE, include = FALSE}
+export <- params$export
+filter_and_parse_vcfs <- params$filter_and_parse_vcfs
+
+filter_and_parse_vcfs <- FALSE
+
+output_dir <- here("data", "processed", params$output_dir)
+print(output_dir)
+
+external_analysis_dir <- here("data", "processed", params$output_dir)
+differential_expression_meta_dir <- here("data", "processed",
+                                         "differential_expression_meta")
+
+# if output_dir does not exist, create it
+if (!dir.exists(output_dir)) {
+    dir.create(output_dir)
+    dir.create(here(output_dir, "filtered_vcfs"))
+    # dir.create(here(output_dir, "missing_germline_vcfs"))
+
+} else {
+  print("Output folder already exists")
+}
+
+```
+
+
+# Annotation color
+```{r}
+
+# Define colours for each group
+Color_NR <- "#F8766D"
+Color_R <- "#00BA38" # "#619CFF"
+Color_NA <- "#CD9600"
+Color_Pre <- "#619CFF"
+Color_Post <- "#F564E3"
+
+Color_HNSCC <- "#009292"
+Color_CSCC <- "#CD9600"
+Color_Urothelial <- "#B66DFF"
+Color_LN_melanoma <- "#00BFC4"
+Color_Colon <- "#F8766D"
+Color_Colon_MSI <- "#B73A3A"
+Color_Colon_MSS <- "#23C26F"
+Color_TNBC <- "#FEB5DA"
+Color_BELLINI <- "#FEB5DA"
+Color_IMCISION <- "#009292"
+Color_MATISSE <- "#CD9600"
+Color_NABUCCO <- "#B66DFF"
+Color_BELLINI <- "#FEB5DA"
+Color_NICHE_MSS <- "#23C26F"
+Color_NICHE_MSI <- "#B73A3A"
+Color_OpACIN_neo <- "#00BFC4"
+Color_PRADO <- "#619CFF"
+
+annotation_color_list = list(
+  Response = c(NR = Color_NR, R = Color_R),
+  Treatment = c(Pre = Color_Pre, Post = Color_Post),
+  Histology = c(LN_melanoma = Color_LN_melanoma, Urothelial = Color_Urothelial,
+                Colon = Color_Colon, HNSCC = Color_HNSCC, TBNC = Color_TNBC,
+                CSCC = Color_CSCC),
+  Trial = c(BELLINI = Color_BELLINI, IMCISION = Color_IMCISION,
+            MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
+            `NICHE-MSS` = Color_NICHE_MSS, `NICHE-MSI` = Color_NICHE_MSI,
+            OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO))
+
+trial_colors <- c(BELLINI = Color_BELLINI, IMCISION = Color_IMCISION,
+            MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
+            `NICHE-MSS` = Color_NICHE_MSS, `NICHE-MSI` = Color_NICHE_MSI,
+            OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO)
+
+trial_colors_combined <- c(Combined = "#999999", BELLINI = Color_BELLINI,
+                           IMCISION = Color_IMCISION,
+            MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
+            `NICHE-MSS` = Color_Colon_MSS, `NICHE-MSI` = Color_NICHE_MSI,
+            OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO)
+
+histology_msi_mss_colors <- c(`Colon-MSI`= Color_Colon_MSI,
+                              `Colon-MSS`= Color_Colon_MSS,
+                              CSCC = Color_CSCC, HNSCC = Color_HNSCC, 
+                              LN_melanoma = Color_LN_melanoma,
+                              TBNC = Color_TNBC,
+                              Urothelial = Color_Urothelial)
+
+```
+
+# -----------------------------
+
+# Gene sets
+
+```{r}
+gene_signatures <- read_csv2(
+  here("data", "processed", "signatures", "gene_signatures.csv")) %>%
+  filter(!is.na(Gene))
+
+signature_overview <- read_csv2(
+  here("data", "external", "signatures",
+       "_overview_of_signatures_20260212.csv")) 
+
+gene_signatures_meta_analysis <- signature_overview %>%
+  filter(Meta_analysis == "Yes")
+
+# Load NKI pancancer signature components
+pancan_response_signature_1.25 <- read_csv2(
+  here(differential_expression_meta_dir,
+       "pancan_response_signature_1.25.csv"))
+
+pancan_nonresponse_signature_1.25 <- read_csv2(
+  here(differential_expression_meta_dir,
+       "pancan_nonresponse_signature_1.25.csv"))
+```
+
+## Combine
+```{r}
+gene_signatures <- gene_signatures %>%
+  full_join(pancan_response_signature_1.25 %>%
+              select(gene) %>%
+              setNames("Gene") %>%
+              mutate(Signature = "pancancer_response_sig_1.25")
+            ) %>%
+  full_join(pancan_nonresponse_signature_1.25 %>%
+              select(gene) %>%
+              setNames("Gene") %>%
+              mutate(Signature = "pancan_nonresponse_signature_1.25")
+            )
+
+gene_signatures_l <- split(
+  gene_signatures$Gene, gene_signatures$Signature)
+gene_signatures_l <- gene_signatures_l[gene_signatures$Signature %>% unique()]
+
+print(knitr::kable(gene_signatures %>%
+        select(Signature, Class, Geneset_size) %>%
+        unique()), n = n_distinct(gene_signatures$Signature))
+
+gene_features <- read.csv2(
+  file = here("data", "external", "biomaRt_gene_features.csv"))
+
+gene_descriptions <- gene_features %>%
+              select(hgnc_symbol, description) %>%
+              rename("gene" = "hgnc_symbol") %>%
+              unique()
+
+```
+
+# -----------------------------
+# iAtlas datasets
+
+##  blca_iatlas_imvigor210_2017
+```{r}
+imvigor210_dir <- "/shared/data/chalabi_group/cBioportal_datasets/blca_iatlas_imvigor210_2017"
+list.files(imvigor210_dir)
+
+imvigor210_clinical_patient <- read_delim(
+  here(imvigor210_dir, "data_clinical_patient.txt"), skip = 4)
+imvigor210_clinical_sample <- read_delim(
+  here(imvigor210_dir, "data_clinical_sample.txt"), skip = 4) %>%
+  mutate(RNA_SAMPLE_ID = paste0("X", SAMPLE_ID))
+
+imvigor210_clinical_patient %>% mutate_if(is.character, as.factor) %>% summary()
+imvigor210_clinical_sample %>% mutate_if(is.character, as.factor) %>% summary()
+
+nrow(imvigor210_clinical_patient)
+nrow(imvigor210_clinical_sample)
+table(
+  imvigor210_clinical_sample$PATIENT_ID == imvigor210_clinical_sample$SAMPLE_ID)
+
+imvigor210_data_mutations <- read.delim(
+  here(imvigor210_dir, "data_mutations.txt"))
+imvigor210_data_mutations <- imvigor210_data_mutations %>%
+  mutate(RNA_SAMPLE_ID = paste0("X", Tumor_Sample_Barcode))
+imvigor210_data_mutations %>% colnames()
+
+# 242 samples have genomics
+n_distinct(imvigor210_data_mutations$Tumor_Sample_Barcode)
+imvigor210_data_mutations$Tumor_Sample_Barcode %>% unique() %>% head()
+imvigor210_data_gene_signatures <- read.delim(
+  here(imvigor210_dir, "data_gene_signatures.txt"))
+
+# RNA
+imvigor210_mrna_seq_tpm <- read.delim(
+  here(imvigor210_dir, "data_mrna_seq_tpm.txt"))
+
+dim(imvigor210_mrna_seq_tpm)
+
+table(
+  colnames(imvigor210_mrna_seq_tpm) %in% paste0(
+    "X", unique(imvigor210_data_mutations$Tumor_Sample_Barcode)))
+
+imvigor210_clinical_sample %>%
+  filter(SAMPLE_ID %in% imvigor210_data_mutations)
+
+imvigor210_clinical_sample %>%
+  filter(RNA_SAMPLE_ID %in% colnames(imvigor210_mrna_seq_tpm))
+
+imvigor210_clinical_patient
+
+imvigor210_clinical_sample %>% filter(is.na(RESPONSE)) %>% factor_summary()
+
+imvigor210_metadata <- imvigor210_clinical_patient %>%
+  left_join(imvigor210_clinical_sample) %>%
+  filter(SAMPLE_ID %in% imvigor210_data_mutations$Tumor_Sample_Barcode) %>%
+  filter(RNA_SAMPLE_ID %in% colnames(imvigor210_mrna_seq_tpm)) %>%
+  mutate(has_RNA = TRUE, has_DNA = TRUE) %>%
+  filter(!is.na(RESPONSE)) %>%
+  mutate(PATIENT_ID = as.character(PATIENT_ID))%>%
+  mutate(SAMPLE_ID = as.character(SAMPLE_ID)) %>%
+  mutate(Study = "imvigor210_2017") %>%
+  mutate(CLINICAL_BENEFIT = as.character(CLINICAL_BENEFIT))
+
+imvigor210_metadata %>% factor_summary()
+imvigor210_metadata %>% write_csv2(here(output_dir, "imvigor210_metadata.csv"))
+```
+
+
+## mel_iatlas_hugo_ucla_2016
+
+```{r}
+mel_iatlas_hugo_ucla_2016_dir <- "/shared/data/chalabi_group/cBioportal_datasets/mel_iatlas_hugo_ucla_2016"
+list.files(mel_iatlas_hugo_ucla_2016_dir)
+
+mel_iatlas_hugo_ucla_2016_clinical_patient <- read_delim(
+  here(mel_iatlas_hugo_ucla_2016_dir, "data_clinical_patient.txt"), skip = 4)
+mel_iatlas_hugo_ucla_2016_clinical_sample <- read_delim(
+  here(mel_iatlas_hugo_ucla_2016_dir, "data_clinical_sample.txt"), skip = 4)
+
+mel_iatlas_hugo_ucla_2016_clinical_patient %>% factor_summary()
+mel_iatlas_hugo_ucla_2016_clinical_sample %>% factor_summary()
+
+nrow(mel_iatlas_hugo_ucla_2016_clinical_patient)
+nrow(mel_iatlas_hugo_ucla_2016_clinical_sample)
+
+table(mel_iatlas_hugo_ucla_2016_clinical_sample$PATIENT_ID ==
+        mel_iatlas_hugo_ucla_2016_clinical_sample$SAMPLE_ID)
+
+mel_iatlas_hugo_ucla_2016_data_mutations <- read.delim(
+  here(mel_iatlas_hugo_ucla_2016_dir, "data_mutations.txt"))
+# str(mel_iatlas_hugo_ucla_2016_data_mutations)
+mel_iatlas_hugo_ucla_2016_data_mutations %>% colnames()
+
+n_distinct(mel_iatlas_hugo_ucla_2016_data_mutations$Tumor_Sample_Barcode)
+
+mel_iatlas_hugo_ucla_2016_mrna_seq <- read.delim(
+  here(mel_iatlas_hugo_ucla_2016_dir, "data_mrna_seq_tpm.txt"))
+
+mel_iatlas_hugo_ucla_2016_signatures <- read.delim(
+  here(mel_iatlas_hugo_ucla_2016_dir, "data_gene_signatures.txt"))
+
+dim(mel_iatlas_hugo_ucla_2016_mrna_seq)
+table(colnames(mel_iatlas_hugo_ucla_2016_mrna_seq) %in%
+        unique(mel_iatlas_hugo_ucla_2016_data_mutations$Tumor_Sample_Barcode))
+
+mel_iatlas_hugo_ucla_2016_metadata <- mel_iatlas_hugo_ucla_2016_clinical_patient %>%
+  left_join(mel_iatlas_hugo_ucla_2016_clinical_sample) %>%
+  filter(SAMPLE_ID %in% mel_iatlas_hugo_ucla_2016_data_mutations$Tumor_Sample_Barcode)  %>%
+  filter(SAMPLE_ID %in% colnames(mel_iatlas_hugo_ucla_2016_mrna_seq)) %>%
+  mutate(has_RNA = TRUE, has_DNA = TRUE) %>%
+  mutate(Study = "hugo_ucla_2016")  %>%
+  mutate(CLINICAL_BENEFIT = as.character(CLINICAL_BENEFIT))
+
+mel_iatlas_hugo_ucla_2016_metadata %>% factor_summary()
+mel_iatlas_hugo_ucla_2016_metadata %>%
+  write_csv2(here(output_dir, "mel_iatlas_hugo_ucla_2016_metadata.csv"))
+```
+
+
+## rcc_iatlas_immotion150_2018
+
+```{r}
+# mcdermott et al
+rcc_iatlas_immotion150_2018_dir <- "/shared/data/chalabi_group/cBioportal_datasets/rcc_iatlas_immotion150_2018"
+list.files(rcc_iatlas_immotion150_2018_dir)
+
+## No sex information
+rcc_iatlas_immotion150_2018_clinical_patient <- read_delim(
+  here(rcc_iatlas_immotion150_2018_dir, "data_clinical_patient.txt"), skip = 4)
+rcc_iatlas_immotion150_2018_clinical_sample <- read_delim(
+  here(rcc_iatlas_immotion150_2018_dir, "data_clinical_sample.txt"), skip = 4)
+
+rcc_iatlas_immotion150_2018_clinical_patient %>% factor_summary()
+rcc_iatlas_immotion150_2018_clinical_sample %>% factor_summary()
+
+nrow(rcc_iatlas_immotion150_2018_clinical_patient)
+nrow(rcc_iatlas_immotion150_2018_clinical_sample)
+table(rcc_iatlas_immotion150_2018_clinical_sample$PATIENT_ID ==
+        rcc_iatlas_immotion150_2018_clinical_sample$SAMPLE_ID)
+
+rcc_iatlas_immotion150_2018_data_mutations <- read.delim(
+  here(rcc_iatlas_immotion150_2018_dir, "data_mutations.txt"))
+
+# str(rcc_iatlas_immotion150_2018_data_mutations)
+rcc_iatlas_immotion150_2018_data_mutations %>% colnames()
+
+n_distinct(rcc_iatlas_immotion150_2018_data_mutations$Tumor_Sample_Barcode)
+
+rcc_iatlas_immotion150_2018_data_mutations$Tumor_Sample_Barcode %>%
+  unique() %>%
+  head()
+
+rcc_iatlas_immotion150_2018_mrna_seq <- read.delim(
+  here(rcc_iatlas_immotion150_2018_dir, "data_mrna_seq_tpm.txt"))
+
+rcc_iatlas_immotion150_2018_signatures <- read.delim(
+  here(rcc_iatlas_immotion150_2018_dir, "data_gene_signatures.txt"))
+
+dim(rcc_iatlas_immotion150_2018_mrna_seq)
+table(colnames(rcc_iatlas_immotion150_2018_mrna_seq) %in%
+        unique(rcc_iatlas_immotion150_2018_data_mutations$Tumor_Sample_Barcode))
+
+rcc_iatlas_immotion150_2018_metadata <- rcc_iatlas_immotion150_2018_clinical_patient %>%
+  left_join(rcc_iatlas_immotion150_2018_clinical_sample) %>%
+  filter(SAMPLE_ID %in%
+           rcc_iatlas_immotion150_2018_data_mutations$Tumor_Sample_Barcode)  %>%
+  filter(SAMPLE_ID %in% colnames(rcc_iatlas_immotion150_2018_mrna_seq)) %>%
+  filter(!is.na(CLINICAL_BENEFIT)) %>%
+  mutate(has_RNA = TRUE, has_DNA = TRUE) %>%
+  mutate(Study = "immotion150_2018") %>%
+  mutate(CLINICAL_BENEFIT = as.character(CLINICAL_BENEFIT))
+
+rcc_iatlas_immotion150_2018_metadata %>% factor_summary()
+
+rcc_iatlas_immotion150_2018_metadata %>%
+  write_csv2(here(output_dir, "rcc_iatlas_immotion150_2018_metadata.csv"))
+```
+
+
+## mel_iatlas_liu_2019
+
+```{r}
+
+mel_iatlas_liu_2019_dir <- "/shared/data/chalabi_group/cBioportal_datasets/mel_iatlas_liu_2019"
+list.files(mel_iatlas_liu_2019_dir)
+
+mel_iatlas_liu_2019_clinical_patient <- read_delim(
+  here(mel_iatlas_liu_2019_dir, "data_clinical_patient.txt"), skip = 4)
+mel_iatlas_liu_2019_clinical_sample <- read_delim(
+  here(mel_iatlas_liu_2019_dir, "data_clinical_sample.txt"), skip = 4)
+
+mel_iatlas_liu_2019_clinical_patient %>% factor_summary()
+mel_iatlas_liu_2019_clinical_sample %>% factor_summary()
+
+nrow(mel_iatlas_liu_2019_clinical_patient)
+nrow(mel_iatlas_liu_2019_clinical_sample)
+table(mel_iatlas_liu_2019_clinical_sample$PATIENT_ID == mel_iatlas_liu_2019_clinical_sample$SAMPLE_ID)
+
+mel_iatlas_liu_2019_data_mutations <- read.delim(
+  here(mel_iatlas_liu_2019_dir, "data_mutations.txt"))
+
+# str(mel_iatlas_liu_2019_data_mutations)
+mel_iatlas_liu_2019_data_mutations %>% colnames()
+
+n_distinct(mel_iatlas_liu_2019_data_mutations$Tumor_Sample_Barcode)
+mel_iatlas_liu_2019_data_mutations$Tumor_Sample_Barcode %>% unique() %>% head()
+
+mel_iatlas_liu_2019_mrna_seq <- read.delim(
+  here(mel_iatlas_liu_2019_dir, "data_mrna_seq_tpm.txt"))
+
+mel_iatlas_liu_2019_signatures <- read.delim(
+  here(mel_iatlas_liu_2019_dir, "data_gene_signatures.txt"))
+
+dim(mel_iatlas_liu_2019_mrna_seq)
+table(colnames(mel_iatlas_liu_2019_mrna_seq) %in%
+        unique(mel_iatlas_liu_2019_data_mutations$Tumor_Sample_Barcode))
+
+mel_iatlas_liu_2019_metadata <- mel_iatlas_liu_2019_clinical_patient %>%
+  left_join(mel_iatlas_liu_2019_clinical_sample) %>%
+  filter(SAMPLE_ID %in% mel_iatlas_liu_2019_data_mutations$Tumor_Sample_Barcode)  %>%
+  filter(SAMPLE_ID %in% colnames(mel_iatlas_liu_2019_mrna_seq)) %>%
+  filter(!is.na(CLINICAL_BENEFIT)) %>%
+  mutate(has_RNA = TRUE, has_DNA = TRUE) %>%
+  mutate(Study = "mel_iatlas_Liu_2019") %>%
+  mutate(CLINICAL_BENEFIT = as.character(CLINICAL_BENEFIT))
+
+mel_iatlas_liu_2019_metadata %>% factor_summary()
+mel_iatlas_liu_2019_metadata %>%
+  write_csv2(here(output_dir, "mel_iatlas_liu_2019_metadata.csv"))
+```
+
+
+## mel_iatlas_gide_2019
+
+### RNA only, pre and on treatment
+```{r}
+
+list.files("/shared/data/chalabi_group/cBioportal_datasets/mel_iatlas_gide_2019")
+
+mel_iatlas_gide_2019_dir <- "/shared/data/chalabi_group/cBioportal_datasets/mel_iatlas_gide_2019"
+list.files(mel_iatlas_gide_2019_dir)
+
+mel_iatlas_gide_2019_clinical_patient <- read_delim(
+  here(mel_iatlas_gide_2019_dir, "data_clinical_patient.txt"), skip = 4)
+mel_iatlas_gide_2019_clinical_sample <- read_delim(
+  here(mel_iatlas_gide_2019_dir, "data_clinical_sample.txt"), skip = 4)
+
+mel_iatlas_gide_2019_clinical_patient %>% factor_summary()
+mel_iatlas_gide_2019_clinical_sample %>% factor_summary()
+
+nrow(mel_iatlas_gide_2019_clinical_patient)
+nrow(mel_iatlas_gide_2019_clinical_sample)
+table(mel_iatlas_gide_2019_clinical_sample$PATIENT_ID ==
+        mel_iatlas_gide_2019_clinical_sample$SAMPLE_ID)
+
+# No DNA data
+# str(mel_iatlas_gide_2019_data_mutations)
+# n_distinct(mel_iatlas_gide_2019_data_mutations$Tumor_Sample_Barcode)
+# mel_iatlas_gide_2019_data_mutations$Tumor_Sample_Barcode %>% unique() %>% head()
+
+mel_iatlas_gide_2019_mrna_seq <- read.delim(
+  here(mel_iatlas_gide_2019_dir, "data_mrna_seq_expression.txt"))
+
+dim(mel_iatlas_gide_2019_mrna_seq)
+table(mel_iatlas_gide_2019_mrna_seq$Hugo_Symbol) %>%
+  as.data.frame() %>%
+  filter(Freq > 1)
+
+mel_iatlas_gide_2019_metadata <- mel_iatlas_gide_2019_clinical_patient %>%
+  left_join(mel_iatlas_gide_2019_clinical_sample) %>%
+  filter(SAMPLE_ID %in% colnames(mel_iatlas_gide_2019_mrna_seq)) %>%
+  filter(!is.na(CLINICAL_BENEFIT)) %>%
+  mutate(has_RNA = TRUE, has_DNA = FALSE) %>%
+  mutate(Study = "mel_iatlas_gide_2019") %>%
+  mutate(CLINICAL_BENEFIT = as.character(CLINICAL_BENEFIT))
+
+mel_iatlas_gide_2019_metadata %>% factor_summary()
+mel_iatlas_gide_2019_metadata %>%
+  write_csv2(here(output_dir, "mel_iatlas_gide_2019_metadata.csv"))
+```
+
+
+## brca_iatlas_anders_2022
+```{r}
+list.files("/shared/data/chalabi_group/cBioportal_datasets/brca_iatlas_anders_2022")
+
+brca_iatlas_anders_2022_dir <- "/shared/data/chalabi_group/cBioportal_datasets/brca_iatlas_anders_2022"
+list.files(brca_iatlas_anders_2022_dir)
+
+brca_iatlas_anders_2022_clinical_patient <- read_delim(
+  here(brca_iatlas_anders_2022_dir, "data_clinical_patient.txt"), skip = 4)
+brca_iatlas_anders_2022_clinical_sample <- read_delim(
+  here(brca_iatlas_anders_2022_dir, "data_clinical_sample.txt"), skip = 4) %>%
+    mutate(RNA_SAMPLE_ID = paste0("X", SAMPLE_ID))
+
+brca_iatlas_anders_2022_clinical_patient %>% factor_summary()
+brca_iatlas_anders_2022_clinical_sample %>% factor_summary()
+
+nrow(brca_iatlas_anders_2022_clinical_patient)
+nrow(brca_iatlas_anders_2022_clinical_sample)
+table(brca_iatlas_anders_2022_clinical_sample$PATIENT_ID ==
+        brca_iatlas_anders_2022_clinical_sample$SAMPLE_ID)
+
+brca_iatlas_anders_2022_data_mutations <- read.delim(
+  here(brca_iatlas_anders_2022_dir, "data_mutations.txt")) %>%
+  mutate(RNA_SAMPLE_ID = paste0("X", Tumor_Sample_Barcode))
+
+# str(brca_iatlas_anders_2022_data_mutations)
+brca_iatlas_anders_2022_data_mutations %>% colnames()
+
+n_distinct(brca_iatlas_anders_2022_data_mutations$Tumor_Sample_Barcode)
+
+imvigor210_data_mutations <- imvigor210_data_mutations %>%
+  mutate(RNA_SAMPLE_ID = paste0("X", Tumor_Sample_Barcode))
+
+brca_iatlas_anders_2022_mrna_seq <- read.delim(
+  here(brca_iatlas_anders_2022_dir, "data_mrna_seq_tpm.txt"))
+
+dim(brca_iatlas_anders_2022_mrna_seq)
+table(colnames(brca_iatlas_anders_2022_mrna_seq) %in%
+        unique(brca_iatlas_anders_2022_data_mutations$RNA_SAMPLE_ID))
+
+brca_iatlas_anders_2022_metadata <- brca_iatlas_anders_2022_clinical_patient %>%
+  left_join(brca_iatlas_anders_2022_clinical_sample) %>%
+  filter(SAMPLE_ID %in%
+           brca_iatlas_anders_2022_data_mutations$Tumor_Sample_Barcode)  %>%
+  filter(RNA_SAMPLE_ID %in% colnames(brca_iatlas_anders_2022_mrna_seq)) %>%
+  filter(!is.na(CLINICAL_BENEFIT)) %>%
+  mutate(has_RNA = TRUE, has_DNA = TRUE) %>%
+  mutate(Study = "brca_iatlas_anders_2022") %>%
+  mutate(PATIENT_ID = as.character(PATIENT_ID))%>%
+  mutate(SAMPLE_ID = as.character(SAMPLE_ID)) %>%
+  mutate(CLINICAL_BENEFIT = as.character(CLINICAL_BENEFIT)) %>%
+  mutate(SPECIMEN_PRESERVATION_TYPE = as.character(SPECIMEN_PRESERVATION_TYPE))
+
+brca_iatlas_anders_2022_metadata %>% factor_summary()
+brca_iatlas_anders_2022_metadata %>%
+  write_csv2(here(output_dir, "brca_iatlas_anders_2022_metadata.csv"))
+
+```
+
+## gbm_iatlas_prins_2019
+
+### RNA only
+```{r}
+gbm_iatlas_prins_2019_dir <- "/shared/data/chalabi_group/cBioportal_datasets/gbm_iatlas_prins_2019"
+list.files(gbm_iatlas_prins_2019_dir)
+
+gbm_iatlas_prins_2019_clinical_patient <- read_delim(
+  here(gbm_iatlas_prins_2019_dir, "data_clinical_patient.txt"), skip = 4)
+gbm_iatlas_prins_2019_clinical_sample <- read_delim(
+  here(gbm_iatlas_prins_2019_dir, "data_clinical_sample.txt"), skip = 4)
+
+gbm_iatlas_prins_2019_clinical_patient %>% factor_summary()
+gbm_iatlas_prins_2019_clinical_sample %>% factor_summary()
+
+nrow(gbm_iatlas_prins_2019_clinical_patient)
+nrow(gbm_iatlas_prins_2019_clinical_sample)
+table(
+  gbm_iatlas_prins_2019_clinical_sample$PATIENT_ID ==
+    gbm_iatlas_prins_2019_clinical_sample$SAMPLE_ID)
+
+gbm_iatlas_prins_2019_mrna_seq <- read.delim(
+  here(gbm_iatlas_prins_2019_dir, "data_mrna_seq_expression.txt"))
+
+dim(gbm_iatlas_prins_2019_mrna_seq)
+table(colnames(gbm_iatlas_prins_2019_mrna_seq) %in%
+        unique(gbm_iatlas_prins_2019_clinical_sample$SAMPLE_ID))
+
+gbm_iatlas_prins_2019_metadata <- gbm_iatlas_prins_2019_clinical_patient %>%
+  left_join(gbm_iatlas_prins_2019_clinical_sample) %>%
+  filter(SAMPLE_ID %in% colnames(gbm_iatlas_prins_2019_mrna_seq)) %>%
+  filter(!is.na(CLINICAL_BENEFIT)) %>%
+  mutate(has_RNA = TRUE, has_DNA = FALSE) %>%
+  mutate(Study = "gbm_iatlas_prins_2019") %>%
+  mutate(CLINICAL_BENEFIT = as.character(CLINICAL_BENEFIT))
+
+gbm_iatlas_prins_2019_metadata %>% factor_summary()
+gbm_iatlas_prins_2019_metadata %>%
+  write_csv2(here(output_dir, "gbm_iatlas_prins_2019_metadata.csv"))
+```
+
+## ccrcc_iatlas_choueiri_2016
+
+```{r}
+ccrcc_iatlas_choueiri_2016_dir <- "/shared/data/chalabi_group/cBioportal_datasets/ccrcc_iatlas_choueiri_2016"
+list.files(ccrcc_iatlas_choueiri_2016_dir)
+
+ccrcc_iatlas_choueiri_2016_clinical_patient <- read_delim(
+  here(ccrcc_iatlas_choueiri_2016_dir, "data_clinical_patient.txt"), skip = 4)
+ccrcc_iatlas_choueiri_2016_clinical_sample <- read_delim(
+  here(ccrcc_iatlas_choueiri_2016_dir, "data_clinical_sample.txt"), skip = 4)
+
+ccrcc_iatlas_choueiri_2016_clinical_patient %>% factor_summary()
+ccrcc_iatlas_choueiri_2016_clinical_sample %>% factor_summary()
+
+nrow(ccrcc_iatlas_choueiri_2016_clinical_patient)
+nrow(ccrcc_iatlas_choueiri_2016_clinical_sample)
+table(ccrcc_iatlas_choueiri_2016_clinical_sample$PATIENT_ID ==
+        ccrcc_iatlas_choueiri_2016_clinical_sample$SAMPLE_ID)
+
+ccrcc_iatlas_choueiri_2016_data_mutations <- read.delim(
+  here(ccrcc_iatlas_choueiri_2016_dir, "data_mutations.txt"))
+
+ccrcc_iatlas_choueiri_2016_data_mutations %>% colnames()
+
+n_distinct(ccrcc_iatlas_choueiri_2016_data_mutations$Tumor_Sample_Barcode)
+ccrcc_iatlas_choueiri_2016_data_mutations$Tumor_Sample_Barcode %>% unique() %>% head()
+
+ccrcc_iatlas_choueiri_2016_mrna_seq <- read.delim(
+  here(ccrcc_iatlas_choueiri_2016_dir, "data_mrna_seq_expression.txt"))
+
+dim(ccrcc_iatlas_choueiri_2016_mrna_seq)
+table(colnames(ccrcc_iatlas_choueiri_2016_mrna_seq) %in%
+        unique(ccrcc_iatlas_choueiri_2016_data_mutations$Tumor_Sample_Barcode))
+
+ccrcc_iatlas_choueiri_2016_metadata <- ccrcc_iatlas_choueiri_2016_clinical_patient %>%
+  left_join(ccrcc_iatlas_choueiri_2016_clinical_sample) %>%
+  filter(SAMPLE_ID %in%
+           ccrcc_iatlas_choueiri_2016_data_mutations$Tumor_Sample_Barcode)  %>%
+  filter(SAMPLE_ID %in% colnames(ccrcc_iatlas_choueiri_2016_mrna_seq)) %>%
+  filter(!is.na(CLINICAL_BENEFIT)) %>%
+  mutate(has_RNA = TRUE, has_DNA = TRUE) %>%
+  mutate(Study = "ccrcc_iatlas_choueiri_2016") %>%
+  mutate(CLINICAL_BENEFIT = as.character(CLINICAL_BENEFIT))
+
+ccrcc_iatlas_choueiri_2016_metadata %>% factor_summary()
+ccrcc_iatlas_choueiri_2016_metadata %>%
+  write_csv2(here(output_dir, "ccrcc_iatlas_choueiri_2016_metadata.csv"))
+```
+
+
+# Combine metadata
+```{r}
+combined_metadata <- imvigor210_metadata %>%
+  full_join(mel_iatlas_hugo_ucla_2016_metadata) %>%
+  full_join(rcc_iatlas_immotion150_2018_metadata ) %>%
+  full_join(brca_iatlas_anders_2022_metadata) %>%
+  full_join(mel_iatlas_liu_2019_metadata) %>%
+  full_join(ccrcc_iatlas_choueiri_2016_metadata) %>%
+  full_join(gbm_iatlas_prins_2019_metadata) %>%
+  full_join(mel_iatlas_gide_2019_metadata)
+
+combined_metadata <- combined_metadata %>%
+  mutate(RNA_SAMPLE_ID = ifelse(is.na(RNA_SAMPLE_ID),
+                                SAMPLE_ID, RNA_SAMPLE_ID)) %>%
+  mutate(CANCER_TYPE = ifelse(Study == "gbm_iatlas_prins_2019",
+                              "Glioblastoma", CANCER_TYPE))
+
+metastatic_metastatic_wes_rna_features_df_pre %>%
+  filter(is.na(SEX)) %>%
+  factor_summary()
+
+dim(combined_metadata)
+combined_metadata %>% filter(ICI_PATHWAY == "None") %>%
+  select(Study) %>%
+  factor_summary()
+
+combined_metadata %>%
+  filter(ICI_PATHWAY == "None") %>%
+  factor_summary()
+
+combined_metadata %>%
+  filter(is.na(ICI_PATHWAY)) %>%
+  select(Study) %>%
+  factor_summary()
+
+combined_metadata %>%
+  filter(is.na(ICI_TARGET)) %>%
+  select(Study) %>%
+  factor_summary()
+
+combined_metadata <- combined_metadata %>% filter(ICI_PATHWAY != "None")
+
+combined_metadata %>% factor_summary()
+
+combined_metadata %>% select(CANCER_TYPE, Study) %>% unique()
+
+table(combined_metadata$ICI_PATHWAY, combined_metadata$NEOICI_RX)
+table(combined_metadata$Study, combined_metadata$NEOICI_RX)
+table(combined_metadata$Study, combined_metadata$ICI_RX)
+table(combined_metadata$Study, combined_metadata$ICI_PATHWAY)
+table(combined_metadata$Study, combined_metadata$CANCER_TYPE)
+
+table(combined_metadata$Study, combined_metadata$CLINICAL_STAGE)
+
+```
+
+##  Harmonize Response/CB annotation
+```{r}
+# Harmonize CB annotation
+# combined_metadata %>% filter(is.na(RESPONSE)) %>% select(Study, RESPONSE, CLINICAL_BENEFIT)
+table(combined_metadata$RESPONDER, combined_metadata$RESPONSE, useNA = "ifany")
+table(combined_metadata$Study, combined_metadata$RESPONSE, useNA = "ifany")
+
+# combined_metadata %>% filter(Study %in% c("Van_allen_dfci_2015")) %>% factor_summary()
+# combined_metadata %>% filter(Study %in% c("Snyder_mskcc_2014")) %>% factor_summary()
+
+table(combined_metadata$Study, combined_metadata$CLINICAL_BENEFIT)
+combined_metadata$Response <- combined_metadata$RESPONSE
+combined_metadata <- combined_metadata %>%
+  mutate(Response = ifelse(Response %in% c("Complete Response", "CR", "LB",
+                                           "Partial Response", "PR"), "R",
+                           Response)) %>%
+  mutate(Response = ifelse(Response %in% c("NB", "PD", "Progressive Disease",
+                                           "SD", "Stable Disease"), "NR", 
+                           Response))
+
+table(combined_metadata$Response)
+table(combined_metadata$Study, combined_metadata$Response)
+table(combined_metadata$Study, combined_metadata$Response) %>%
+  prop.table(margin = 1) %>% round(2)
+
+study_response_rate <- table(combined_metadata$Study,
+                             combined_metadata$Response) %>%
+  prop.table(margin = 1) %>%
+  round(2) %>%
+  as.data.frame() %>%
+  setNames(c("Study", "Response", "Response_rate")) %>%
+  filter(Response == "R")
+
+study_response_rate
+
+combined_metadata %>%
+  write_csv2(here(output_dir, "combined_metadata.csv"))
+
+table(combined_metadata$Study, is.na(combined_metadata$RNA_SAMPLE_ID))
+table(combined_metadata$Study, is.na(combined_metadata$RNA_SAMPLE_ID))
+
+```
+
+# Plot number of studies
+
+```{r, fig.height = 6}
+table(combined_metadata$Study, combined_metadata$CANCER_TYPE) %>%
+  as.data.frame() %>%
+  setNames(c("Study", "CANCER_TYPE", "Freq")) %>%
+  ggplot(aes(x = Study, y = Freq, fill = CANCER_TYPE)) +
+  geom_col() + theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  guides(fill = guide_legend(nrow = 2))
+```
+
+
+```{r, fig.height = 6}
+table(combined_metadata$Study, combined_metadata$CANCER_TYPE) %>%
+  as.data.frame()  %>%
+  setNames(c("Study", "CANCER_TYPE", "Freq"))  %>%
+  ggplot(aes(x = CANCER_TYPE, y = Freq, fill = Study)) +
+  geom_col() + theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  guides(fill = guide_legend(nrow = 3))
+```
+
+# -----------------------------
+
+# TMB vs neoantigen
+```{r}
+combined_metadata  %>%
+  ggplot(aes(x = TMB_NONSYNONYMOUS, y = SNV_NEOANTIGEN)) +
+  geom_point(aes(col = CANCER_TYPE)) +
+  theme_Publication() + stat_cor(method = "spearman") +
+  labs(title = "cBioportal metastatic cohort") +
+  guides(col = guide_legend(nrow = 3))
+
+combined_metadata %>%
+  ggplot(aes(x = TMB_NONSYNONYMOUS, y = INDEL_NEOANTIGEN)) +
+  geom_point(aes(col = CANCER_TYPE)) +
+  theme_Publication() +  stat_cor(method = "spearman") +
+    guides(col = guide_legend(nrow = 4)) +
+  labs(title = "cBioportal metastatic cohort") +
+  guides(col = guide_legend(nrow = 3))
+
+combined_metadata %>%
+  filter(!Study %in% c("gbm_iatlas_prins_2019", "mel_iatlas_gide_2019")) %>%
+  mutate(TOTAL_NEOANTIGEN = SNV_NEOANTIGEN + INDEL_NEOANTIGEN +
+           VIRUS_NEOANTIGEN + FUSION_NEOANTIGEN + CTA_SELF_NEOANTIGEN +
+           ERV_NEOANTIGEN ) %>%
+  ggplot(aes(x = TMB_NONSYNONYMOUS, y = TOTAL_NEOANTIGEN)) +
+  stat_cor(method = "spearman") +
+  geom_point(aes(col = CANCER_TYPE)) + theme_Publication() +
+  labs(title = "cBioportal metastatic cohort") +
+  guides(col = guide_legend(nrow = 3))
+
+```
+
+```{r}
+combined_metadata %>%
+  filter(!Study %in% c("gbm_iatlas_prins_2019", "mel_iatlas_gide_2019")) %>%
+  mutate(TOTAL_NEOANTIGEN = SNV_NEOANTIGEN + INDEL_NEOANTIGEN +
+           VIRUS_NEOANTIGEN + FUSION_NEOANTIGEN + CTA_SELF_NEOANTIGEN +
+           ERV_NEOANTIGEN ) %>%
+  ggplot(aes(x = TMB_NONSYNONYMOUS, y = TOTAL_NEOANTIGEN)) +
+  stat_cor(method = "spearman") +
+  geom_point(aes(col = CANCER_TYPE)) + theme_Publication() +
+  facet_wrap(~CANCER_TYPE) +
+  guides(col = guide_legend(nrow = 2))
+
+```
+
+# -----------------------------
+# Combine RNA
+```{r}
+# Check they genes are in the same order
+table(imvigor210_mrna_seq_tpm$Hugo_Symbol == mel_iatlas_hugo_ucla_2016_mrna_seq$Hugo_Symbol)
+table(imvigor210_mrna_seq_tpm$Hugo_Symbol == rcc_iatlas_immotion150_2018_mrna_seq$Hugo_Symbol)
+table(imvigor210_mrna_seq_tpm$Hugo_Symbol == mel_iatlas_liu_2019_mrna_seq$Hugo_Symbol)
+table(imvigor210_mrna_seq_tpm$Hugo_Symbol == brca_iatlas_anders_2022_mrna_seq$Hugo_Symbol)
+table(imvigor210_mrna_seq_tpm$Hugo_Symbol == mel_iatlas_gide_2019_mrna_seq$Hugo_Symbol)
+table(imvigor210_mrna_seq_tpm$Hugo_Symbol == ccrcc_iatlas_choueiri_2016_mrna_seq$Hugo_Symbol)
+table(imvigor210_mrna_seq_tpm$Hugo_Symbol == gbm_iatlas_prins_2019_mrna_seq$Hugo_Symbol)
+
+iatlas_combined_RNA <- imvigor210_mrna_seq_tpm %>%
+  cbind(mel_iatlas_hugo_ucla_2016_mrna_seq[, -1]) %>%
+  cbind(rcc_iatlas_immotion150_2018_mrna_seq[, -1]) %>%
+  cbind(mel_iatlas_liu_2019_mrna_seq[, -1]) %>%
+  cbind(brca_iatlas_anders_2022_mrna_seq[, -1]) %>%
+  cbind(mel_iatlas_gide_2019_mrna_seq[, -1])%>%
+  cbind(ccrcc_iatlas_choueiri_2016_mrna_seq[, -1]) %>%
+  cbind(gbm_iatlas_prins_2019_mrna_seq[, -1]) %>%
+  column_to_rownames("Hugo_Symbol") %>%
+  as.matrix()
+
+colSums(iatlas_combined_RNA) %>% summary()
+
+dim(iatlas_combined_RNA)
+class(iatlas_combined_RNA)
+length(unique(colnames(iatlas_combined_RNA)))
+```
+
+# TPM ssGSEA
+
+```{r}
+packageVersion("GSVA")
+run_ssgsea <- FALSE
+if (run_ssgsea) {
+    
+  tpm_ssgsea_results <- gsva(
+    as.matrix(iatlas_combined_RNA),
+    gene_signatures_l,
+    method = "ssgsea",
+    kcdf = "Gaussian",
+    # Minimum gene set size
+    min.sz = 1,
+    # Compute Gaussian-distributed scores
+    mx.diff = TRUE,
+    # Don't print out the progress bar
+    verbose = FALSE
+    )
+
+  tpm_ssgsea_results %>%
+    as.data.frame() %>%
+    rownames_to_column("Signature") %>%
+    write_csv2(here(output_dir, "tpm_ssgsea_results.csv"))
+  
+}
+
+tpm_ssgsea_results <- read_csv2(here(output_dir, "tpm_ssgsea_results.csv"))
+
+table(colnames(tpm_ssgsea_results) %in% combined_metadata$RNA_SAMPLE_ID)
+table(colnames(tpm_ssgsea_results) %in% combined_metadata$SAMPLE_ID)
+
+tpm_ssgsea_results_df <- tpm_ssgsea_results %>%
+  column_to_rownames("Signature") %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("RNA_SAMPLE_ID") %>%
+  left_join(combined_metadata, by = "RNA_SAMPLE_ID") %>%
+  filter(!is.na(Study))
+
+# Check NA values
+tpm_ssgsea_NAs <- tpm_ssgsea_results %>%
+  column_to_rownames("Signature") %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("RNA_SAMPLE_ID") %>%
+  left_join(combined_metadata, by = "RNA_SAMPLE_ID") %>%
+  filter(is.na(Study))
+
+dim(tpm_ssgsea_NAs)
+tpm_ssgsea_NAs$RNA_SAMPLE_ID
+```
+
+# -----------------------------
+# WES RNA features df
+```{r}
+# TPM iatlas
+metastatic_wes_rna_features_df_pre <- tpm_ssgsea_results_df %>%
+  mutate(Response_n = ifelse(
+    Response == "R",
+    1, ifelse(
+      Response == "NR", 0, NA))) %>%
+  mutate(pancancer_response_score =
+             pancancer_response_sig_1.25 - pancan_nonresponse_signature_1.25,
+         Trial = Study) %>%
+  mutate(
+    TMB = TMB_NONSYNONYMOUS,
+    TMB_scaled = scale(TMB),
+    TIL_score_scaled = scale(TIL_score),
+    Proliferation_scaled = scale(Tumor_proliferation_rate),
+    B_cat_scaled = scale(B_catenin_signature_Luke_et_al),
+    pancancer_response_score_scaled = scale(pancancer_response_score))
+
+metastatic_wes_rna_features_df_pre[1:5, c(284, 285, 286, 287)]
+
+metastatic_wes_rna_features_df_pre$TIL_score_scaled <- as.vector(
+  metastatic_wes_rna_features_df_pre$TIL_score_scaled)
+metastatic_wes_rna_features_df_pre$Proliferation_scaled <- as.vector(
+  metastatic_wes_rna_features_df_pre$Proliferation_scaled)
+metastatic_wes_rna_features_df_pre$B_cat_scaled <- as.vector(
+  metastatic_wes_rna_features_df_pre$B_cat_scaled)
+metastatic_wes_rna_features_df_pre$TMB_scaled <- as.vector(
+  metastatic_wes_rna_features_df_pre$TMB_scaled)
+metastatic_wes_rna_features_df_pre$pancancer_response_score_scaled <- as.vector(
+  metastatic_wes_rna_features_df_pre$pancancer_response_score_scaled)
+
+```
+
+
+# Correlations
+```{r, fig.height = 30, fig.width = 6}
+# TPM
+ssgsea_correlations <- tpm_ssgsea_results_df %>%
+  select(tpm_ssgsea_results$Signature) %>%
+  cor()
+
+ssgsea_correlations %>%
+  as.data.frame() %>%
+  select(pancancer_response_sig_1.25) %>%
+  setNames(c("pancan_response_sig_corr")) %>%
+  rownames_to_column("Signature") %>%
+  filter(!is.na(pancan_response_sig_corr)) %>%
+  ggplot(aes(x = reorder(Signature, pancan_response_sig_corr),
+                         y = pancan_response_sig_corr)) +
+  geom_col() + theme_Publication() + coord_flip()
+
+ssgsea_correlations %>%
+  as.data.frame() %>%
+  select(pancan_nonresponse_signature_1.25) %>%
+  setNames(c("pancan_nonresponse_signature_1.25")) %>%
+  rownames_to_column("Signature") %>%
+  filter(!is.na(pancan_nonresponse_signature_1.25)) %>%
+  ggplot(aes(x = reorder(Signature, pancan_nonresponse_signature_1.25),
+                         y = pancan_nonresponse_signature_1.25)) +
+  geom_col() + theme_Publication() + coord_flip()
+```
+
+```{r, fig.height = 12, fig.width = 12}
+metastatic_wes_rna_features_df_pre$B_catenin_signature_Luke_et_al %>% summary()
+gene_signatures_meta_analysis$Signature
+
+metastatic_wes_rna_features_df_pre %>%
+  select(all_of(c(gene_signatures_meta_analysis$Signature[
+    gene_signatures_meta_analysis$Signature %in% colnames(ssgsea_results_df)],
+    "pancancer_response_sig_1.25", "pancan_nonresponse_signature_1.25",
+    "pancancer_response_score"))) %>%
+  as.matrix() %>%
+  cor() %>%
+  corrplot(order = "AOE")
+
+```
+
+```{r, fig.height = 8, fig.width = 6}
+ssgsea_correlations %>%
+  as.data.frame() %>%
+  select(pancancer_response_sig_1.25) %>%
+  setNames(c("pancan_response_sig_corr")) %>%
+  rownames_to_column("Signature") %>%
+  filter(pancan_response_sig_corr > 0.7) %>%
+  ggplot(aes(x = reorder(Signature, pancan_response_sig_corr),
+                         y = pancan_response_sig_corr)) +
+  geom_col() + theme_Publication() + coord_flip() + labs(x = "")
+
+ssgsea_correlations %>%
+  as.data.frame() %>%
+  select(pancancer_response_sig_1.25) %>%
+  setNames(c("pancan_response_sig_corr")) %>%
+  rownames_to_column("Signature") %>%
+  filter(Signature %in% gene_signatures_meta_analysis$Signature) %>%
+  ggplot(aes(x = reorder(Signature, pancan_response_sig_corr),
+                         y = pancan_response_sig_corr)) +
+  geom_col() + theme_Publication() + coord_flip() + labs(x = "") +
+  labs(title = "External metastatic cohorts\nResponse sig ssGSEA corr")
+
+ssgsea_correlations %>%
+  as.data.frame() %>%
+  select(pancan_nonresponse_signature_1.25) %>%
+  setNames(c("pancan_nonresponse_sig_corr")) %>%
+  rownames_to_column("Signature")%>%
+  filter(Signature %in% gene_signatures_meta_analysis$Signature)%>%
+  ggplot(aes(x = reorder(Signature, pancan_nonresponse_sig_corr),
+                         y = pancan_nonresponse_sig_corr)) +
+  geom_col() + theme_Publication() + coord_flip() + labs(x = "") +
+  labs(title = "External metastatic cohorts\nNon-response sig ssGSEA corr")
+
+```
+
+# ------------
+
+# GLMer Models
+```{r}
+dim(metastatic_wes_rna_features_df_pre)
+
+Trial_model <- glmer(Response_n ~ (1 | Trial),
+                     data = metastatic_wes_rna_features_df_pre,
+                     family = binomial)
+summary(Trial_model)
+
+Proliferation_model <- glmer(Response_n ~ Proliferation_scaled + (1 | Trial),
+                             data = metastatic_wes_rna_features_df_pre,
+                             family = binomial)
+summary(Proliferation_model)
+
+TIL_model <- glmer(Response_n ~ TIL_score_scaled + (1 | Trial),
+                   data = metastatic_wes_rna_features_df_pre, family = binomial)
+summary(TIL_model)
+
+TMB_model <- glmer(Response_n ~ TMB_scaled + (1 | Trial),
+                   data = metastatic_wes_rna_features_df_pre, family = binomial)
+summary(TMB_model)
+
+```
+
+# GLMer TMB tumour type
+
+## Fitting trials
+```{r}
+metastatic_wes_TMB_rna_features_df_pre_f <- metastatic_wes_rna_features_df_pre %>%
+  filter(!Study %in% c("gbm_iatlas_prins_2019", "mel_iatlas_gide_2019")) %>%
+  filter(!is.na(TMB)) 
+
+TMB_model <- glm(Response_n ~ TMB_scaled,
+                 data = metastatic_wes_TMB_rna_features_df_pre_f,
+                 family = binomial)
+summary(TMB_model)
+
+Trial_model <- glmer(Response_n ~ (1 | Trial),
+                     data = metastatic_wes_TMB_rna_features_df_pre_f,
+                     family = binomial)
+summary(Trial_model)
+
+TMB_trial_model <- glmer(Response_n ~ TMB_scaled + (1 | Trial),
+                         data = metastatic_wes_TMB_rna_features_df_pre_f,
+                         family = binomial)
+summary(TMB_trial_model)
+
+trial_predictions <- predict(Trial_model, type = "response")
+tmb_predictions <- predict(TMB_model, type = "response")
+tmb_trial_predictions <- predict(TMB_trial_model, type = "response")
+```
+
+## Likelihood ratio test
+```{r}
+anova(TMB_trial_model, Trial_model) # These are nested
+AIC(TMB_trial_model, TMB_model)
+BIC(TMB_trial_model, TMB_model)
+```
+
+# Boxplots
+
+```{r}
+# Incliuding GBM and mel_itlas
+table(metastatic_wes_rna_features_df_pre$Study,
+      metastatic_wes_rna_features_df_pre$CANCER_TYPE)
+
+metastatic_wes_rna_features_df_pre %>%
+  ggplot(aes(x = Response, y = Tumor_proliferation_rate, fill = Response)) +
+  geom_boxplot() + geom_point() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  labs(title = "External metastatic data") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+metastatic_wes_rna_features_df_pre %>%
+  ggplot(aes(x = Response, y = TIL_score, fill = Response)) +
+  geom_boxplot() + geom_point() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(title = "External metastatic data") 
+
+metastatic_wes_rna_features_df_pre %>%
+  ggplot(aes(x = Response, y = TMB_NONSYNONYMOUS, fill = Response)) +
+  geom_boxplot() + geom_point() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(title = "External metastatic data") 
+
+metastatic_wes_rna_features_df_pre %>%
+  ggplot(aes(x = factor(Response),
+             y = log2(TMB), fill = Response)) +
+  geom_boxplot() + theme_Publication() +
+  # guides(fill = FALSE) +
+  labs(x = "", y = "log2(TMB) (mutations/Mb)") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) + 
+  geom_hline(yintercept = log2(10), linetype = "dashed", alpha = 0.5) +
+  stat_compare_means(method = "wilcox") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+```
+
+```{r, fig.height = 12, fig.width= 12}
+metastatic_wes_rna_features_df_pre %>%
+  ggplot(aes(x = Response, y = B_catenin_signature_Luke_et_al,
+             fill = Response)) +
+  geom_boxplot() + geom_point() + theme_Publication() +
+  stat_compare_means(method = "wilcox") + facet_wrap(~Study) +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(title = "External metastatic data") 
+
+metastatic_wes_TMB_rna_features_df_pre_f %>%
+  ggplot(aes(x = Response, y = TMB_NONSYNONYMOUS, fill = Response)) +
+  geom_boxplot() + geom_point() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  facet_wrap(~Study, scale = "free") + expand_limits(y = 0) +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(title = "External metastatic data")
+```
+
+
+## Pancan Response Signature
+```{r}
+table(metastatic_wes_rna_features_df_pre$Study,
+      metastatic_wes_rna_features_df_pre$CANCER_TYPE)
+
+metastatic_wes_rna_features_df_pre %>%
+  ggplot(aes(x = Response, y = pancancer_response_sig_1.25, fill = Response)) +
+  geom_boxplot() + geom_point() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(title = "External metastatic data") 
+
+metastatic_wes_rna_features_df_pre %>%
+  ggplot(aes(x = Response, y = pancan_nonresponse_signature_1.25,
+             fill = Response)) +
+  geom_boxplot() + geom_point() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(title = "External metastatic data") 
+
+metastatic_wes_rna_features_df_pre %>%
+  ggplot(aes(x = Response, y = pancancer_response_score, fill = Response)) +
+  geom_boxplot() + geom_point() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(title = "External metastatic data") 
+```
+
+```{r, fig.height = 12, fig.width= 12}
+
+metastatic_wes_rna_features_df_pre %>%
+  ggplot(aes(x = Response, y = pancancer_response_sig_1.25,
+             fill = Response)) +
+  geom_boxplot() + geom_point() + theme_Publication() +
+  stat_compare_means(method = "wilcox") + facet_wrap(~Study) +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(title = "External metastatic data") 
+
+metastatic_wes_rna_features_df_pre %>%
+  ggplot(aes(x = Response, y = pancan_nonresponse_signature_1.25,
+             fill = Response)) +
+  geom_boxplot() + geom_point() + theme_Publication() +
+  stat_compare_means(method = "wilcox") + facet_wrap(~Study) +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(title = "External metastatic data") 
+
+metastatic_wes_rna_features_df_pre %>%
+  ggplot(aes(x = Response, y = pancancer_response_score,
+             fill = Response)) +
+  geom_boxplot() + geom_point() + theme_Publication() +
+  stat_compare_means(method = "wilcox") + facet_wrap(~Study) +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(title = "External metastatic data") 
+```
+
+
+# Proliferation TIL score
+
+```{r, fig.height = 12, fig.width = 12}
+metastatic_wes_rna_features_df_pre %>%
+  ggplot(aes(x = Response, y = Tumor_proliferation_rate, fill = Response)) +
+  geom_boxplot() + geom_point() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  facet_wrap(~Study) +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(title = "External metastatic data") 
+
+metastatic_wes_rna_features_df_pre %>%
+  ggplot(aes(x = Response, y = TIL_score, fill = Response)) +
+  geom_boxplot() + geom_point() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  facet_wrap(~Study) +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(title = "External metastatic data") 
+
+```
+
+```{r}
+Trial_model <- glmer(Response_n ~ (1 | Trial),
+                     data = metastatic_wes_rna_features_df_pre,
+                     family = binomial)
+summary(Trial_model)
+
+median_Tumor_proliferation_rate_pre <- metastatic_wes_rna_features_df_pre %>%
+  pull(Tumor_proliferation_rate) %>%
+  median()
+median_Tumor_proliferation_rate_pre
+
+median_til_score_pre <- median(
+  metastatic_wes_rna_features_df_pre$TIL_score)
+median_til_score_pre
+
+prolif_TIL_quadrant_trial_plot <- metastatic_wes_rna_features_df_pre %>%
+  ggplot(aes(x = Tumor_proliferation_rate, y = TIL_score,
+             shape = Response, col = Study)) +
+  geom_point() + theme_Publication() +
+  geom_vline(xintercept = median_Tumor_proliferation_rate_pre,
+             linetype = "dashed") +
+  geom_hline(yintercept = median_til_score_pre, linetype = "dashed") +
+  guides(col = guide_legend(nrow = 3)) + facet_wrap(~Response)
+
+prolif_TIL_quadrant_trial_plot
+
+trial_quadrant_proportions <- table(
+  metastatic_wes_rna_features_df_pre$Tumor_proliferation_rate > median_Tumor_proliferation_rate_pre, 
+  metastatic_wes_rna_features_df_pre$TIL_score > median_til_score_pre,
+  metastatic_wes_rna_features_df_pre$Study) %>%
+  as.data.frame() %>%
+  setNames(c("Prolif_group", "mTIL_group", "Trial", "Freq")) %>%
+  mutate(Prolif_group = ifelse(Prolif_group == TRUE,
+                               "Prolif_high", "Prolif_low")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  group_by(Trial) %>% add_count(Trial, wt = Freq, name = "Total") %>%
+  mutate(quadrant = paste0(Prolif_group, "_", mTIL_group),
+         quadrant_prop = Freq / Total)
+  
+dim(metastatic_wes_rna_features_df_pre)
+
+table(metastatic_wes_rna_features_df_pre$Response)
+
+quadrant_response_proportions <- table(
+  metastatic_wes_rna_features_df_pre$Tumor_proliferation_rate > median_Tumor_proliferation_rate_pre,
+  metastatic_wes_rna_features_df_pre$TIL_score > median_til_score_pre,
+  metastatic_wes_rna_features_df_pre$Response) %>%
+  as.data.frame() %>%
+  setNames(c("Prolif_group", "mTIL_group", "Response", "Freq")) %>%
+  mutate(Prolif_group = ifelse(Prolif_group == TRUE,
+                               "Prolif_high", "Prolif_low")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  mutate(quadrant = paste0(Prolif_group, "_", mTIL_group))  %>%
+  group_by(quadrant) %>% add_count(quadrant, wt = Freq, name = "Total") %>%
+  mutate(quadrant_prop = round(Freq / Total, 2))
+
+quadrant_response_proportions
+
+quadrant_response_proportions %>%
+  select(quadrant, Response, Freq) %>%
+  pivot_wider(names_from = Response, values_from = Freq) %>%
+  column_to_rownames("quadrant") %>%
+  as.matrix() %>%
+  chisq.test()
+
+quadrant_response_proportions %>%
+  filter(Response == "R") %>%
+  rename(Response_rate = quadrant_prop) %>%
+  ggplot(aes(x = quadrant, y = Response_rate)) + geom_col() +
+  theme_Publication() + labs(x = "") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+trial_quadrant_proportions <- table(
+  metastatic_wes_rna_features_df_pre$Tumor_proliferation_rate > median_Tumor_proliferation_rate_pre,
+  metastatic_wes_rna_features_df_pre$TIL_score > median_til_score_pre,
+  metastatic_wes_rna_features_df_pre$Study) %>%
+  as.data.frame() %>%
+  setNames(c("Prolif_group", "mTIL_group", "Trial", "Freq")) %>%
+  mutate(Prolif_group = ifelse(Prolif_group == TRUE,
+                               "Prolif_high", "Prolif_low")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  group_by(Trial) %>% add_count(Trial, wt = Freq, name = "Total") %>%
+  mutate(quadrant = paste0(Prolif_group, "_", mTIL_group),
+         quadrant_prop = Freq / Total)
+  
+trial_quadrant_proportions
+
+trial_quadrant_proportions %>% select(quadrant, quadrant_prop, Trial) %>%
+  ggplot(aes(x = Trial, y = quadrant_prop, fill = quadrant)) +
+  geom_col() +
+  theme_Publication() +
+  coord_flip() +
+  labs(x = "", y = "", col = "") +
+  guides(fill = guide_legend(nrow = 2))
+
+metastatic_wes_rna_features_df_pre %>% 
+  ggplot(aes(x = Tumor_proliferation_rate, y = TIL_score,
+             shape = Response, col = Study)) +
+  geom_point() + theme_Publication() + facet_wrap(~Response) 
+
+```
+
+```{r}
+Proliferation_TIL_score_model <- glmer(
+  Response_n ~ Proliferation_scaled * TIL_score_scaled + (1 | Trial),
+  data = metastatic_wes_rna_features_df_pre, family = binomial)
+summary(Proliferation_TIL_score_model)
+
+ranef(Proliferation_TIL_score_model)
+summary(Proliferation_TIL_score_model)$coefficients %>% round(2)
+summary(Proliferation_TIL_score_model)$coefficients[, 4] %>% round(4)
+
+Proliferation_TIL_int_score_model <- glmer(
+  Response_n ~ Proliferation_scaled * TIL_score_scaled + (1 | Trial),
+  data = metastatic_wes_rna_features_df_pre, family = binomial)
+summary(Proliferation_TIL_int_score_model)
+ranef(Proliferation_TIL_int_score_model)
+```
+
+
+```{r}
+TMB_TIL_score_model <- glmer(
+  Response_n ~ TMB_scaled * TIL_score_scaled + (1 | Trial),
+  data = metastatic_wes_rna_features_df_pre, family = binomial)
+summary(TMB_TIL_score_model)
+
+ranef(TMB_TIL_score_model)
+summary(TMB_TIL_score_model)$coefficients %>% round(2)
+summary(TMB_TIL_score_model)$coefficients[, 4] %>% round(4)
+```
+
+# TMB vs TIL score
+
+```{r}
+# Quadrant RR
+table(metastatic_wes_rna_features_df_pre$TMB_NONSYNONYMOUS >= 10,
+      metastatic_wes_rna_features_df_pre$TIL_score >= median_til_score_pre) %>%
+  `rownames<-`(c("TMB-L", "TMB-H")) %>%
+  `colnames<-`( c("mTIL_low", "mTIL_high"))
+
+metastatic_wes_rna_features_df_pre %>%
+  ggplot(aes(x = log2(TMB), y = TIL_score, shape = Response, col = Trial)) +
+  geom_point() + theme_Publication()
+
+# Quadrant RR
+table(metastatic_wes_rna_features_df_pre$TMB >= 10,
+      metastatic_wes_rna_features_df_pre$TIL_score >= median_til_score_pre) %>%
+  `rownames<-`(c("TMB-L", "TMB-H")) %>%
+  `colnames<-`( c("mTIL_low", "mTIL_high"))
+
+quadrant_response_proportions <- table(
+  metastatic_wes_rna_features_df_pre$TMB >= 10,
+  metastatic_wes_rna_features_df_pre$TIL_score > median_til_score_pre,
+  metastatic_wes_rna_features_df_pre$Response) %>%
+  as.data.frame() %>%
+  setNames(c("TMB", "mTIL_group", "Response", "Freq")) %>%
+  mutate(TMB_group = ifelse(TMB == TRUE, "TMB_high", "TMB_low")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  mutate(quadrant = paste0(TMB_group, "_", mTIL_group))  %>%
+  group_by(quadrant) %>% add_count(quadrant, wt = Freq, name = "Total") %>%
+  mutate(quadrant_prop = round(Freq / Total, 2))
+
+quadrant_response_proportions
+
+quadrant_response_proportions %>%
+  filter(Response == "R") %>%
+  rename(Response_rate = quadrant_prop) %>%
+  ggplot(aes(x = quadrant, y = Response_rate)) + geom_col() +
+  theme_Publication() + labs(x = "") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+quadrant_response_proportions
+
+quadrant_response_proportions %>%
+  select(quadrant, Response, Freq) %>%
+  pivot_wider(names_from = Response, values_from = Freq) %>%
+  column_to_rownames("quadrant") %>%
+  as.matrix() %>%
+  chisq.test()
+
+trial_quadrant_proportions <- table(
+  metastatic_wes_rna_features_df_pre$TMB >= 10,
+  metastatic_wes_rna_features_df_pre$TIL_score > median_til_score_pre,
+  metastatic_wes_rna_features_df_pre$Trial) %>%
+  as.data.frame() %>%
+  setNames(c("TMB_group", "mTIL_group", "Trial", "Freq")) %>%
+  mutate(TMB_group = ifelse(TMB_group == TRUE, "TMB-H", "TMB-L")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  group_by(Trial) %>% add_count(Trial, wt = Freq, name = "Total") %>%
+  mutate(quadrant = paste0(TMB_group, "_", mTIL_group),
+         quadrant_prop = Freq / Total)
+  
+trial_quadrant_proportions %>%
+  select(quadrant, quadrant_prop, Trial) %>%
+  ggplot(aes(x = Trial, y = quadrant_prop, fill = quadrant)) +
+  geom_col() +
+  theme_Publication() +
+  coord_flip() +
+  labs(x = "", y = "", col = "") +
+  guides(fill = guide_legend(nrow = 2))
+
+quadrant_trial_proportions <- table(
+  metastatic_wes_rna_features_df_pre$TMB >= 10,
+  metastatic_wes_rna_features_df_pre$TIL_score > median_til_score_pre,
+  metastatic_wes_rna_features_df_pre$Trial) %>%
+  as.data.frame() %>%
+  setNames(c("TMB_group", "mTIL_group", "Trial", "Freq")) %>%
+  mutate(TMB_group = ifelse(TMB_group == TRUE, "TMB-H", "TMB-L")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  mutate(quadrant = paste0(TMB_group, "_", mTIL_group)) %>%
+  group_by(quadrant) %>% add_count(quadrant, wt = Freq, name = "Total") %>%
+  mutate(quadrant_prop = Freq / Total)
+
+TMB_TIL_quadrant_trial_proportions_plot <- quadrant_trial_proportions %>%
+  ggplot(aes(x = quadrant, y = quadrant_prop, fill = Trial)) + geom_col() +
+  theme_Publication() +
+  labs(x = "", y = "", col = "") +
+  guides(fill = guide_legend(nrow = 3)) +
+  coord_flip()
+
+TMB_TIL_quadrant_trial_proportions_plot
+
+```
+
+```{r}
+
+metastatic_wes_rna_features_df_pre %>% 
+  ggplot(aes(x = TMB, y = TIL_score, shape = Response, col = Trial)) +
+  geom_point() + theme_Publication() +
+  geom_vline(xintercept = 10, linetype = "dashed") +
+  geom_hline(yintercept = median_til_score_pre, linetype = "dashed") +
+  scale_x_continuous(trans = "log2") +
+  guides(col = guide_legend(nrow = 3))
+
+TMB_TIL_quadrant_trial_plot <- metastatic_wes_rna_features_df_pre %>% 
+  ggplot(aes(x = TMB, y = TIL_score, shape = Response, col = Trial)) +
+  geom_point() + theme_Publication() + facet_wrap(~Response) +
+  geom_vline(xintercept = 10, linetype = "dashed") +
+  geom_hline(yintercept = median_til_score_pre, linetype = "dashed")  +
+  scale_x_continuous(trans = "log2") +
+  guides(col = guide_legend(nrow = 3))
+
+TMB_TIL_quadrant_trial_plot
+
+```
+
+# metastatic GLMER model fits plus pancancer signature
+```{r}
+
+table(metastatic_wes_rna_features_df_pre$Trial)
+table(metastatic_wes_rna_features_df_pre$Trial,
+      metastatic_wes_rna_features_df_pre$CANCER_TYPE)
+
+metastatic_response_score_model <- glmer(
+  Response_n ~ pancancer_response_score + (1 | Trial),
+  data = metastatic_wes_rna_features_df_pre, family = binomial)
+summary(metastatic_response_score_model)
+metastatic_response_score_model
+```
+
+```{r}
+table(metastatic_wes_rna_features_df_pre$Study,
+      metastatic_wes_rna_features_df_pre$Response)
+
+metastatic_model1 <- glmer(Response_n ~ TMB_scaled * TIL_score_scaled + (1 | Trial),
+                data = metastatic_wes_rna_features_df_pre %>%
+                  mutate(Response_n = ifelse(Response == "R", 1, 0)) %>%
+                  filter(!is.na(TMB)),
+                family = binomial)
+
+metastatic_model2 <- glmer(Response_n ~ TMB_scaled * TIL_score_scaled + pancancer_response_score_scaled + (1 | Trial),
+                data = metastatic_wes_rna_features_df_pre %>%
+                  mutate(Response_n = ifelse(Response == "R", 1, 0)) %>%
+                  filter(!is.na(TMB)),
+                family = binomial)
+
+summary(metastatic_model1)
+summary(metastatic_model2)
+anova(metastatic_model1, metastatic_model2)
+
+table(metastatic_wes_rna_features_df_pre$Study)
+dim(metastatic_wes_rna_features_df_pre)
+
+metastatic_model3 <- glmer(Response_n ~ Proliferation_scaled * TIL_score_scaled + (1 | Trial),
+                data = metastatic_wes_rna_features_df_pre %>%
+                  mutate(Response_n = ifelse(Response == "R", 1, 0)),
+                family = binomial)
+
+metastatic_model4 <- glmer(Response_n ~ Proliferation_scaled * TIL_score_scaled + pancancer_response_score_scaled + (1 | Trial),
+                data = metastatic_wes_rna_features_df_pre %>%
+                  mutate(Response_n = ifelse(Response == "R", 1, 0)) ,
+                family = binomial)
+
+summary(metastatic_model3)
+summary(metastatic_model4)
+anova(metastatic_model3, metastatic_model4)
+
+
+metastatic_model5 <- glmer(Response_n ~ Proliferation_scaled + pancancer_response_score_scaled + (1 | Trial),
+                data = metastatic_wes_rna_features_df_pre %>%
+                  mutate(Response_n = ifelse(Response == "R", 1, 0)),
+                family = binomial)
+
+metastatic_model6 <- glmer(Response_n ~ pancancer_response_score_scaled + (1 | Trial),
+                data = metastatic_wes_rna_features_df_pre %>%
+                  mutate(Response_n = ifelse(Response == "R", 1, 0)) ,
+                family = binomial)
+
+metastatic_model7 <- glmer(Response_n ~ TIL_score_scaled + (1 | Trial),
+                data = metastatic_wes_rna_features_df_pre %>%
+                  mutate(Response_n = ifelse(Response == "R", 1, 0)) ,
+                family = binomial)
+
+summary(metastatic_model5)
+summary(metastatic_model6)
+summary(metastatic_model7)
+
+anova(metastatic_model5, metastatic_model6)
+anova(metastatic_model7, metastatic_model6)
+
+```
+
+
+```{r}
+get_multivariate_auc_models <- FALSE
+
+if (get_multivariate_auc_models) {
+  metastatic_model_auc_data <- data.frame(
+    matrix(nrow = 0, ncol = 2))
+  
+  metastatic_model_predictions_combined <- data.frame(
+    matrix(nrow = 0, ncol = 2))
+  
+  model_formulas <- c(
+    "Response_n ~ TMB_scaled",
+    "Response_n ~ TIL_score_scaled",
+    "Response_n ~ Proliferation_scaled",
+    "Response_n ~ TMB_scaled * TIL_score_scaled",
+    "Response_n ~ TMB_scaled * TIL_score_scaled + pancancer_response_score_scaled",
+    "Response_n ~ Proliferation_scaled * TIL_score_scaled",
+    "Response_n ~ Proliferation_scaled * TIL_score_scaled + pancancer_response_score_scaled",
+    "Response_n ~ pancancer_response_score_scaled")
+    
+  for (current_formula in model_formulas) {
+    
+    print(current_formula)
+    model <- glm(as.formula(current_formula), family = "binomial",
+               data = metastatic_wes_rna_features_df_pre)
+  
+    print(summary(model))
+  
+    measure <- measureit(score =  model$fitted.values, class = model$y,
+                         measure = c("ACC", "SENS", "SPEC", "FSCR"))
+  
+    predicted <- predict(model, metastatic_wes_rna_features_df_pre %>%
+                           column_to_rownames("RNA_SAMPLE_ID"),
+                         type = "response")
+  
+    roc_empirical <- rocit(score = model$fitted.values, class = model$y)
+    print(summary(roc_empirical))
+  
+    AUC <- summary(roc_empirical)[4, 1, drop = TRUE]
+    AUC <- str_split(AUC, ":")[[1]][2]
+    print(plot(roc_empirical, values = FALSE))
+  
+    model_auc <- tibble(
+      formula = current_formula,
+      AUC = AUC,
+      sensitivity = sum(model$fitted.values >= 0.5 & model$y == 1) / sum(model$y == 1), # Evaluated at 0.5, not youden optimal point
+      specificity = sum(model$fitted.values < 0.5 & model$y == 0) / sum(model$y == 0)) # Evaluated at 0.5, not youden optimal point
+    
+    model_predictions <- as.data.frame(predicted) %>%
+      setNames("Predictions") %>%
+      rownames_to_column("CF_sample") %>%
+      mutate(formula = current_formula)
+    
+    metastatic_model_auc_data <- metastatic_model_auc_data %>%
+      rbind(model_auc)
+    
+    metastatic_model_predictions_combined <- metastatic_model_predictions_combined %>%
+      rbind(model_predictions)
+    }
+
+  ranef_model_formulas <- c(
+    "Response_n ~ (1 | Trial)",
+    "Response_n ~ TMB_scaled + (1 | Trial)",
+    "Response_n ~ TIL_score_scaled + (1 | Trial)",
+    "Response_n ~ Proliferation_scaled + (1 | Trial)",
+    "Response_n ~ TMB_scaled * TIL_score_scaled + (1 | Trial)",
+    "Response_n ~ TMB_scaled * TIL_score_scaled + pancancer_response_score_scaled + (1 | Trial)",
+    "Response_n ~ Proliferation_scaled * TIL_score_scaled + (1 | Trial)",
+    "Response_n ~ Proliferation_scaled * TIL_score_scaled + pancancer_response_score_scaled + (1 | Trial)",
+    "Response_n ~ pancancer_response_score_scaled + (1 | Trial)")
+    
+  for (current_formula_covariates in ranef_model_formulas) {
+    
+    print(current_formula_covariates)
+
+    # Glmer
+    mixed_model <- glmer(as.formula(current_formula_covariates),
+                         family = "binomial",
+               data = metastatic_wes_rna_features_df_pre %>%
+                 column_to_rownames("RNA_SAMPLE_ID"))
+  
+    print(summary(mixed_model))
+    coefs <- fixef(mixed_model)
+    coef_table <-summary(mixed_model)$coefficients
+    print(coef_table)
+    
+    if(str_detect(current_formula_covariates, "\\|")) {
+      print(ranef(mixed_model)) 
+    }
+    
+    fitted_vals <- fitted(mixed_model)
+    pred_class <- as.integer(fitted_vals >= 0.5)
+    true_class <- mixed_model@resp$y
+    
+    plot <- data.frame(true_class, fitted_vals) %>%
+      ggplot(aes(x = as.factor(true_class), y = fitted_vals)) + geom_boxplot() +
+      labs(title = sprintf("Covariate model %s", current_gene_signature)) +
+      theme_Publication()
+    
+    print(plot)
+    
+    roc_empirical <- rocit(score = fitted_vals, class = true_class)
+    print(summary(roc_empirical))
+    
+    AUC <- summary(roc_empirical)[4, 1, drop = TRUE]
+    AUC <- str_split(AUC, ":")[[1]][2]
+    print(plot(roc_empirical, values = FALSE))
+  
+    mixed_model_auc <- tibble(
+      formula = current_formula_covariates,
+      AUC = AUC,
+      sensitivity = sum(pred_class == 1 & true_class == 1) / sum(true_class == 1), # Evaluated at 0.5, not youden optimal point
+      specificity = sum(pred_class == 0 & true_class == 0) / sum(true_class == 0) # Evaluated at 0.5, not youden optimal point)
+      ) 
+  
+    model_predictions <- as.data.frame(fitted_vals) %>%
+      setNames("Predictions") %>%
+      rownames_to_column("CF_sample") %>%
+      mutate(formula = current_formula_covariates)
+    
+    mixed_effects_covariate_auc_data <- mixed_effects_covariate_auc_data %>%
+      rbind(mixed_model_auc)
+  
+    metastatic_model_auc_data <- metastatic_model_auc_data %>%
+      rbind(mixed_model_auc)
+    
+    metastatic_model_predictions_combined <- metastatic_model_predictions_combined %>%
+      rbind(model_predictions)
+  }
+  
+  metastatic_model_auc_data %>%
+    write_csv2(here(external_analysis_dir,
+                    "metastatic_model_auc_data.csv"))
+  
+  metastatic_model_predictions_combined %>%
+    write_csv2(here(external_analysis_dir,
+                    "metastatic_model_predictions_combined.csv"))
+
+}
+
+metastatic_model_auc_data <- read_csv2(
+    here(external_analysis_dir, "metastatic_model_auc_data.csv"))
+
+metastatic_model_predictions_combined <- read_csv2(
+    here(external_analysis_dir, "metastatic_model_predictions_combined.csv"))
+
+metastatic_model_auc_data %>% arrange(AUC)
+
+metastatic_model_auc_data %>%
+  mutate(AUC = as.numeric(AUC)) %>%
+  arrange(AUC) %>%
+  mutate(AUC = round(AUC, 2),
+         sensitivity = round(sensitivity, 2),
+         specificity = round(specificity, 2))
+
+```
+
+```{r, fig.height = 14, fig.width = 16}
+metastatic_model_predictions_combined$formula %>% unique()
+
+metastatic_model_predictions_combined %>%
+  left_join(metastatic_wes_rna_features_df_pre %>%
+              mutate(CF_sample = RNA_SAMPLE_ID)) %>%
+  ggplot(aes(x = Response, y = Predictions)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") + facet_wrap(~formula) +
+  geom_boxplot() + stat_compare_means(method = "wilcox")
+```
+
+# Export metastatic
+```{r}
+metastatic_wes_rna_features_df_pre %>%
+  write_csv2(here(output_dir, "metastatic_wes_rna_features_df_pre"))
+```
+
+# -----------------------------
+
+# Neoadjuvant cohorts
+
+# ABACUS
+```{r}
+abacus_dir <- "/shared/data/niche/abacus"
+list.files(abacus_dir)
+ABACUS_survival_data <- read_csv(here(abacus_dir, "ABACUS_survival_data.csv"))
+table(ABACUS_survival_data$PCR, ABACUS_survival_data$OUTCOME)
+
+ABACUS_tmb_data <- read_csv(here(abacus_dir,
+                                 "anon_abacus.fmi.data.csv"))
+ABACUS_metadata <- read_csv(here(abacus_dir,
+                                 "anon_abacus.RNAseq.pdata.public.csv"))
+ABACUS_log_tpm <- read_csv(here(abacus_dir,
+                                "anon_abacus.RNAseq.TPM.log2.148.30727.csv"))
+
+```
+
+```{r}
+table(ABACUS_survival_data$subjectId %in% ABACUS_metadata$subjectId)
+table(unique(ABACUS_metadata$subjectId) %in% ABACUS_survival_data$subjectId)
+
+colnames(ABACUS_log_tpm)
+n_distinct(ABACUS_metadata$subjectId)
+
+ABACUS_metadata %>%
+  select(subjectId, VISIT, alias) %>%
+  pivot_wider(names_from = VISIT, values_from = alias) %>%
+  view()
+
+dim(ABACUS_log_tpm)
+
+ABACUS_metadata %>% factor_summary()
+ABACUS_metadata_pre <- ABACUS_metadata %>%
+  filter(VISIT == "PRE")
+
+ABACUS_metadata_pre_f <- ABACUS_metadata_pre %>%
+  filter(alias %in% colnames(ABACUS_log_tpm))
+
+ABACUS_metadata_pre_f %>% factor_summary()
+
+table(colnames(ABACUS_log_tpm) %in% ABACUS_metadata$alias)
+table(colnames(ABACUS_log_tpm) %in% ABACUS_metadata_pre$alias)
+```
+
+
+```{r}
+ABACUS_log_tpm$Gene %>% head()
+abacus_gene_ids <- gsub("GeneID:", "", ABACUS_log_tpm$Gene)
+abacus_gene_ids <- as.character(abacus_gene_ids)
+
+abacus_gene_symbols <- mapIds(
+  org.Hs.eg.db,
+  keys = abacus_gene_ids,
+  column = "SYMBOL",
+  keytype = "ENTREZID",
+  multiVals = "first"
+)
+table(is.na(abacus_gene_symbols))
+
+ABACUS_log_tpm$Symbol <- abacus_gene_symbols
+table(ABACUS_log_tpm$Symbol)%>% as.data.frame() %>% filter(Freq > 1)
+
+ABACUS_log_tpm_m <- ABACUS_log_tpm %>%
+  select(-Gene) %>%
+  filter(!is.na(Symbol)) %>%
+  column_to_rownames("Symbol") %>%
+  mutate_all(as.numeric) %>%
+  as.matrix()
+
+# Impute with 0
+ABACUS_log_tpm_m[is.na(ABACUS_log_tpm_m)] <- 0
+```
+
+## ssGSEA
+```{r}
+run_ssgsea <- FALSE
+if (run_ssgsea) {
+   
+  ABACUS_tpm_ssgsea_results <- gsva(
+    as.matrix(ABACUS_log_tpm_m),
+    gene_signatures_l,
+    method = "ssgsea",
+    kcdf = "Gaussian",
+    # Minimum gene set size
+    min.sz = 1,
+    # Compute Gaussian-distributed scores
+    mx.diff = TRUE,
+    # Don't print out the progress bar
+    verbose = FALSE
+    )
+  
+  ABACUS_tpm_ssgsea_results %>%
+    as.data.frame() %>%
+    rownames_to_column("Signature") %>%
+    write_csv2(here(output_dir, "abacus_tpm_ssgsea_results.csv"))
+  
+}
+
+ABACUS_tpm_ssgsea_results <- read_csv2(
+  here(output_dir, "abacus_tpm_ssgsea_results.csv"))
+
+table(colnames(ABACUS_tpm_ssgsea_results) %in% ABACUS_metadata_pre$alias)
+table(colnames(ABACUS_tpm_ssgsea_results) %in% ABACUS_metadata_pre$subjectId)
+
+ABACUS_tpm_ssgsea_results_df <- ABACUS_tpm_ssgsea_results %>%
+  column_to_rownames("Signature") %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("RNA_SAMPLE_ID") %>%
+  left_join(ABACUS_metadata_pre %>%
+              mutate(RNA_SAMPLE_ID = alias)) %>%
+  mutate(Study = "ABACUS") %>%
+  filter(!is.na(subjectId)) %>%
+  mutate(Response = ifelse(PCR == "Yes", "R", "NR")) %>%
+    mutate(pancancer_response_score =
+             pancancer_response_sig_1.25 - pancan_nonresponse_signature_1.25)
+```
+
+```{r}
+ABACUS_metadata_pre_f %>% filter(!is.na(TMB)) %>% factor_summary()
+
+ABACUS_metadata_pre_f %>% filter(!is.na(TMB)) %>%
+  ggplot(aes(x = PCR, y = TMB, fill = PCR)) +
+  geom_boxplot() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  labs(title = "ABACUS TMB") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+```
+
+```{r}
+ABACUS_tpm_ssgsea_results_df %>%
+  ggplot(aes(x = Response, y = Tumor_proliferation_rate, fill = Response)) +
+  geom_boxplot() + theme_Publication() + stat_compare_means(method = "wilcox") +
+  labs(title = "ABACUS ssGSEA") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+ABACUS_tpm_ssgsea_results_df %>%
+  ggplot(aes(x = Response, y = TIL_score, fill = Response)) +
+  geom_boxplot() + theme_Publication() + stat_compare_means(method = "wilcox") +
+  labs(title = "ABACUS ssGSEA") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+ABACUS_tpm_ssgsea_results_df %>%
+  ggplot(aes(x = Response, y = pancancer_response_sig_1.25, fill = Response)) +
+  geom_boxplot() + theme_Publication() + stat_compare_means(method = "wilcox") +
+  labs(title = "ABACUS ssGSEA") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+ABACUS_tpm_ssgsea_results_df %>%
+  ggplot(aes(x = Response, y = pancan_nonresponse_signature_1.25,
+             fill = Response)) +
+  geom_boxplot() + theme_Publication() + stat_compare_means(method = "wilcox") +
+  labs(title = "ABACUS ssGSEA") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+ABACUS_tpm_ssgsea_results_df %>%
+  ggplot(aes(x = Response, y = pancancer_response_score, fill = Response)) +
+  geom_boxplot() + theme_Publication() + stat_compare_means(method = "wilcox") +
+  labs(title = "ABACUS ssGSEA") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+ABACUS_tpm_ssgsea_results_df %>%
+  ggplot(aes(x = Response, y = B_catenin_signature_Luke_et_al,
+             fill = Response)) +
+  geom_boxplot() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  labs(title = "ABACUS ssGSEA") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+```
+
+# -----------------------------
+
+# I-SPY2
+```{r}
+# https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE196096
+# install.packages("GEOquery")
+ISPY2_gse <- getGEO("GSE196096", GSEMatrix = TRUE)[[1]]
+ISPY2_metadata <- pData(ISPY2_gse)
+
+ISPY2_metadata %>% factor_summary()
+
+ISPY2_metadata_f <- ISPY2_metadata %>%
+  filter(`arm:ch1` == "Paclitaxel + Pembrolizumab")
+ISPY2_metadata_f %>% factor_summary()
+
+table(ISPY2_metadata_f$characteristics_ch1.2,
+      ISPY2_metadata_f$characteristics_ch1.3)
+
+ISPY2_RNA_df <- read.delim(
+  gzfile(
+    "/shared/data/niche/ISPY2/GSE194040_ISPY2ResID_AgilentGeneExp_990_FrshFrzn_meanCol_geneLevel_n988.txt.gz")
+  )
+dim(ISPY2_RNA_df)
+
+# Impute missing with 0
+ISPY2_RNA_df[is.na(ISPY2_RNA_df)] <- 0
+table(ISPY2_metadata$title %in% gsub("X", "ISPY2_", colnames(ISPY2_RNA_df)))
+
+```
+
+## ssGSEA
+```{r}
+run_ssgsea <- FALSE
+if (run_ssgsea) {
+   
+  ISPY2_ssgsea_results <- gsva(
+    as.matrix(ISPY2_RNA_df),
+    gene_signatures_l,
+    method = "ssgsea",
+    kcdf = "Gaussian",
+    # Minimum gene set size
+    min.sz = 1,
+    # Compute Gaussian-distributed scores
+    mx.diff = TRUE,
+    # Don't print out the progress bar
+    verbose = FALSE
+    )
+  
+  ISPY2_ssgsea_results %>%
+    as.data.frame() %>%
+    rownames_to_column("Signature") %>%
+    write_csv2(here(output_dir, "ISPY2_ssgsea_results.csv"))
+  
+}
+
+ISPY2_ssgsea_results <- read_csv2(
+  here(output_dir, "ISPY2_ssgsea_results.csv"))
+
+table(colnames(ISPY2_ssgsea_results) %in% ISPY2_metadata$RNA_SAMPLE_ID)
+
+ISPY2_metadata$RNA_SAMPLE_ID <- gsub("ISPY2_", "X", ISPY2_metadata$title)
+table(ISPY2_metadata$title %in% gsub("X", "ISPY2_", colnames(ISPY2_RNA_df)))
+
+ISPY2_ssgsea_results_df <- ISPY2_ssgsea_results %>%
+  column_to_rownames("Signature") %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("RNA_SAMPLE_ID") %>%
+  left_join(ISPY2_metadata, by = "RNA_SAMPLE_ID") %>%
+  filter(`arm:ch1` == "Paclitaxel + Pembrolizumab") %>%
+  mutate(Response = characteristics_ch1.5) %>%
+  mutate(Response = ifelse(Response == "pcr: 1", "R", Response)) %>%
+  mutate(Response = ifelse(Response == "pcr: 0", "NR", Response)) %>%
+  mutate(Study = "ISPY2") %>%
+    mutate(pancancer_response_score =
+             pancancer_response_sig_1.25 - pancan_nonresponse_signature_1.25)
+```
+
+
+```{r}
+dim(ISPY2_ssgsea_results_df)
+table(ISPY2_ssgsea_results_df$Response)
+
+ISPY2_ssgsea_results_df %>%
+  ggplot(aes(x = Response, y = Tumor_proliferation_rate, fill = Response)) +
+  geom_boxplot() + theme_Publication() + stat_compare_means(method = "wilcox") +
+  labs(title = "ISPY2 ssGSEA") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+ISPY2_ssgsea_results_df %>%
+  ggplot(aes(x = Response, y = TIL_score, fill = Response)) +
+  geom_boxplot() + theme_Publication() + stat_compare_means(method = "wilcox") +
+  labs(title = "ISPY2 ssGSEA") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+ISPY2_ssgsea_results_df %>%
+  ggplot(aes(x = Response, y = pancancer_response_sig_1.25, fill = Response)) +
+  geom_boxplot() + theme_Publication() + stat_compare_means(method = "wilcox") +
+  labs(title = "ISPY2 ssGSEA") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+ISPY2_ssgsea_results_df %>%
+  ggplot(aes(x = Response, y = pancan_nonresponse_signature_1.25,
+             fill = Response)) +
+  geom_boxplot() + theme_Publication() + stat_compare_means(method = "wilcox") +
+  labs(title = "ISPY2 ssGSEA") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+ISPY2_ssgsea_results_df %>%
+  ggplot(aes(x = Response, y = pancancer_response_score, fill = Response)) +
+  geom_boxplot() + theme_Publication() + stat_compare_means(method = "wilcox") +
+  labs(title = "ISPY2 ssGSEA") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+```
+
+# -----------------------------
+
+# PANDA
+```{r}
+panda_sample_metadata <- read_csv2(
+  here(here("/shared/data/chalabi_group/PANDA/NKI_PANDA/data/processed/PANDA_samples.csv")))
+panda_sample_metadata_pre <- panda_sample_metadata %>%
+  filter(Timepoint == "PND-1")
+table(panda_sample_metadata_pre$Response_PA)
+table(panda_sample_metadata_pre$Response)
+
+panda_metadata <- read_excel(
+  here(here("/shared/data/chalabi_group/PANDA/NKI_PANDA/data/external/PND_overview data seq_YV.xlsx")))
+
+panda_counts <- read_csv2(
+  here("/shared/data/chalabi_group/PANDA/NKI_PANDA/data/processed/rnaseq_data/rnaseq_counts_p.csv"))
+dim(panda_counts)
+
+table(panda_sample_metadata_pre$CFSample %in% colnames(panda_counts))
+panda_sample_metadata_pre$CFSample[
+  !panda_sample_metadata_pre$CFSample %in% colnames(panda_counts)]
+
+panda_sample_metadata_pre <- panda_sample_metadata_pre %>%
+  filter(CFSample %in% colnames(panda_counts))
+
+panda_counts_pre <- panda_counts %>%
+  select("gene", all_of(panda_sample_metadata_pre$CFSample))
+
+dim(panda_counts_pre)
+
+panda_counts_m <- panda_counts_pre %>%
+  column_to_rownames("gene") %>%
+  as.matrix()
+
+# Create a `DESeqDataSet` object
+panda_dds <- DESeqDataSetFromMatrix(
+  countData = panda_counts_m,
+  colData = panda_sample_metadata_pre,
+  design = ~1
+)
+
+# Normalize and transform the data in the `DESeqDataSet` object using `vst()`
+panda_dds_norm <- vst(panda_dds)
+panda_vst_data <- assay(panda_dds_norm)
+
+run_ssgsea <- FALSE
+if (run_ssgsea) {
+  # Run ssGSEA
+  
+  PANDA_ssgsea_results <- gsva(
+    as.matrix(panda_vst_data),
+    gene_signatures_l,
+    method = "ssgsea",
+    # Appropriate for vst transformed data
+    kcdf = "Gaussian",
+    # Minimum gene set size
+    min.sz = 1,
+    # Compute Gaussian-distributed scores
+    mx.diff = TRUE,
+    # Don't print out the progress bar
+    verbose = FALSE
+    )
+  
+  PANDA_ssgsea_results %>%
+    as.data.frame() %>%
+    rownames_to_column("Signature") %>%
+    write_csv2(here(output_dir, "PANDA_ssgsea_results.csv"))
+  
+}
+
+PANDA_ssgsea_results <- read_csv2(
+  here(output_dir, "PANDA_ssgsea_results.csv"))
+
+PANDA_ssgsea_results_df <- PANDA_ssgsea_results %>%
+  column_to_rownames("Signature") %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("RNA_SAMPLE_ID") %>%
+  left_join(panda_sample_metadata_pre %>%
+              mutate(RNA_SAMPLE_ID = CFSample), by = "RNA_SAMPLE_ID") %>%
+  mutate(Response = ifelse(Response %in% c("Responder", "R"), "R", "NR")) %>%
+  mutate(Study = "PANDA") %>%
+  filter(Timepoint == "PND-1") %>%
+      mutate(pancancer_response_score =
+               pancancer_response_sig_1.25 - pancan_nonresponse_signature_1.25)
+
+dim(PANDA_ssgsea_results_df)
+table(PANDA_ssgsea_results_df$Response)
+
+panda_tmb <- read_csv2(
+  "/shared/data/niche/PANDA_vcf_n_variants_nonsyn_frameshift.csv")
+
+PANDA_TMB_ssgsea_results_df <- PANDA_ssgsea_results_df %>%
+  mutate(Patient = paste0("PND_", TrialNumber)) %>%
+  left_join(panda_tmb %>%
+  select(Patient, TMB, CF_sample))
+
+table(PANDA_TMB_ssgsea_results_df$Patient)
+table(PANDA_TMB_ssgsea_results_df$TMB, useNA = "ifany")
+
+```
+
+```{r}
+PANDA_TMB_ssgsea_results_df %>%
+  ggplot(aes(x = Response, y = TMB,
+             fill = Response)) +
+  geom_boxplot() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  labs(title = "PANDA TMB") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+```
+
+```{r}
+PANDA_ssgsea_results_df %>%
+  ggplot(aes(x = Response, y = Tumor_proliferation_rate,
+             fill = Response)) +
+  geom_boxplot() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  labs(title = "PANDA ssGSEA") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+PANDA_ssgsea_results_df %>%
+  ggplot(aes(x = Response, y = H_E2F_Targets, fill = Response)) +
+  geom_boxplot() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  labs(title = "PANDA ssGSEA") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+PANDA_ssgsea_results_df %>%
+  ggplot(aes(x = Response, y = TIL_score, fill = Response)) +
+  geom_boxplot() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  labs(title = "PANDA ssGSEA") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+PANDA_ssgsea_results_df %>%
+  ggplot(aes(x = Response, y = pancancer_response_sig_1.25,
+             fill = Response)) +
+  geom_boxplot() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  labs(title = "PANDA ssGSEA") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+PANDA_ssgsea_results_df %>%
+  ggplot(aes(x = Response, y = pancan_nonresponse_signature_1.25,
+             fill = Response)) +
+  geom_boxplot() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  labs(title = "PANDA ssGSEA") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+PANDA_ssgsea_results_df %>%
+  ggplot(aes(x = Response, y = pancancer_response_score,
+             fill = Response)) +
+  geom_boxplot() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  labs(title = "PANDA ssGSEA") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+PANDA_ssgsea_results_df %>%
+  ggplot(aes(x = Response_PA, y = pancancer_response_score,
+             fill = Response)) +
+  geom_boxplot() + theme_Publication() +
+  geom_point() + 
+  labs(title = "PANDA (nICB+chemo G/GEJ)",
+       y = "NKI pancancer signature\nssGSEA score delta") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+PANDA_ssgsea_results_df %>%
+  mutate(Response_pCR = ifelse(Response_PA %in% c("CR"), "CR", "non-CR")) %>%
+  ggplot(aes(x = Response_pCR, y = pancancer_response_score,
+             fill = Response_pCR)) +
+  stat_compare_means(method = "wilcox") +
+  geom_boxplot() + theme_Publication() +
+  geom_point() + 
+  labs(title = "PANDA (nICB+chemo G/GEJ)",
+       y = "NKI pancancer signature\nssGSEA score delta") +
+  scale_fill_manual(values = c(Color_R, Color_NR))
+```
+# -----------------------------
+
+# Neoadjuvant combined RNA
+```{r}
+neoadjuvant_ssgsea_c <- PANDA_ssgsea_results_df %>%
+  mutate(Response = ifelse(
+    Study == "PANDA" & Response_PA %in% c("CR"), "R", "NR")) %>%
+  select(all_of(c("RNA_SAMPLE_ID", "Response", "Study",
+                  names(gene_signatures_l)))) %>%
+  rbind(
+    ABACUS_tpm_ssgsea_results_df %>%
+          mutate(Gamma_delta_TCR_Yu = 0, Gamma_delta_TCRs = 0) %>%
+      select(all_of(c("RNA_SAMPLE_ID", "Response", "Study",
+                      names(gene_signatures_l))))) %>%
+  rbind(
+    ISPY2_ssgsea_results_df %>%
+      select(all_of(c("RNA_SAMPLE_ID", "Response", "Study",
+                      names(gene_signatures_l))))) %>%
+  mutate(Response_n = ifelse(Response == "R", 1, 0),
+    Trial = Study) %>%
+  mutate(
+    TIL_score_scaled = scale(TIL_score),
+    Proliferation_scaled = scale(Tumor_proliferation_rate),
+    B_cat_scaled = scale(B_catenin_signature_Luke_et_al)) %>%
+      mutate(pancancer_response_score =
+               pancancer_response_sig_1.25 - pancan_nonresponse_signature_1.25)
+
+neoadjuvant_ssgsea_c$TIL_score_scaled <- as.vector(
+  neoadjuvant_ssgsea_c$TIL_score_scaled)
+neoadjuvant_ssgsea_c$Proliferation_scaled <- as.vector(
+  neoadjuvant_ssgsea_c$Proliferation_scaled)
+neoadjuvant_ssgsea_c$B_cat_scaled <- as.vector(
+  neoadjuvant_ssgsea_c$B_cat_scaled)
+
+table(neoadjuvant_ssgsea_c$Response,
+      neoadjuvant_ssgsea_c$Study)
+
+neoadjuvant_ssgsea_c %>%
+  write_csv2(here(output_dir, "neoadjuvant_ssgsea_c.csv"))
+
+```
+
+## Define TMB + ssgsea
+
+```{r}
+ABACUS_TMB_tpm_ssgsea_results_df <- ABACUS_tpm_ssgsea_results_df %>%
+  left_join(ABACUS_metadata_pre_f %>%
+              select(subjectId, TMB)) %>%
+  filter(!is.na(TMB))
+
+neoadjuvant_TMB_ssgsea_c <- PANDA_TMB_ssgsea_results_df %>%
+  select(all_of(c("RNA_SAMPLE_ID", "Response", "Study", "TMB",
+                  names(gene_signatures_l)))) %>%
+  full_join(
+    ABACUS_TMB_tpm_ssgsea_results_df %>%
+      mutate(Gamma_delta_TCR_Yu = 0, Gamma_delta_TCRs = 0) %>%
+      select(all_of(c("RNA_SAMPLE_ID", "Response", "Study", "TMB",
+                      names(gene_signatures_l))))
+    )  %>%
+  mutate(Response_n = ifelse(
+    Response == "R",
+    1, ifelse(
+      Response == "NR", 0, NA))) %>%
+  mutate(
+    TMB_scaled = scale(TMB),
+    TIL_score_scaled = scale(TIL_score),
+    Proliferation_scaled = scale(Tumor_proliferation_rate),
+    B_cat_scaled = scale(B_catenin_signature_Luke_et_al),
+      Trial = Study) %>%
+    mutate(pancancer_response_score =
+             pancancer_response_sig_1.25 - pancan_nonresponse_signature_1.25)
+
+table(neoadjuvant_TMB_ssgsea_c$Study, neoadjuvant_TMB_ssgsea_c$Response)
+```
+
+
+```{r}
+
+neoadjuvant_TMB_ssgsea_c %>% filter(!is.na(TMB)) %>%
+  ggplot(aes(x = Response, y = TMB, fill = Response)) +
+  geom_boxplot() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  labs(title = "Neoadjuvant cohort (PANDA+ABACUS) TMB") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+```
+
+```{r}
+neoadjuvant_ssgsea_c %>%
+  ggplot(aes(x = Response, y = Tumor_proliferation_rate, fill = Response)) +
+  geom_boxplot() + theme_Publication() + stat_compare_means(method = "wilcox") +
+  labs(title = "Neoadjuvant cohort ssGSEA") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+neoadjuvant_ssgsea_c %>%
+  ggplot(aes(x = Response, y = H_E2F_Targets, fill = Response)) +
+  geom_boxplot() + theme_Publication() + stat_compare_means(method = "wilcox") +
+  labs(title = "Neoadjuvant cohort ssGSEA") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+neoadjuvant_ssgsea_c %>%
+  ggplot(aes(x = Response, y = TIL_score, fill = Response)) +
+  geom_boxplot() + theme_Publication() + stat_compare_means(method = "wilcox") +
+  labs(title = "Neoadjuvant cohort ssGSEA") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+neoadjuvant_ssgsea_c %>%
+  ggplot(aes(x = Response, y = B_catenin_signature_Luke_et_al,
+             fill = Response)) +
+  geom_boxplot() + theme_Publication() + stat_compare_means(method = "wilcox") +
+  labs(title = "Neoadjuvant cohort ssGSEA") +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+```
+
+
+```{r}
+table(neoadjuvant_ssgsea_c$Study)
+
+neoadjuvant_ssgsea_c %>%
+  ggplot(aes(x = Response, y = pancancer_response_sig_1.25, fill = Response)) +
+  geom_boxplot() + theme_Publication() + stat_compare_means(method = "wilcox") +
+  labs(title = "Neoadjuvant cohort ssGSEA") +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE)
+
+neoadjuvant_ssgsea_c %>%
+  ggplot(aes(x = Response, y = pancan_nonresponse_signature_1.25, fill = Response)) +
+  geom_boxplot() + theme_Publication() + stat_compare_means(method = "wilcox") +
+  labs(title = "Neoadjuvant cohort ssGSEA") +
+  scale_fill_manual(values = c(Color_NR, Color_R))+
+  guides(fill = FALSE)
+
+neoadjuvant_ssgsea_c %>%
+  ggplot(aes(x = Response, y = pancancer_response_score, fill = Response)) +
+  geom_boxplot() + theme_Publication() + stat_compare_means(method = "wilcox") +
+  labs(title = "Neoadjuvant cohort ssGSEA\n(complete ABACUS + ISPY2 + PANDA)") +
+  scale_fill_manual(values = c(Color_NR, Color_R))+
+  guides(fill = FALSE)
+
+neoadjuvant_ssgsea_c %>%
+  filter(!Study %in% "PANDA") %>%
+  ggplot(aes(x = Response, y = pancancer_response_score, fill = Response)) +
+  geom_boxplot() + theme_Publication() + stat_compare_means(method = "wilcox") +
+  labs(title = "Neoadjuvant cohort ssGSEA\n(complete ABACUS + ISPY2)") +
+  scale_fill_manual(values = c(Color_NR, Color_R))+
+  guides(fill = FALSE)
+
+```
+
+## Prolif + TIL
+
+```{r}
+Trial_model <- glmer(Response_n ~ (1 | Trial),
+                     data = neoadjuvant_ssgsea_c, family = binomial)
+summary(Trial_model)
+
+median_Tumor_proliferation_rate_pre <- neoadjuvant_ssgsea_c %>%
+  pull(Tumor_proliferation_rate) %>%
+  median()
+median_Tumor_proliferation_rate_pre
+
+median_til_score_pre <- median(
+  neoadjuvant_ssgsea_c$TIL_score)
+median_til_score_pre
+
+prolif_TIL_quadrant_trial_plot <- neoadjuvant_ssgsea_c %>%
+  ggplot(aes(x = Tumor_proliferation_rate, y = TIL_score,
+             shape = Response, col = Study)) +
+  geom_point() + theme_Publication() +
+  geom_vline(xintercept = median_Tumor_proliferation_rate_pre,
+             linetype = "dashed") +
+  geom_hline(yintercept = median_til_score_pre, linetype = "dashed") +
+  guides(col = guide_legend(nrow = 3)) + facet_wrap(~Response)
+
+prolif_TIL_quadrant_trial_plot
+
+trial_quadrant_proportions <- table(
+  neoadjuvant_ssgsea_c$Tumor_proliferation_rate > median_Tumor_proliferation_rate_pre, 
+  neoadjuvant_ssgsea_c$TIL_score > median_til_score_pre,
+  neoadjuvant_ssgsea_c$Study) %>%
+  as.data.frame() %>%
+  setNames(c("Prolif_group", "mTIL_group", "Trial", "Freq")) %>%
+  mutate(Prolif_group = ifelse(Prolif_group == TRUE,
+                               "Prolif_high", "Prolif_low")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  group_by(Trial) %>% add_count(Trial, wt = Freq, name = "Total") %>%
+  mutate(quadrant = paste0(Prolif_group, "_", mTIL_group),
+         quadrant_prop = Freq / Total)
+  
+dim(neoadjuvant_ssgsea_c)
+
+table(neoadjuvant_ssgsea_c$Response)
+
+quadrant_response_proportions <- table(
+  neoadjuvant_ssgsea_c$Tumor_proliferation_rate > median_Tumor_proliferation_rate_pre,
+  neoadjuvant_ssgsea_c$TIL_score > median_til_score_pre,
+  neoadjuvant_ssgsea_c$Response) %>%
+  as.data.frame() %>%
+  setNames(c("Prolif_group", "mTIL_group", "Response", "Freq")) %>%
+  mutate(Prolif_group = ifelse(Prolif_group == TRUE,
+                               "Prolif_high", "Prolif_low")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  mutate(quadrant = paste0(Prolif_group, "_", mTIL_group))  %>%
+  group_by(quadrant) %>% add_count(quadrant, wt = Freq, name = "Total") %>%
+  mutate(quadrant_prop = round(Freq / Total, 2))
+
+quadrant_response_proportions
+
+quadrant_response_proportions %>%
+  select(quadrant, Response, Freq) %>%
+  pivot_wider(names_from = Response, values_from = Freq) %>%
+  column_to_rownames("quadrant") %>%
+  as.matrix() %>%
+  chisq.test()
+
+quadrant_response_proportions %>%
+  filter(Response == "R") %>%
+  rename(Response_rate = quadrant_prop) %>%
+  ggplot(aes(x = quadrant, y = Response_rate)) + geom_col() +
+  theme_Publication() + labs(x = "") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+trial_quadrant_proportions <- table(
+  neoadjuvant_ssgsea_c$Tumor_proliferation_rate > median_Tumor_proliferation_rate_pre,
+  neoadjuvant_ssgsea_c$TIL_score > median_til_score_pre,
+  neoadjuvant_ssgsea_c$Study) %>%
+  as.data.frame() %>%
+  setNames(c("Prolif_group", "mTIL_group", "Trial", "Freq")) %>%
+  mutate(Prolif_group = ifelse(Prolif_group == TRUE,
+                               "Prolif_high", "Prolif_low")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  group_by(Trial) %>% add_count(Trial, wt = Freq, name = "Total") %>%
+  mutate(quadrant = paste0(Prolif_group, "_", mTIL_group),
+         quadrant_prop = Freq / Total)
+  
+trial_quadrant_proportions
+
+trial_quadrant_proportions %>% select(quadrant, quadrant_prop, Trial) %>%
+  ggplot(aes(x = Trial, y = quadrant_prop, fill = quadrant)) +
+  geom_col() +
+  theme_Publication() +
+  coord_flip() +
+  labs(x = "", y = "", col = "") +
+  guides(fill = guide_legend(nrow = 2))
+
+neoadjuvant_ssgsea_c %>% 
+  ggplot(aes(x = Tumor_proliferation_rate, y = TIL_score,
+             shape = Response, col = Study)) +
+  geom_point() + theme_Publication() + facet_wrap(~Response) 
+
+```
+
+```{r}
+Proliferation_model <- glmer(
+  Response_n ~ Proliferation_scaled + (1 | Trial),
+  data = neoadjuvant_ssgsea_c, family = binomial)
+summary(Proliferation_model)
+
+TIL_score_model <- glmer(
+  Response_n ~ TIL_score_scaled + (1 | Trial),
+  data = neoadjuvant_ssgsea_c, family = binomial)
+summary(TIL_score_model)
+
+Proliferation_TIL_score_model <- glmer(
+  Response_n ~ Proliferation_scaled + TIL_score_scaled + (1 | Trial),
+  data = neoadjuvant_ssgsea_c, family = binomial)
+summary(Proliferation_TIL_score_model)
+
+ranef(Proliferation_TIL_score_model)
+summary(Proliferation_TIL_score_model)$coefficients %>% round(2)
+summary(Proliferation_TIL_score_model)$coefficients[, 4] %>% round(4)
+
+Proliferation_TIL_int_score_model <- glmer(
+  Response_n ~ Proliferation_scaled * TIL_score_scaled + (1 | Trial),
+  data = neoadjuvant_ssgsea_c, family = binomial)
+summary(Proliferation_TIL_int_score_model)
+ranef(Proliferation_TIL_int_score_model)
+
+```
+
+
+## TMB + TIL
+
+```{r, fig.height = 6, fig.width = 6}
+percentage_above_TMB_10 <- neoadjuvant_TMB_ssgsea_c %>%
+  group_by(Trial) %>%
+  summarise(proportion = mean(TMB > 10)) %>%
+  mutate(percentage = round(proportion * 100))
+percentage_above_TMB_10
+
+tmb_trial_plot <- neoadjuvant_TMB_ssgsea_c %>%
+  ggplot(aes(x = factor(Trial),
+             y = log2(TMB), fill = Response)) +
+  geom_boxplot() + theme_Publication() +
+  # guides(fill = FALSE) +
+  labs(x = "", y = "log2(TMB) (mutations/Mb)") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) + 
+  geom_hline(yintercept = log2(10), linetype = "dashed", alpha = 0.5) +
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.2))) +
+  geom_text(data = percentage_above_TMB_10 %>%
+              mutate(Response = "NR"),
+            aes(x = Trial, y = log2(400), label = paste0(percentage, "%")),
+            vjust = -1.5) +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+tmb_trial_plot
+
+```
+
+```{r}
+table(neoadjuvant_TMB_ssgsea_c$Trial)
+TMB_TIL_score_model <- glmer(
+  Response_n ~ TMB_scaled + TIL_score_scaled + (1 | Trial),
+  data = neoadjuvant_TMB_ssgsea_c, family = binomial)
+summary(TMB_TIL_score_model)
+
+ranef(TMB_TIL_score_model)
+summary(TMB_TIL_score_model)$coefficients %>% round(2)
+summary(TMB_TIL_score_model)$coefficients[, 4] %>% round(4)
+
+# median_til_score_pre <- median(
+#   neoadjuvant_TMB_ssgsea_c$TIL_score)
+# median_til_score_pre
+
+# Quadrant RR
+table(neoadjuvant_TMB_ssgsea_c$TMB >= 10,
+      neoadjuvant_TMB_ssgsea_c$TIL_score >= median_til_score_pre) %>%
+  `rownames<-`(c("TMB-L", "TMB-H")) %>%
+  `colnames<-`( c("mTIL_low", "mTIL_high"))
+
+neoadjuvant_TMB_ssgsea_c %>%
+  ggplot(aes(x = log2(TMB), y = TIL_score, shape = Response, col = Trial)) +
+  geom_point() + theme_Publication() +
+  geom_vline(xintercept = log2(10), linetype = "dashed")
+
+# # Quadrant RR
+table(neoadjuvant_TMB_ssgsea_c$TMB >= 10,
+      neoadjuvant_TMB_ssgsea_c$TIL_score >= median_til_score_pre) %>%
+  `rownames<-`(c("TMB-L", "TMB-H")) %>%
+  `colnames<-`( c("mTIL_low", "mTIL_high"))
+
+quadrant_response_proportions <- table(
+  neoadjuvant_TMB_ssgsea_c$TMB >= 10,
+  neoadjuvant_TMB_ssgsea_c$TIL_score > median_til_score_pre,
+  neoadjuvant_TMB_ssgsea_c$Response) %>%
+  as.data.frame() %>%
+  setNames(c("TMB", "mTIL_group", "Response", "Freq")) %>%
+  mutate(TMB_group = ifelse(TMB == TRUE, "TMB_high", "TMB_low")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  mutate(quadrant = paste0(TMB_group, "_", mTIL_group))  %>%
+  group_by(quadrant) %>% add_count(quadrant, wt = Freq, name = "Total") %>%
+  mutate(quadrant_prop = round(Freq / Total, 2))
+
+quadrant_response_proportions
+
+quadrant_response_proportions %>%
+  filter(Response == "R") %>%
+  rename(Response_rate = quadrant_prop) %>%
+  ggplot(aes(x = quadrant, y = Response_rate)) + geom_col() +
+  theme_Publication() + labs(x = "") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+quadrant_response_proportions
+
+quadrant_response_proportions %>%
+  select(quadrant, Response, Freq) %>%
+  pivot_wider(names_from = Response, values_from = Freq) %>%
+  column_to_rownames("quadrant") %>%
+  as.matrix() %>%
+  chisq.test()
+
+trial_quadrant_proportions <- table(
+  neoadjuvant_TMB_ssgsea_c$TMB >= 10,
+  neoadjuvant_TMB_ssgsea_c$TIL_score > median_til_score_pre,
+  neoadjuvant_TMB_ssgsea_c$Trial) %>%
+  as.data.frame() %>%
+  setNames(c("TMB_group", "mTIL_group", "Trial", "Freq")) %>%
+  mutate(TMB_group = ifelse(TMB_group == TRUE, "TMB-H", "TMB-L")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  group_by(Trial) %>% add_count(Trial, wt = Freq, name = "Total") %>%
+  mutate(quadrant = paste0(TMB_group, "_", mTIL_group),
+         quadrant_prop = Freq / Total)
+
+trial_quadrant_proportions %>%
+  select(quadrant, quadrant_prop, Trial) %>%
+  ggplot(aes(x = Trial, y = quadrant_prop, fill = quadrant)) +
+  geom_col() +
+  theme_Publication() +
+  coord_flip() +
+  labs(x = "", y = "", col = "") +
+  guides(fill = guide_legend(nrow = 2))
+
+quadrant_trial_proportions <- table(
+  neoadjuvant_TMB_ssgsea_c$TMB >= 10,
+  neoadjuvant_TMB_ssgsea_c$TIL_score > median_til_score_pre,
+  neoadjuvant_TMB_ssgsea_c$Trial) %>%
+  as.data.frame() %>%
+  setNames(c("TMB_group", "mTIL_group", "Trial", "Freq")) %>%
+  mutate(TMB_group = ifelse(TMB_group == TRUE, "TMB-H", "TMB-L")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  mutate(quadrant = paste0(TMB_group, "_", mTIL_group)) %>%
+  group_by(quadrant) %>% add_count(quadrant, wt = Freq, name = "Total") %>%
+  mutate(quadrant_prop = Freq / Total)
+
+TMB_TIL_quadrant_trial_proportions_plot <- quadrant_trial_proportions %>%
+  ggplot(aes(x = quadrant, y = quadrant_prop, fill = Trial)) + geom_col() +
+  scale_fill_manual(values = trial_colors) +
+  theme_Publication() +
+  labs(x = "", y = "", col = "") +
+  guides(fill = guide_legend(nrow = 3)) +
+  coord_flip()
+
+TMB_TIL_quadrant_trial_proportions_plot
+
+```
+
+```{r}
+
+neoadjuvant_TMB_ssgsea_c %>%
+  ggplot(aes(x = TMB, y = TIL_score, shape = Response, col = Trial)) +
+  geom_point() + theme_Publication() +
+  geom_vline(xintercept = 10, linetype = "dashed") +
+  geom_hline(yintercept = median_til_score_pre, linetype = "dashed") +
+  scale_x_continuous(trans = "log2") +
+  guides(col = guide_legend(nrow = 3))
+
+TMB_TIL_quadrant_trial_plot <- neoadjuvant_TMB_ssgsea_c %>%
+  ggplot(aes(x = TMB, y = TIL_score, shape = Response, col = Trial)) +
+  geom_point() + theme_Publication() + facet_wrap(~Response) +
+  geom_vline(xintercept = 10, linetype = "dashed") +
+  geom_hline(yintercept = median_til_score_pre, linetype = "dashed")  +
+  scale_x_continuous(trans = "log2") +
+  guides(col = guide_legend(nrow = 3))
+
+TMB_TIL_quadrant_trial_plot
+
+```
+
+## Check Response Score models
+```{r}
+table(neoadjuvant_ssgsea_c$Trial)
+table(neoadjuvant_ssgsea_c$Trial, neoadjuvant_ssgsea_c$Response)
+
+neoadjuvant_response_score_model <- glmer(
+  Response_n ~ pancancer_response_score + (1 | Trial),
+  data = neoadjuvant_ssgsea_c, family = binomial)
+summary(neoadjuvant_response_score_model)
+
+Proliferation_TIL_int_score_model_adapted_panda <- glmer(
+  Response_n ~ Proliferation_scaled * TIL_score_scaled + (1 | Trial),
+  data = neoadjuvant_ssgsea_c, family = binomial)
+summary(Proliferation_TIL_int_score_model)
+ranef(Proliferation_TIL_int_score_model)
+
+neoadjuvant_ssgsea_c %>%
+  ggplot(aes(x = Response, y = pancancer_response_score, fill = Response)) +
+  geom_boxplot() + theme_Publication() +
+  facet_wrap(~Trial) +
+  stat_compare_means(method = "wilcox") +
+  guides(fill = FALSE) +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+```
+
+## Correlations
+```{r, fig.height = 10, fig.width = 8}
+# TPM
+neoadjuvant_ssgsea_correlations <- neoadjuvant_ssgsea_c %>%
+  select(tpm_ssgsea_results$Signature) %>% cor()
+
+neoadjuvant_ssgsea_correlations %>%
+  as.data.frame() %>%
+  select(pancancer_response_sig_1.25) %>%
+  setNames(c("pancancer_response_sig_1.25")) %>%
+  rownames_to_column("Signature") %>%
+  filter(!is.na(pancancer_response_sig_1.25)) %>%
+  filter(Signature %in% c(gene_signatures_meta_analysis$Signature,
+           "pancancer_nonresponse_sig_1.25",
+           "pancancer_response_sig_1.25",
+           "pancancer_response_score")) %>%
+  filter(!Signature %in% c("pancancer_response_sig_1.25")) %>%
+  ggplot(aes(x = reorder(Signature, pancancer_response_sig_1.25),
+                         y = pancancer_response_sig_1.25)) +
+  geom_col() + theme_Publication() + coord_flip()
+
+neoadjuvant_ssgsea_correlations %>%
+  as.data.frame() %>%
+  select(pancan_nonresponse_signature_1.25) %>%
+  setNames(c("pancan_nonresponse_signature_1.25")) %>%
+  rownames_to_column("Signature")  %>%
+  filter(Signature %in% c(gene_signatures_meta_analysis$Signature,
+           "pancan_nonresponse_signature_1.25",
+           "pancancer_response_sig_1.25",
+           "pancancer_response_score")) %>%
+  filter(!is.na(pancan_nonresponse_signature_1.25))  %>%
+  filter(!Signature %in% c("pancan_nonresponse_signature_1.25")) %>%
+  ggplot(aes(x = reorder(Signature, pancan_nonresponse_signature_1.25),
+                         y = pancan_nonresponse_signature_1.25)) +
+  geom_col() + theme_Publication() + coord_flip()
+
+```
+
+## neoadjuvant GLMER model fits previous combinations plus pancancer signature
+```{r}
+neoadjuvant_ssgsea_prediction_df <- neoadjuvant_ssgsea_c %>%
+  left_join(neoadjuvant_TMB_ssgsea_c %>%
+              select(TMB, RNA_SAMPLE_ID)) %>%
+  mutate(pancancer_response_score_scaled = scale(pancancer_response_score)) %>%
+  mutate(TMB_scaled = scale(TMB)) 
+
+neoadjuvant_ssgsea_prediction_df$TIL_score_scaled <- as.vector(
+  neoadjuvant_ssgsea_prediction_df$TIL_score_scaled)
+neoadjuvant_ssgsea_prediction_df$Proliferation_scaled <- as.vector(
+  neoadjuvant_ssgsea_prediction_df$Proliferation_scaled)
+neoadjuvant_ssgsea_prediction_df$TMB_scaled <- as.vector(
+  neoadjuvant_ssgsea_prediction_df$TMB_scaled)
+neoadjuvant_ssgsea_prediction_df$pancancer_response_score_scaled <- as.vector(
+  neoadjuvant_ssgsea_prediction_df$pancancer_response_score_scaled)
+```
+
+
+```{r}
+external_nICB_model1 <- glmer(Response_n ~ TMB_scaled * TIL_score_scaled + (1 | Trial),
+                data = neoadjuvant_ssgsea_prediction_df %>%
+                  mutate(Response_n = ifelse(Response == "R", 1, 0)) %>%
+                  filter(!is.na(TMB)),
+                family = binomial)
+
+external_nICB_model2 <- glmer(Response_n ~ TMB_scaled * TIL_score_scaled + pancancer_response_score_scaled + (1 | Trial),
+                data = neoadjuvant_ssgsea_prediction_df %>%
+                  mutate(Response_n = ifelse(Response == "R", 1, 0)) %>%
+                  filter(!is.na(TMB)),
+                family = binomial)
+
+summary(external_nICB_model1)
+summary(external_nICB_model2)
+anova(external_nICB_model1, external_nICB_model2)
+
+table(neoadjuvant_ssgsea_prediction_df$Study)
+dim(neoadjuvant_ssgsea_prediction_df)
+
+external_nICB_model3 <- glmer(Response_n ~ Proliferation_scaled * TIL_score_scaled + (1 | Trial),
+                data = neoadjuvant_ssgsea_prediction_df %>%
+                  mutate(Response_n = ifelse(Response == "R", 1, 0)),
+                family = binomial)
+
+external_nICB_model4 <- glmer(Response_n ~ Proliferation_scaled * TIL_score_scaled + pancancer_response_score_scaled + (1 | Trial),
+                data = neoadjuvant_ssgsea_prediction_df %>%
+                  mutate(Response_n = ifelse(Response == "R", 1, 0)) ,
+                family = binomial)
+
+summary(external_nICB_model3)
+summary(external_nICB_model4)
+anova(external_nICB_model3, external_nICB_model4)
+
+
+external_nICB_model5 <- glmer(Response_n ~ Proliferation_scaled + pancancer_response_score_scaled + (1 | Trial),
+                data = neoadjuvant_ssgsea_prediction_df %>%
+                  mutate(Response_n = ifelse(Response == "R", 1, 0)),
+                family = binomial)
+
+external_nICB_model6 <- glmer(Response_n ~ pancancer_response_score_scaled + (1 | Trial),
+                data = neoadjuvant_ssgsea_prediction_df %>%
+                  mutate(Response_n = ifelse(Response == "R", 1, 0)) ,
+                family = binomial)
+
+external_nICB_model7 <- glmer(Response_n ~ TIL_score_scaled + (1 | Trial),
+                data = neoadjuvant_ssgsea_prediction_df %>%
+                  mutate(Response_n = ifelse(Response == "R", 1, 0)) ,
+                family = binomial)
+
+summary(external_nICB_model5)
+summary(external_nICB_model6)
+summary(external_nICB_model7)
+
+anova(external_nICB_model5, external_nICB_model6)
+anova(external_nICB_model7, external_nICB_model6)
+
+table(neoadjuvant_ssgsea_prediction_df$Study, neoadjuvant_ssgsea_prediction_df$Response)
+
+neoadjuvant_ssgsea_prediction_df %>%
+  ggplot(aes(x = TIL_score, y = pancancer_response_score, color = Trial)) +
+  geom_point() + stat_cor()
+```
+
+
+```{r}
+get_multivariate_auc_models <- TRUE
+
+if (get_multivariate_auc_models) {
+  external_nICB_model_auc_data <- data.frame(
+    matrix(nrow = 0, ncol = 2))
+  
+  external_nICB_model_predictions_combined <- data.frame(
+    matrix(nrow = 0, ncol = 2))
+  
+  model_formulas <- c(
+    "Response_n ~ TMB_scaled",
+    "Response_n ~ TIL_score_scaled",
+    "Response_n ~ Proliferation_scaled",
+    "Response_n ~ TMB_scaled * TIL_score_scaled",
+    "Response_n ~ TMB_scaled * TIL_score_scaled + pancancer_response_score_scaled",
+    "Response_n ~ Proliferation_scaled * TIL_score_scaled",
+    "Response_n ~ Proliferation_scaled * TIL_score_scaled + pancancer_response_score_scaled",
+    "Response_n ~ pancancer_response_score_scaled")
+    
+  for (current_formula in model_formulas) {
+    
+    print(current_formula)
+    model <- glm(as.formula(current_formula), family = "binomial",
+               data = neoadjuvant_ssgsea_prediction_df)
+  
+    print(summary(model))
+  
+    measure <- measureit(score =  model$fitted.values, class = model$y,
+                         measure = c("ACC", "SENS", "SPEC", "FSCR"))
+  
+    predicted <- predict(model, neoadjuvant_ssgsea_prediction_df %>%
+                           column_to_rownames("RNA_SAMPLE_ID"),
+                         type = "response")
+  
+    roc_empirical <- rocit(score = model$fitted.values, class = model$y)
+    print(summary(roc_empirical))
+  
+    AUC <- summary(roc_empirical)[4, 1, drop = TRUE]
+    AUC <- str_split(AUC, ":")[[1]][2]
+    print(plot(roc_empirical, values = FALSE))
+  
+    model_auc <- tibble(
+      formula = current_formula,
+      AUC = AUC,
+      sensitivity = sum(model$fitted.values >= 0.5 & model$y == 1) / sum(model$y == 1), # Evaluated at 0.5, not youden optimal point
+      specificity = sum(model$fitted.values < 0.5 & model$y == 0) / sum(model$y == 0)) # Evaluated at 0.5, not youden optimal point
+    
+    model_predictions <- as.data.frame(predicted) %>%
+      setNames("Predictions") %>%
+      rownames_to_column("CF_sample") %>%
+      mutate(formula = current_formula)
+    
+    external_nICB_model_auc_data <- external_nICB_model_auc_data %>%
+      rbind(model_auc)
+    
+    external_nICB_model_predictions_combined <- external_nICB_model_predictions_combined %>%
+      rbind(model_predictions)
+    }
+
+  ranef_model_formulas <- c(
+    "Response_n ~ (1 | Trial)",
+    "Response_n ~ TMB_scaled + (1 | Trial)",
+    "Response_n ~ TIL_score_scaled + (1 | Trial)",
+    "Response_n ~ Proliferation_scaled + (1 | Trial)",
+    "Response_n ~ TMB_scaled * TIL_score_scaled + (1 | Trial)",
+    "Response_n ~ TMB_scaled * TIL_score_scaled + pancancer_response_score_scaled + (1 | Trial)",
+    "Response_n ~ Proliferation_scaled * TIL_score_scaled + (1 | Trial)",
+    "Response_n ~ Proliferation_scaled * TIL_score_scaled + pancancer_response_score_scaled + (1 | Trial)",
+    "Response_n ~ pancancer_response_score_scaled + (1 | Trial)")
+    
+  for (current_formula_covariates in ranef_model_formulas) {
+    
+    print(current_formula_covariates)
+
+    # Glmer
+    mixed_model <- glmer(as.formula(current_formula_covariates), family = "binomial",
+               data = neoadjuvant_ssgsea_prediction_df %>% column_to_rownames("RNA_SAMPLE_ID"))
+  
+    print(summary(mixed_model))
+    coefs <- fixef(mixed_model)
+    coef_table <-summary(mixed_model)$coefficients
+    print(coef_table)
+    
+    if(str_detect(current_formula_covariates, "\\|")) {
+      print(ranef(mixed_model)) 
+    }
+    
+    fitted_vals <- fitted(mixed_model)
+    pred_class <- as.integer(fitted_vals >= 0.5)
+    true_class <- mixed_model@resp$y
+    
+    plot <- data.frame(true_class, fitted_vals) %>%
+      ggplot(aes(x = as.factor(true_class), y = fitted_vals)) + geom_boxplot() +
+      labs(title = sprintf("Covariate model %s", current_gene_signature)) +
+      theme_Publication()
+    
+    print(plot)
+    
+    roc_empirical <- rocit(score = fitted_vals, class = true_class)
+    print(summary(roc_empirical))
+    
+    AUC <- summary(roc_empirical)[4, 1, drop = TRUE]
+    AUC <- str_split(AUC, ":")[[1]][2]
+    print(plot(roc_empirical, values = FALSE))
+  
+    mixed_model_auc <- tibble(
+      formula = current_formula_covariates,
+      AUC = AUC,
+      sensitivity = sum(pred_class == 1 & true_class == 1) / sum(true_class == 1), # Evaluated at 0.5, not youden optimal point
+      specificity = sum(pred_class == 0 & true_class == 0) / sum(true_class == 0) # Evaluated at 0.5, not youden optimal point)
+      ) 
+  
+    model_predictions <- as.data.frame(fitted_vals) %>%
+      setNames("Predictions") %>%
+      rownames_to_column("CF_sample") %>%
+      mutate(formula = current_formula_covariates)
+    
+    mixed_effects_covariate_auc_data <- mixed_effects_covariate_auc_data %>%
+      rbind(mixed_model_auc)
+  
+    external_nICB_model_auc_data <- external_nICB_model_auc_data %>%
+      rbind(mixed_model_auc)
+    
+    external_nICB_model_predictions_combined <- external_nICB_model_predictions_combined %>%
+      rbind(model_predictions)
+  }
+  
+  external_nICB_model_auc_data %>%
+    write_csv2(here(external_analysis_dir, "external_nICB_model_auc_data.csv"))
+  
+  external_nICB_model_predictions_combined %>%
+    write_csv2(here(external_analysis_dir, "external_nICB_model_predictions_combined.csv"))
+  
+
+}
+
+external_nICB_model_predictions_combined <- read_csv2(
+  here(external_analysis_dir, "external_nICB_model_predictions_combined.csv"))
+
+external_nICB_model_auc_data <- read_csv2(
+  here(external_analysis_dir, "external_nICB_model_auc_data.csv"))
+  
+external_nICB_model_auc_data %>% arrange(AUC)
+
+
+external_nICB_model_auc_data %>%
+  mutate(AUC = as.numeric(AUC)) %>%
+  arrange(AUC) %>%
+  mutate(AUC = round(AUC, 2),
+         sensitivity = round(sensitivity, 2),
+         specificity = round(specificity, 2))
+```
+
+
+```{r, fig.height = 14, fig.width = 16}
+external_nICB_model_predictions_combined$formula %>% unique()
+
+external_nICB_model_predictions_combined %>%
+  left_join(neoadjuvant_ssgsea_prediction_df %>%
+              mutate(CF_sample = RNA_SAMPLE_ID)) %>%
+  ggplot(aes(x = Response, y = Predictions)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") + facet_wrap(~formula) +
+  geom_boxplot() + stat_compare_means(method = "wilcox")
+```
+
+# -----------------------------
+
+# Lint script
+```{r}
+library(lintr)
+# lint("~/NKI_pancancer_neoadj_io/src/pancan_external_data_analysis.Rmd")
+lint(
+  filename = "~/NKI_pancancer_neoadj_io/src/pancan_external_data_analysis.Rmd",
+  linters = unused_import_linter()
+)
+```
+
+# ----------
+# sessionInfo - Package Versions
+```{r sessionInfo}
+sessionInfo()
+```

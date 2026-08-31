@@ -1,0 +1,2456 @@
+---
+title: "NICHE response prediction"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+params:
+  export: TRUE
+  output_dir: "response_prediction"
+  metadata: "combined_rna_metadata.csv"
+  analyze_specific_trial: ""
+---
+
+Author comment:
+File description comment:
+The purpose of this script is to generate random forest models and linear signature models to check predictions for nICB response
+
+# Loading Packages
+```{r, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning = FALSE, message = FALSE, dpi = 300, error = TRUE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# Install if necessary install.packages("BiocManager")
+# Install if necessary BiocManager::install("DESeq2")
+library(tidyverse)
+library(readxl)
+library(ggrepel)
+library(here)
+library(GSVA)
+library(DESeq2)
+library(paletteer)
+library(ggpubr)
+library(rstatix)
+source("helper_functions.R")
+library(ROCit)
+library(corrplot)
+library(caret)
+library(glmnet)
+library(ggpubr)
+library(pROC)
+library(plotly)
+library(vip)
+library(lme4)
+
+set.seed(42)
+select <- dplyr::select
+rename <- dplyr::rename
+here <- here::here
+```
+
+# ---------------
+
+# Function definitions
+
+# Annotation color
+```{r}
+
+# Define colours for each group
+Color_NR <- "#F8766D"
+Color_R <- "#00BA38" # "#619CFF"
+Color_NA <- "#CD9600"
+Color_Pre <- "#619CFF"
+Color_Post <- "#F564E3"
+
+Color_HNSCC <- "#009292"
+Color_CSCC <- "#CD9600"
+Color_Urothelial <- "#B66DFF"
+Color_LN_melanoma <- "#00BFC4"
+Color_Colon <- "#F8766D"
+Color_Colon_MSI <- "#B73A3A"
+Color_Colon_MSS <- "#23C26F"
+Color_TNBC <- "#FEB5DA"
+Color_BELLINI <- "#FEB5DA"
+Color_IMCISION <- "#009292"
+Color_MATISSE <- "#CD9600"
+Color_NABUCCO <- "#B66DFF"
+Color_BELLINI <- "#FEB5DA"
+Color_NICHE_MSS <- "#23C26F"
+Color_NICHE_MSI <- "#B73A3A"
+Color_OpACIN_neo <- "#00BFC4"
+Color_PRADO <- "#619CFF"
+
+
+cosmic_colors <- c(Aflatoxin = "#d0e0e3", Aging = "#3d85c6", APOBEC = "#674ea7",
+                   Aristolochic_acid = "#d9d2e9", dMMR = "#B73A3A",
+                   HRD = "#e69138", Other = "#cccccc", POL1 = "#cc0000",
+                   POLE_POLD1 = "#5b0f00", POLH = "#FEB5DA", ROS = "#6DB6FF",
+                   SBS5 = "#ea9999", Smoking = "#38761d", TMZ = "#b5a7d6",
+                   Tobacco_chewing = "#6aa84f", UV = "#f1c232")
+
+annotation_color_list = list(
+  Response = c(NR = Color_NR, R = Color_R), #R_NR = "#CD9600"
+  Treatment = c(Pre = Color_Pre, Post = Color_Post),
+  Histology = c(LN_melanoma = Color_LN_melanoma, Urothelial = Color_Urothelial,
+                Colon = Color_Colon, HNSCC = Color_HNSCC, TBNC = Color_TNBC,
+                cSCC = Color_CSCC),
+  Trial = c(BELLINI = Color_BELLINI, IMCISION = Color_IMCISION,
+            MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
+            `NICHE-MSS` = Color_NICHE_MSS, `NICHE-MSI` = Color_NICHE_MSI,
+            OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO))
+
+trial_colors <- c(BELLINI = Color_BELLINI, IMCISION = Color_IMCISION,
+            MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
+            `NICHE-MSS` = Color_NICHE_MSS, `NICHE-MSI` = Color_NICHE_MSI,
+            OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO)
+
+trial_colors_combined <- c(Combined = "#999999", BELLINI = Color_BELLINI,
+                           IMCISION = Color_IMCISION,
+            MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
+            `NICHE-MSS` = Color_Colon_MSS, `NICHE-MSI` = Color_NICHE_MSI,
+            OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO)
+
+trial_label_dict <- data.frame(
+  Trial = c("Combined", "BELLINI", "IMCISION", "MATISSE", "NABUCCO",
+            "NICHE-MSS", "NICHE-MSI", "OpACIN_neo", "PRADO"),
+  Trial_label = c("Pooled", "BELLINI", "IMCISION", "MATISSE", "NABUCCO",
+                  "NICHE pMMR", "NICHE dMMR", "OpACIN neo", "PRADO")) %>%
+  unique()
+
+trial_label_colors <- c(BELLINI = Color_BELLINI, IMCISION = Color_IMCISION,
+            MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
+            `NICHE pMMR` = Color_NICHE_MSS, `NICHE dMMR` = Color_NICHE_MSI,
+            `OpACIN neo` = Color_OpACIN_neo, PRADO = Color_PRADO)
+
+histology_msi_mss_colors <- c(`Colon-MSI`= Color_Colon_MSI,
+                              `Colon-MSS`= Color_Colon_MSS,
+                              CSCC = Color_CSCC, HNSCC = Color_HNSCC, 
+                              LN_melanoma = Color_LN_melanoma,
+                              TBNC = Color_TNBC,
+                              Urothelial = Color_Urothelial)
+
+histology_msi_mss_label_dict <- data.frame(
+  Histology_MSI_MSS = c("TBNC", "Colon-MSS", "HNSCC", "Urothelial",
+                        "LN_melanoma", "LN_melanoma", "CSCC", "Colon-MSI"),
+  histology_msi_mss_label = c("TBNC", "Colon pMMR", "HNSCC", "Urothelial",
+                              "Melanoma", "Melanoma", "CSCC", "Colon dMMR")) %>%
+  unique()
+
+histology_msi_mss_label_colors <- c(`Colon dMMR`= Color_Colon_MSI,
+                                    `Colon pMMR`= Color_Colon_MSS,
+                              CSCC = Color_CSCC, HNSCC = Color_HNSCC, 
+                              Melanoma = Color_LN_melanoma, TBNC = Color_TNBC,
+                              Urothelial = Color_Urothelial)
+  
+```
+
+
+# ---------------
+# Setup output folder
+```{r, echo = FALSE, include = FALSE}
+export <- params$export
+
+# generate output directory
+output_dir <- here::here("data", "processed", params$output_dir)
+print(output_dir)
+output_dir_plots <- here(output_dir, "plots")
+prediction_dir <- output_dir
+
+# if output_dir does not exist, create it
+if (!dir.exists(output_dir)) {
+    dir.create(output_dir)
+    dir.create(output_dir_plots)
+} else {
+  print("Output folder already exists")
+}
+
+```
+
+```{r}
+wes_meta_dir <- here("data", "processed", "WES_analysis_meta")
+wes_dir <- here("data", "processed", "WES_analysis")
+wes_rna_dir <- here("data", "processed", "WES_RNA_integration")
+signature_dir <- here("data", "processed", "gene_signatures")
+meta_rna_dir <- here("data", "processed", "gene_signatures_meta") 
+
+```
+
+# ---------------
+
+# WES RNA
+```{r}
+
+wes_features_df <- read_csv2(here(wes_dir, "wes_features_df.csv"))
+wes_features_df <- wes_features_df %>%
+  filter(!(Trial %in% "NICHE-MSI" & Tumor_nr == "Tumor_2"))
+
+wes_rna_features_df <- read_csv2(here(wes_rna_dir, "wes_rna_features_df.csv"))
+
+wes_rna_features_df <- wes_rna_features_df %>%
+  mutate(Response_n = ifelse(
+    Response == "R",
+    1, ifelse(
+      Response == "NR", 0, NA))) %>%
+  mutate(TMB_scaled = scale(TMB),
+         UV_scaled = scale(UV_abs),
+         APOBEC_scaled = scale(APOBEC_abs),
+         TIL_score_scaled = scale(TIL_score),
+         Proliferation_scaled = scale(Tumor_proliferation_rate),
+         B_cat_scaled = scale(B_catenin_signature_Luke_et_al))
+
+# Add patient N stage and sex information
+wes_rna_features_df <- wes_rna_features_df %>%
+  left_join(patient_metadata_combined %>%
+              select(Patient, Sex, Baseline_N_h)) %>%
+  mutate(Baseline_N_h = ifelse(Baseline_N_h == "Nx", "N+", Baseline_N_h)) %>%
+  mutate(Cohort = ifelse(Cohort %in% c("Nivo_ipi_A", "Nivo_ipi_B", "Nivo_ipi_C"),
+                         "Nivo_ipi", Cohort))
+
+table(wes_rna_features_df$Cohort)
+
+wes_rna_features_df_pre <- wes_rna_features_df %>%
+  filter(Treatment == "Pre")
+
+wes_rna_features_df_pre_f <- wes_rna_features_df_pre %>% filter(!is.na(TMB)) 
+wes_rna_features_df_pre_f %>% dim()
+
+table(gene_signatures_meta_analysis$Signature %in% colnames(wes_rna_features_df))
+
+# Select Meta analysis predictor features
+wes_rna_meta_features_df <- wes_rna_features_df %>%
+  filter(Treatment == "Pre") %>%
+  mutate(BRCA1_2 = BRCA1 | BRCA2) %>%
+  mutate(HLA_alteration = ifelse(
+    HLA_grouped %in% c("HLA-LOH", "HLA-DEL"), "HLA-Altered", HLA_grouped)) %>%
+  select(Patient, Trial, Response, Sex, Baseline_N_h,
+         gene_signatures_meta_analysis$Signature,
+         TMB, APOBEC_abs, UV_abs, dMMR_abs, HRD_abs, Ploidy, Aneuploidy_score,
+         scna_loss, "GIE_AP", "TP53", "BRCA1_2", HLA_alteration)  %>%
+  left_join(
+    wes_features_df %>%
+      mutate(Purity = ifelse(is.na(Purity), Imputed_purity, Purity)) %>%
+      select(Patient, Purity, TMB_frameshift, wgII_0.6_bases, "SIGPW_Wnt_B_Cat",
+  "SIGPW_PI3K_signaling", "SIGPW_Cell_cycle",
+  "SIGPW_TGFB_signaling", "GIE_IFNy", "RAS_RAF",
+  pvactools_filtered_neoantigen_load, pyclone_clonal_TMB,
+  pyclone_subclonal_TMB)
+  ) %>%
+  filter(!is.na(TMB))
+```
+
+
+# Load RNAseq data
+```{r load rnaseq data, include = TRUE}
+df_counts <- read_csv2(here("data", "processed", "rnaseq_data",
+                             "combined_rnaseq_counts_p.csv"))
+df_counts <- df_counts %>% column_to_rownames("gene")
+
+rpm_counts <- read_csv2(here("data", "processed", "rnaseq_data",
+                             "combined_rnaseq_rpm.csv"))
+rpm_counts <- rpm_counts %>% column_to_rownames("gene")
+ 
+metadata <- read_csv2(
+  here("data", "processed", "metadata", params$metadata))
+
+if (analyze_specific_trial != ""){
+  metadata <- metadata %>% filter(Trial == analyze_specific_trial)
+}
+
+metadata <- metadata %>%
+  mutate(
+      Treatment = factor(Treatment, levels = c("Pre", "Post")),
+      CF_sample = as.factor(CF_sample),
+      Trial = as.factor(Trial),
+      Response = as.factor(Response),
+      Response_detail = as.factor(Response_detail),
+      MSI_MSS = as.factor(MSI_MSS),
+      BRAF = as.factor(BRAF))
+
+metadata %>% mutate_if(is.character, as.factor) %>% summary()
+metadata_pre <- metadata %>% filter(Treatment == "Pre")
+
+df_counts <- df_counts[, colnames(df_counts) %in%
+                          metadata_pre$CF_sample]
+df_counts <- df_counts[rowSums(df_counts) != 0, ]
+
+
+rpm_counts <- rpm_counts[, colnames(rpm_counts) %in%
+                          metadata_pre$CF_sample]
+rpm_counts <- rpm_counts[rowSums(rpm_counts) != 0, ]
+
+ncol(df_counts)
+  
+unique_patient_id <- metadata_pre %>% select(Trial, Patient) %>% unique()
+table(unique_patient_id$Trial)
+
+metadata_pre$CF_sample[!metadata_pre$CF_sample %in% colnames(df_counts)]
+
+ssgsea_results  <- read_csv2(here(signature_dir, "ssgsea_results.csv"))
+ssgsea_results_df <- ssgsea_results %>%
+  column_to_rownames("Signature") %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("CF_sample") %>%
+  left_join(metadata)
+```
+
+```{r}
+patient_metadata_combined <- read_csv2(
+  here("data", "processed", "metadata", "patient_metadata_combined.csv"))
+
+patient_metadata_combined_model <- patient_metadata_combined %>%
+  mutate(Response_n = ifelse(
+    Response == "R",
+    1, ifelse(
+      Response == "NR", 0, NA)))%>%
+  mutate(Baseline_N_h = ifelse(Baseline_N_h == "Nx", "N+", Baseline_N_h)) %>%
+  mutate(Cohort = ifelse(
+    Cohort %in% c("Nivo_ipi_A", "Nivo_ipi_B", "Nivo_ipi_C"),
+    "Nivo_ipi", Cohort))
+
+table(patient_metadata_combined_model$Baseline_N_h)
+table(patient_metadata_combined_model$Cohort)
+
+```
+
+# Additional ssGSEA sig - pancancer signature
+```{r}
+differential_expression_meta_dir <- here("data", "processed",
+                                         "differential_expression_meta")
+
+pancan_response_signature_1.25 <- read_csv2(
+  here(differential_expression_meta_dir, "pancan_response_signature_1.25.csv"))
+
+pancan_nonresponse_signature_1.25 <- read_csv2(
+  here(differential_expression_meta_dir,
+       "pancan_nonresponse_signature_1.25.csv"))
+
+pancan_response_signatures <- pancan_response_signature_1.25 %>%
+              select(gene) %>%
+              setNames("Gene") %>%
+              mutate(Signature = "pancancer_response_sig_1.25") %>%
+  full_join(pancan_nonresponse_signature_1.25 %>%
+              select(gene) %>%
+              setNames("Gene") %>%
+              mutate(Signature = "pancancer_nonresponse_sig_1.25")
+            ) %>%
+  group_by(Signature) %>%
+  add_count(name = "Geneset_size") %>%
+  ungroup()
+```
+
+# Load gene sets
+```{r}
+signature_overview <- read_csv2(
+  here("data", "external", "signatures",
+       "_overview_of_signatures_20260624.csv")) 
+
+signature_overview$Signature <- gsub(
+  "B_catenin_signature_pancan_22_Luke_et_al",
+  "B_catenin_signature_Luke_et_al", signature_overview$Signature)
+
+gene_signatures_meta_analysis <- signature_overview %>%
+  filter(Meta_analysis == "Yes")
+
+gene_signatures_meta_analysis <- gene_signatures_meta_analysis %>%
+  full_join(pancan_response_signatures)
+
+gene_signatures_l <- split(
+  gene_signatures_meta_analysis$Gene, gene_signatures_meta_analysis$Signature)
+gene_signatures_l <- gene_signatures_l[
+  gene_signatures_meta_analysis$Signature %>% unique()]
+
+gene_features <- read.csv2(
+  file = here("data", "external", "biomaRt_gene_features.csv"))
+
+gene_descriptions <- gene_features %>%
+              select(hgnc_symbol, description) %>%
+              rename("gene" = "hgnc_symbol") %>%
+              unique()
+
+# RPM expression
+signature_rpm_data <- read_csv2(
+  here("data", "processed", "gene_signatures", "signature_rpm_data.csv"))
+colnames(signature_rpm_data)
+```
+
+# ---------------
+# Signature ssGSEA
+```{r}
+df_counts <- df_counts[, colnames(df_counts) %in%
+                          metadata_pre$CF_sample]
+
+dds <- DESeqDataSetFromMatrix(
+  countData = df_counts,
+  colData = metadata %>% filter(CF_sample %in% colnames(df_counts)),
+  design = ~1
+)
+
+# Normalize and transform the data in the `DESeqDataSet` object using `vst()`
+dds_norm <- vst(dds)
+
+vst_data <- assay(dds_norm)
+
+pancan_response_ssgsea_results <- gsva(
+  vst_data,
+  gene_signatures_l,
+  method = "ssgsea",
+  # Appropriate for vst transformed data
+  kcdf = "Gaussian",
+  # Minimum gene set size
+  min.sz = 1,
+  # Compute Gaussian-distributed scores
+  mx.diff = TRUE,
+  # Don't print out the progress bar
+  verbose = FALSE
+)
+```
+
+```{r, fig.width = 4, fig.height = 4}
+pancan_response_ssgsea_results_df <- pancan_response_ssgsea_results %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("CF_sample") %>%
+  left_join(metadata, by = "CF_sample") %>%
+  mutate(pancancer_response_score =
+           pancancer_response_sig_1.25 - pancancer_nonresponse_sig_1.25)
+
+pancan_response_ssgsea_results_df %>%
+  write_csv2(here(output_dir, "pancan_response_ssgsea_results_df.csv"))
+
+```
+
+```{r, fig.width = 4, fig.height = 4}
+
+pancan_response_ssgsea_results_df %>%
+  ggplot(aes(x = Response, y = pancancer_response_sig_1.25, fill = Response)) +
+  geom_boxplot() + stat_compare_means()+ theme_Publication()+
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+pancan_response_ssgsea_results_df %>%
+  ggplot(aes(x = Response, y = pancancer_nonresponse_sig_1.25,
+             fill = Response)) +
+  geom_boxplot() + stat_compare_means() + theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+pancan_response_ssgsea_results_df %>%
+  ggplot(aes(x = Response, y = pancancer_response_score, fill = Response)) +
+  geom_boxplot() + stat_compare_means() + theme_Publication()+
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+```
+
+```{r, fig.height = 12, fig.width = 12}
+
+pancan_response_ssgsea_results_df %>%
+  ggplot(aes(x = Response, y = pancancer_response_sig_1.25, fill = Response)) +
+  geom_boxplot() +
+  stat_compare_means() + facet_wrap(~Trial) + theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+pancan_response_ssgsea_results_df %>%
+  ggplot(aes(x = Response, y = pancancer_nonresponse_sig_1.25,
+             fill = Response)) +
+  geom_boxplot() +
+  stat_compare_means() + facet_wrap(~Trial) + theme_Publication()+
+  scale_fill_manual(values = c(Color_NR, Color_R))
+
+pancan_response_ssgsea_results_df %>%
+  ggplot(aes(x = Response, y = pancancer_response_score, fill = Response)) +
+  geom_boxplot() + facet_wrap(~Trial) + stat_compare_means() +
+  theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+```
+
+```{r, fig.height = 24, fig.width = 24}
+ssgsea_results_df %>%
+  filter(Treatment == "Pre") %>%
+  left_join(pancan_response_ssgsea_results_df) %>%
+  select(all_of(c(ssgsea_results$Signature,
+                  "pancancer_response_sig_1.25",
+                  "pancancer_nonresponse_sig_1.25",
+                  "pancancer_response_score"))) %>%
+  as.matrix()%>%
+  cor() %>%
+  corrplot(order = "AOE")
+
+```
+
+# ---------------
+# Prediction Models single signatures
+
+```{r}
+
+include_prediction <- c(gene_signatures_meta_analysis$Signature,
+         "pancancer_response_sig_1.25", "pancancer_nonresponse_sig_1.25", 
+         "pancancer_response_score")
+include_prediction
+length(include_prediction)
+
+sample_names <- rownames(prediction_data_m)
+
+prediction_data <- ssgsea_results_df %>%
+  filter(Treatment == "Pre") %>%
+  left_join(pancan_response_ssgsea_results_df)%>%
+  left_join(signature_rpm_data %>%
+              select("CF_sample", "TCF1", "PD_1",
+                     "PD_L1", "CXCL9", "CXCL13"))
+
+prediction_data <- prediction_data %>%
+  select(all_of(
+    c(gene_signatures_meta_analysis$Signature[
+      gene_signatures_meta_analysis$Signature %in%
+        colnames(prediction_data)],
+      "pancancer_response_sig_1.25", "pancancer_nonresponse_sig_1.25",
+      "pancancer_response_score", "CF_sample")))
+
+dim(prediction_data)
+
+z_norm <- t(apply(
+  prediction_data %>%
+  column_to_rownames("CF_sample") %>%
+  # select(include_prediction) %>%
+  as.matrix(), 2,
+  function(x) scale(x, center = TRUE, scale = TRUE)))
+
+colnames(z_norm) <- sample_names
+
+signature_z_norm_df <- z_norm %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("CF_sample") %>%
+  left_join(metadata) %>%
+  mutate(Response_n = ifelse(Response == "R", 1, 0)) %>%
+  select(-Cohort) %>%
+  left_join(patient_metadata_combined_model %>%
+              select(Patient, Baseline_N_h, Sex, Cohort))
+
+table(signature_z_norm_df$Response, signature_z_norm_df$Response_n)
+
+mat_breaks <- quantile_breaks(as.matrix(z_norm), n = 11)
+
+pathway_heatmap <- pheatmap::pheatmap(z_norm,
+  annotation_col = annot_df,
+  show_colnames = FALSE, # Don't show sample labels
+  fontsize_row = 6,
+  breaks = mat_breaks,
+  col = paletteer_d(palette = "RColorBrewer::RdYlBu",
+                    n = length(mat_breaks) - 1, direction = -1)
+)
+```
+
+```{r, fig.height = 8, fig.width = 8}
+
+for (current_gene_signature in rownames(z_norm)) {
+
+  cat(current_gene_signature, "  \n")
+  cat(gene_signatures_l[current_gene_signature][[1]], "  \n")
+
+  
+  plot <- signature_z_norm_df %>% ggplot(
+    aes_string(x = "Response", y = current_gene_signature, col = "Response")
+    ) + geom_boxplot(outlier.shape = NA) +
+  geom_point(position = position_jitterdodge(jitter.width = 0.15),
+             aes(group = Response), size = 2.5) +
+    labs(col = "Response") +
+    expand_limits(y = 0) +
+    labs(x = "", y = sprintf("%s\n Z-score ssGSEA, GSVA or Weighted Mean",
+                             current_gene_signature),
+                             title = signature_direction) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+    theme_Publication() +
+    theme(legend.spacing.x = unit(0.3, "cm")) +
+    facet_wrap(~Trial, scales = "free")
+
+  print(plot)
+}
+
+```
+
+# ---------------
+# Signature AUC
+```{r}
+
+get_signature_auc_simple_covariate_models <- FALSE
+
+if (get_signature_auc_simple_covariate_models) {
+    
+  signature_prediction_data <- data.frame(matrix(nrow = 0, ncol = 7)) %>%
+      setNames(c("Signature", "Intercept", "Estimate", "Intercept_pval",
+                 "Estimate_pval", "AUC", "Predicted_direction"))
+  
+  signature_mixed_effects_covariate_prediction_data <- data.frame(
+    matrix(nrow = 0, ncol = 7)) %>%
+      setNames(c("Signature", "Intercept", "Estimate", "Intercept_pval",
+                 "Estimate_pval", "AUC", "Predicted_direction"))
+  
+  dim(signature_z_norm_df)
+  
+  for (current_gene_signature in rownames(z_norm)) {
+  
+    cat(current_gene_signature, "  \n")
+    cat(gene_signatures_l[current_gene_signature][[1]], "  \n")
+  
+    plot <- signature_z_norm_df %>% ggplot(
+      aes_string(x = "Response", y = current_gene_signature, col = "Response")
+      ) + geom_boxplot(outlier.shape = NA) +
+    geom_point(position = position_jitterdodge(jitter.width = 0.15),
+               aes(group = Response, shape = MSI_MSS), size = 2.5) +
+      labs(col = "Response") +
+      expand_limits(y = 0) +
+      labs(x = "", y = sprintf("%s\n Z-score ssGSEA",
+                               current_gene_signature)) +
+      theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+      theme_Publication() +
+      theme(legend.spacing.x = unit(0.3, "cm"))
+  
+    print(plot)
+  
+    current_formula <- sprintf("Response_n ~ %s", current_gene_signature)
+   
+    model <- glm(as.formula(current_formula), family = "binomial",
+               data = signature_z_norm_df)
+  
+    print(summary(model))
+  
+    measure <- measureit(score =  model$fitted.values, class = model$y,
+                         measure = c("ACC", "SENS", "SPEC", "FSCR"))
+  
+    predicted <- predict(model, signature_z_norm_df, type = "response")
+  
+    roc_empirical <- rocit(score = model$fitted.values, class = model$y)
+    print(summary(roc_empirical))
+  
+    AUC <- summary(roc_empirical)[4, 1, drop = TRUE]
+    AUC <- str_split(AUC, ":")[[1]][2]
+    print(plot(roc_empirical, values = FALSE))
+  
+    signature_prediction_model <- broom::tidy(model) %>%
+    select(term, estimate, p.value) %>%
+    mutate(Signature = current_gene_signature) %>%
+    pivot_wider(values_from = c(estimate, p.value), names_from = term) %>%
+    setNames(c("Signature", "Intercept", "Estimate",
+               "Intercept_pval", "Estimate_pval")) %>%
+    mutate(AUC = AUC, Predicted_direction = ifelse(
+      Estimate > 0, "ICB_sensitivity", "ICB_resistance"))
+  
+    signature_prediction_data <- signature_prediction_data %>%
+      rbind(signature_prediction_model)
+    
+    print("Covariate model")
+    
+    # Glmer
+    current_formula_covariates <- sprintf(
+      "Response_n ~ %s + Sex + Baseline_N_h + Cohort + (1 | Trial)",
+      current_gene_signature)
+    
+    mixed_model <- glmer(as.formula(current_formula_covariates),
+                         family = "binomial", data = signature_z_norm_df)
+  
+    print(summary(mixed_model))
+    coefs <- fixef(mixed_model)
+    coef_table <-summary(mixed_model)$coefficients
+    
+    intercept_est  <- coef_table["(Intercept)", "Estimate"]
+    intercept_pval <- coef_table["(Intercept)", "Pr(>|z|)"]
+  
+    signature_est  <- coef_table[current_gene_signature, "Estimate"]
+    signature_pval <- coef_table[current_gene_signature, "Pr(>|z|)"]
+    
+    predicted <- predict(mixed_model, signature_z_norm_df, type = "response")
+  
+    plot <- data.frame(true_class, fitted_vals) %>%
+      ggplot(aes(x = as.factor(true_class), y = fitted_vals)) + geom_boxplot() +
+      labs(title = sprintf("Covariate model %s", current_gene_signature)) +
+      theme_Publication()
+    
+    print(plot)
+    fitted_vals <- fitted(mixed_model)
+    true_class <- mixed_model@resp$y
+    
+    roc_empirical <- rocit(score = fitted_vals, class = true_class)
+    print(summary(roc_empirical))
+    
+    AUC <- summary(roc_empirical)[4, 1, drop = TRUE]
+    AUC <- str_split(AUC, ":")[[1]][2]
+    print(plot(roc_empirical, values = FALSE))
+  
+    signature_prediction_mixed_model_covariates <- tibble(
+      Signature = current_gene_signature,
+      Intercept = intercept_est,
+      Estimate = signature_est,
+      Intercept_pval = intercept_pval,
+      Estimate_pval = signature_pval,
+      AUC = AUC,
+      Predicted_direction = ifelse(
+        signature_est > 0,
+        "ICB_sensitivity",
+        "ICB_resistance"))
+    
+    signature_mixed_effects_covariate_prediction_data <- signature_mixed_effects_covariate_prediction_data %>%
+      rbind(signature_prediction_mixed_model_covariates)
+  
+  }
+  
+  signature_prediction_data <- signature_prediction_data %>%
+    select(-Predicted_direction) %>%
+    unique()
+  signature_prediction_data
+  
+  signature_prediction_data %>%
+    write_csv2(here(prediction_dir, "signature_prediction_data_with_msi.csv"))
+  
+  signature_mixed_effects_covariate_prediction_data %>%
+    write_csv2(here(prediction_dir,
+                    "signature_mixed_effects_covariate_prediction_data.csv"))
+  
+  signature_prediction_data <- read_csv2(
+    here(output_dir, "signature_prediction_data_with_msi.csv"))
+
+}
+
+signature_prediction_data <- read_csv2(
+  here(prediction_dir, "signature_prediction_data_with_msi.csv"))
+
+signature_mixed_effects_covariate_prediction_data <- read_csv2(
+  here(prediction_dir, "signature_mixed_effects_covariate_prediction_data.csv"))
+
+```
+
+
+# Plot AUC
+```{r, fig.height = 8, fig.width = 8}
+signature_prediction_data %>%
+  ggplot(aes(x = reorder(Signature, Estimate), y = Estimate)) +
+  geom_col() +
+  expand_limits(y = 0) +
+  theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  labs(x = "") +
+  coord_flip()
+
+signature_prediction_data %>%
+  mutate(AUC = as.numeric(AUC))  %>%
+  ggplot(aes(x = reorder(Signature, AUC), y = AUC)) +
+  geom_col() +
+  expand_limits(y = 0) +
+  theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  geom_hline(yintercept = 0.5, col = "red", linetype = "dashed") +
+  labs(x = "") +
+  coord_flip() +
+  scale_y_continuous(breaks = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7))
+
+signature_prediction_data %>%
+  filter(!Signature %in% c("pancancer_response_sig_1.25",
+                           "pancancer_nonresponse_sig_1.25")) %>%
+  mutate(AUC = as.numeric(AUC))  %>%
+  ggplot(aes(x = reorder(Signature, AUC), y = AUC)) +
+  geom_col() +
+  expand_limits(y = 0) +
+  theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  geom_hline(yintercept = 0.5, col = "red", linetype = "dashed") +
+  labs(x = "") +
+  coord_flip() +
+  scale_y_continuous(breaks = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7))
+
+signature_mixed_effects_covariate_prediction_data %>%
+  ggplot(aes(x = reorder(Signature, Estimate), y = Estimate)) +
+  geom_col() +
+  expand_limits(y = 0) +
+  theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  labs(x = "") +
+  coord_flip()
+
+signature_mixed_effects_covariate_prediction_data %>%
+  mutate(AUC = as.numeric(AUC))  %>%
+  ggplot(aes(x = reorder(Signature, AUC), y = AUC)) +
+  geom_col() +
+  expand_limits(y = 0) +
+  theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  geom_hline(yintercept = 0.5, col = "red", linetype = "dashed") +
+  labs(x = "") +
+  coord_flip() +
+  scale_y_continuous(breaks = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9))
+
+signature_mixed_effects_covariate_prediction_data %>%
+  filter(!Signature %in% c("pancancer_response_sig_1.25",
+                           "pancancer_nonresponse_sig_1.25")) %>%
+  mutate(AUC = as.numeric(AUC))  %>%
+  ggplot(aes(x = reorder(Signature, AUC), y = AUC)) +
+  geom_col() +
+  expand_limits(y = 0) +
+  theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  geom_hline(yintercept = 0.5, col = "red", linetype = "dashed") +
+  labs(x = "") +
+  coord_flip() +
+  scale_y_continuous(breaks = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9))
+```
+
+# ---------------
+# glmer model pancan signature + multivariate combinations
+```{r}
+prediction_data_df <- prediction_data %>%
+  left_join(metadata) %>%
+  mutate(Response_n = ifelse(Response == "R", 1, 0)) %>%
+  select(-Cohort) %>%
+  left_join(patient_metadata_combined_model %>%
+              select(Patient, Baseline_N_h, Sex, Cohort))  %>%
+  left_join(wes_features_df %>% select(Patient, TMB)) %>%
+  mutate(TMB_scaled = scale(TMB),
+         TIL_score_scaled = scale(TIL_score),
+         Proliferation_scaled = scale(Tumor_proliferation_rate),
+         B_cat_scaled = scale(B_catenin_signature_Luke_et_al),
+         pancancer_response_score_scaled = scale(pancancer_response_score))
+
+# TMB * TIL score model
+model14 <- glmer(Response_n ~ TMB_scaled * TIL_score_scaled + Sex + Baseline_N_h + Cohort + (1 | Trial),
+                data = prediction_data_df %>%
+                  mutate(Response_n = ifelse(Response == "R", 1, 0)) %>%
+                  filter(!is.na(TMB)),
+                family = binomial)
+
+model15 <- glmer(Response_n ~ TMB_scaled * TIL_score_scaled + pancancer_response_score_scaled + Sex + Baseline_N_h + Cohort + (1 | Trial),
+                data = prediction_data_df %>%
+                  mutate(Response_n = ifelse(Response == "R", 1, 0)) %>%
+                  filter(!is.na(TMB)),
+                family = binomial)
+
+summary(model14)
+summary(model15)
+anova(model14, model15)
+
+# Proliferation * TIL score model
+model17 <- glmer(Response_n ~ Proliferation_scaled * TIL_score_scaled + Sex + Baseline_N_h + Cohort + (1 | Trial),
+                data = prediction_data_df %>%
+                  mutate(Response_n = ifelse(Response == "R", 1, 0)) %>%
+                  filter(!is.na(TMB)),
+                family = binomial)
+
+model18 <- glmer(Response_n ~ Proliferation_scaled * TIL_score_scaled + pancancer_response_score_scaled + Sex + Baseline_N_h + Cohort + (1 | Trial),
+                data = prediction_data_df %>%
+                  mutate(Response_n = ifelse(Response == "R", 1, 0)) %>%
+                  filter(!is.na(TMB)),
+                family = binomial)
+
+summary(model17)
+summary(model18)
+anova(model17, model18)
+
+model19 <- glmer(Response_n ~ TIL_score_scaled + Sex + Baseline_N_h + Cohort + (1 | Trial),
+                data = prediction_data_df %>%
+                  mutate(Response_n = ifelse(Response == "R", 1, 0)) %>%
+                  filter(!is.na(TMB)),
+                family = binomial)
+
+summary(model19)
+model20 <- glmer(Response_n ~ pancancer_response_score_scaled + Sex + Baseline_N_h + Cohort + (1 | Trial),
+                data = prediction_data_df %>%
+                  mutate(Response_n = ifelse(Response == "R", 1, 0)) %>%
+                  filter(!is.na(TMB)),
+                family = binomial)
+summary(model20)
+anova(model19, model20)
+
+prediction_data_df %>%
+  ggplot(aes(x = TIL_score, y = pancancer_response_score, color = Trial)) +
+  geom_point() + stat_cor()
+
+prediction_data_df %>%
+  ggplot(aes(x = TIL_score, y = pancancer_response_score, color = Trial)) +
+  geom_point() + stat_cor(method = "spearman") +
+  scale_color_manual(values = trial_colors)
+```
+
+
+```{r}
+get_multivariate_auc_models <- FALSE
+
+if (get_multivariate_auc_models) {
+  model_auc_data <- data.frame(
+    matrix(nrow = 0, ncol = 2))
+  mixed_effects_covariate_auc_data <- data.frame(
+    matrix(nrow = 0, ncol = 7))
+  # no_mixed_effects_auc_data <- data.frame(
+  #   matrix(nrow = 0, ncol = 7))
+  model_predictions_combined <- data.frame(
+    matrix(nrow = 0, ncol = 2))
+  
+  model_formulas <- c(
+    "Response_n ~ TMB_scaled",
+    "Response_n ~ TIL_score_scaled",
+    "Response_n ~ Proliferation_scaled",
+    "Response_n ~ TMB_scaled * TIL_score_scaled",
+    "Response_n ~ TMB_scaled * TIL_score_scaled + pancancer_response_score_scaled",
+    "Response_n ~ Proliferation_scaled * TIL_score_scaled",
+    "Response_n ~ Proliferation_scaled * TIL_score_scaled + pancancer_response_score_scaled",
+    "Response_n ~ pancancer_response_score_scaled")
+    
+  for (current_formula in model_formulas) {
+    
+    print(current_formula)
+    model <- glm(as.formula(current_formula), family = "binomial",
+               data = prediction_data_df %>% column_to_rownames("CF_sample"))
+  
+    print(summary(model))
+  
+    measure <- measureit(score =  model$fitted.values, class = model$y,
+                         measure = c("ACC", "SENS", "SPEC", "FSCR"))
+
+    predicted <- predict(model, prediction_data_df %>% column_to_rownames("CF_sample"), type = "response")
+  
+    roc_empirical <- rocit(score = model$fitted.values, class = model$y)
+    print(summary(roc_empirical))
+  
+    AUC <- summary(roc_empirical)[4, 1, drop = TRUE]
+    AUC <- str_split(AUC, ":")[[1]][2]
+    print(plot(roc_empirical, values = FALSE))
+  
+    model_auc <- tibble(
+      formula = current_formula,
+      AUC = AUC,
+      sensitivity = sum(model$fitted.values >= 0.5 & model$y == 1) / sum(model$y == 1), # Evaluated at 0.5, not youden optimal point
+      specificity = sum(model$fitted.values < 0.5 & model$y == 0) / sum(model$y == 0)) # Evaluated at 0.5, not youden optimal point
+    
+    model_predictions <- tibble(
+      formula = current_formula,
+      CF_sample = prediction_data_df$CF_sample,
+      Predictions = predicted)
+    
+    model_predictions <- as.data.frame(predicted) %>%
+      setNames("Predictions") %>%
+      rownames_to_column("CF_sample") %>%
+      mutate(formula = current_formula)
+    
+    model_auc_data <- model_auc_data %>%
+      rbind(model_auc)
+    
+    model_predictions_combined <- model_predictions_combined %>%
+      rbind(model_predictions)
+    }
+
+  ranef_model_formulas <- c(
+    "Response_n ~ Sex + Baseline_N_h + Cohort + (1 | Trial)",
+    "Response_n ~ TMB_scaled + Sex + Baseline_N_h + Cohort + (1 | Trial)",
+    "Response_n ~ TIL_score_scaled + Sex + Baseline_N_h + Cohort + (1 | Trial)",
+    "Response_n ~ Proliferation_scaled + Sex + Baseline_N_h + Cohort + (1 | Trial)",
+    "Response_n ~ TMB_scaled * TIL_score_scaled + Sex + Baseline_N_h + Cohort + (1 | Trial)",
+    "Response_n ~ TMB_scaled * TIL_score_scaled + pancancer_response_score_scaled + Sex + Baseline_N_h + Cohort + (1 | Trial)",
+    "Response_n ~ Proliferation_scaled * TIL_score_scaled + Sex + Baseline_N_h + Cohort + (1 | Trial)",
+    "Response_n ~ Proliferation_scaled * TIL_score_scaled + pancancer_response_score_scaled + Sex + Baseline_N_h + Cohort + (1 | Trial)",
+    "Response_n ~ pancancer_response_score_scaled + Sex + Baseline_N_h + Cohort + (1 | Trial)")
+    
+  for (current_formula_covariates in ranef_model_formulas) {
+    
+    print(current_formula_covariates)
+
+    # Glmer
+    mixed_model <- glmer(as.formula(current_formula_covariates),
+                         family = "binomial",
+               data = prediction_data_df %>% column_to_rownames("CF_sample"))
+  
+    print(summary(mixed_model))
+    coefs <- fixef(mixed_model)
+    coef_table <-summary(mixed_model)$coefficients
+    print(coef_table)
+    
+    if(str_detect(current_formula_covariates, "\\|")) {
+      print(ranef(mixed_model)) 
+    }
+    
+    predicted <- predict(mixed_model, prediction_data_df %>%
+                           column_to_rownames("CF_sample"), type = "response")
+  
+    plot <- data.frame(true_class, fitted_vals) %>%
+      ggplot(aes(x = as.factor(true_class), y = fitted_vals)) + geom_boxplot() +
+      labs(title = sprintf("Covariate model %s", current_gene_signature)) +
+      theme_Publication()
+    
+    print(plot)
+    fitted_vals <- fitted(mixed_model)
+    pred_class <- as.integer(fitted_vals >= 0.5)
+    true_class <- mixed_model@resp$y
+    
+    roc_empirical <- rocit(score = fitted_vals, class = true_class)
+    print(summary(roc_empirical))
+    
+    AUC <- summary(roc_empirical)[4, 1, drop = TRUE]
+    AUC <- str_split(AUC, ":")[[1]][2]
+    print(plot(roc_empirical, values = FALSE))
+  
+    as.integer(fitted_vals >= 0.5)
+
+    mixed_model_auc <- tibble(
+      formula = current_formula_covariates,
+      AUC = AUC,
+      sensitivity = sum(pred_class == 1 & true_class == 1) / sum(true_class == 1), # Evaluated at 0.5, not youden optimal point
+      specificity = sum(pred_class == 0 & true_class == 0) / sum(true_class == 0) # Evaluated at 0.5, not youden optimal point)
+      ) 
+
+    model_predictions <- as.data.frame(fitted_vals) %>%
+      setNames("Predictions") %>%
+      rownames_to_column("CF_sample") %>%
+      mutate(formula = current_formula_covariates)
+    
+    mixed_effects_covariate_auc_data <- mixed_effects_covariate_auc_data %>%
+      rbind(mixed_model_auc)
+  
+    model_auc_data <- model_auc_data %>%
+      rbind(mixed_model_auc)
+    
+    model_predictions_combined <- model_predictions_combined %>%
+      rbind(model_predictions)
+  }
+  
+  model_auc_data %>%
+    write_csv2(here(prediction_dir, "model_auc_data.csv"))
+  
+  model_predictions_combined %>%
+    write_csv2(here(prediction_dir, "model_predictions_combined.csv"))
+
+}
+
+model_auc_data <- read_csv2(
+  here(prediction_dir, "model_auc_data.csv"))
+
+
+model_predictions_combined <- read_csv2(
+  here(prediction_dir, "model_predictions_combined.csv"))
+  
+model_auc_data %>% arrange(AUC)
+model_auc_data %>%
+  mutate(AUC = as.numeric(AUC)) %>%
+  arrange(AUC) %>%
+  mutate(AUC = round(AUC, 2),
+         sensitivity = round(sensitivity, 2),
+         specificity = round(specificity, 2))
+```
+
+```{r, fig.height = 14, fig.width = 16}
+model_predictions_combined$formula %>% unique()
+
+model_predictions_combined %>%
+  left_join(prediction_data_df) %>%
+  ggplot(aes(x = Response, y = Predictions)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") + facet_wrap(~formula) +
+  geom_boxplot() + stat_compare_means(method = "wilcox")
+```
+
+
+```{r, fig.height = 14, fig.width = 16}
+
+model_predictions_combined %>%
+  filter(formula == "Response_n ~ pancancer_response_score_scaled") %>%
+  left_join(prediction_data_df) %>%
+  ggplot(aes(x = Response, y = Predictions)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") + facet_wrap(~Trial) +
+  geom_boxplot() + stat_compare_means(method = "wilcox") +
+  labs(title = "Response_n ~ pancancer_response_score")
+
+model_predictions_combined %>%
+  filter(formula == "Response_n ~ pancancer_response_score_scaled + Sex + Baseline_N_h + Cohort + (1 | Trial)") %>%
+  left_join(prediction_data_df) %>%
+  ggplot(aes(x = Response, y = Predictions)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed") + facet_wrap(~Trial) +
+  geom_boxplot() + stat_compare_means(method = "wilcox") +
+  labs(title = "Response_n ~ pancancer_response_score + covariates")
+```
+
+# ---------------
+
+# Volcano Plot DEG projection
+```{r}
+# project signatures in DE results
+de_dir <- here("data", "processed", "differential_expression")
+
+deseq_r1 <- read_csv2(
+  here(de_dir, "deseq_r1_fdrq.csv")) %>%
+  left_join(gene_descriptions) %>%
+  mutate(ranking = -log10(pvalue) * log2FoldChange)
+
+alpha_threshold <- 0.01
+log2fcthresh <- 1
+
+deseq_r1_volcano_df <- deseq_r1 %>%
+  mutate(within_threshold = (padj < alpha_threshold &
+                        abs(log2FoldChange) > log2fcthresh)) %>%
+  left_join(
+    pancan_response_signatures %>%
+      filter(Signature %in% c("pancancer_response_sig_1.25",
+                              "pancancer_nonresponse_sig_1.25")) %>%
+      rename(gene = Gene)) %>%
+  left_join(data.frame(
+    Signature = c("pancancer_response_sig_1.25",
+                  "pancancer_nonresponse_sig_1.25"),
+    Class = c("ICB_sensitivity", "ICB_resistance"),
+    Ref = c("Pancan", "Pancan"))
+    ) %>%
+  unique()
+
+
+deseq_r1_volcano_df %>%
+  ggplot(
+  aes(x = log2FoldChange, y = -log10(padj + 1e-300),
+      col = Class)) +
+  geom_point(alpha = 0.5) +
+  geom_point(alpha = 0.5, data = deseq_r1_volcano_df %>%
+               filter(!is.na(Class))) +
+  geom_vline(xintercept = 0, col = "black") +
+  geom_vline(xintercept = c(-log2fcthresh, log2fcthresh), col = "red") +
+    geom_hline(yintercept = -log10(alpha_threshold), colour = "red") +
+  geom_text_repel(
+    aes(x = log2FoldChange, y = -log10(padj + 1e-300), label = gene),
+    data = deseq_r1_volcano_df %>%
+  filter(Ref == "Pancan"),
+    colour = "grey20",
+    min.segment.length = 0) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(
+    title = "Volcano plot Deseq2 Wald",
+    x = "Effect size: log2 (fold-change)",
+    y = "-log10 (FDRq)")  +
+    theme_Publication()
+
+deseq_r1_volcano_df %>%
+  filter(Ref == "Pancan") %>%
+  ggplot(
+  aes(x = log2FoldChange, y = -log10(padj + 1e-300),
+      col = Class)) +
+  geom_point(alpha = 0.5) +
+  geom_point(alpha = 0.5, data = deseq_r1_volcano_df %>%
+               filter(!is.na(Class))) +
+  geom_vline(xintercept = 0, col = "black") +
+  geom_vline(xintercept = c(-log2fcthresh, log2fcthresh), col = "red") +
+    geom_hline(yintercept = -log10(alpha_threshold), colour = "red") +
+  geom_text_repel(
+    aes(x = log2FoldChange, y = -log10(padj + 1e-300), label = gene),
+    data = deseq_r1_volcano_df %>%
+  filter(Ref == "Pancan"),
+    colour = "grey20",
+    min.segment.length = 0) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(
+    title = "Volcano plot Deseq2 Wald",
+    x = "Effect size: log2 (fold-change)",
+    y = "-log10 (FDRq)")  +
+    theme_Publication()
+
+```
+
+# ---------------
+
+# Load data
+
+```{r}
+n_variants_tmb <- read_csv2(here(wes_dir, "n_variants_dp20_vaf_tmb.csv"))
+
+wes_features_df <- read_csv2(here(wes_dir, "wes_features_df.csv"))
+wes_features_df <- wes_features_df %>%
+  filter(!(Trial %in% "NICHE-MSI" & Tumor_nr == "Tumor_2"))
+
+pathway_level_mutation_df <- read_csv2(here(wes_dir,
+                                            "pathway_level_mutation_df.csv"))
+pathway_level_mutation_df <- pathway_level_mutation_df %>%
+  filter(!(Trial %in% "NICHE-MSI" & Tumor_nr == "Tumor_2"))
+
+facets_data_metrics <- read_csv2(here(wes_dir, "facets_data_metrics.csv"))
+facets_data_metrics <- facets_data_metrics %>%
+  filter(Tumor_Sample_Barcode %in% wes_features_df$Tumor_Sample_Barcode)
+
+facets_aneuploidy_score_df <- read_csv2(
+  here(wes_dir, "facets_aneuploidy_score_df.csv"))
+facets_aneuploidy_score_df <- facets_aneuploidy_score_df %>%
+  filter(CF_sample_tumor %in% wes_features_df$CF_sample_tumor)
+
+combined_wes_smd <- read_csv2(here(wes_meta_dir, "combined_wes_smd.csv"))
+trial_odds_ratio_df <- read_csv2(here(wes_meta_dir, "trial_odds_ratio_df.csv"))
+
+meta_studies_results_smd_all <- read_csv2(
+  here(wes_meta_dir, "meta_studies_results_smd_all.csv"))
+
+meta_studies_results_or_all <- read_csv2(
+  here(wes_meta_dir, "meta_studies_results_or_all.csv"))
+
+# Add patient N stage and sex information
+wes_features_df <- wes_features_df %>%
+  left_join(patient_metadata_combined %>%
+              select(Patient, Sex, Baseline_N_h)) %>%
+  mutate(Baseline_N_h = ifelse(Baseline_N_h == "Nx", "N+", Baseline_N_h))
+
+wes_features_df <- wes_features_df %>%
+  mutate(Response_n = ifelse(
+    Response == "R",
+    1, ifelse(
+      Response == "NR", 0, NA))) %>%
+  mutate(TMB_scaled = scale(TMB),
+         UV_scaled = scale(UV_abs),
+         APOBEC_scaled = scale(APOBEC_abs)) 
+
+wes_rna_meta_features_df$Response <- factor(
+  wes_rna_meta_features_df$Response, levels = c("R", "NR"))
+
+wes_rna_meta_features_df_excl_dmmr <- wes_rna_meta_features_df %>%
+  filter(!Trial %in% c("NICHE-MSI"))
+
+wes_rna_meta_features_df %>% factor_summary()
+
+```
+
+# ---------------
+# Nested cross validation Random Forest 
+
+## Data partitions 
+### Balanced Outer Fold structure
+```{r}
+
+data_partition <- wes_rna_meta_features_df %>%
+  mutate(row_index = rownames(wes_rna_meta_features_df)) %>%
+  mutate(Patient_col = Patient) %>%
+  column_to_rownames("Patient") %>%
+  rename(Patient = Patient_col)
+
+# stratify by Trial × Response for a balanced distribution
+data_partition$Trial_response <- interaction(
+  data_partition$Response, data_partition$Trial, drop = TRUE)
+table(data_partition$Trial_response)
+
+outer_folds <- createFolds(data_partition$Trial_response, k = 5,
+                           returnTrain = FALSE)
+length(outer_folds)
+sapply(outer_folds, length)
+cat_col = "Trial_response"
+
+data_partition %>% write_csv2(here(output_dir, "data_partition.csv"))
+```
+
+### Check outer fold proportions
+```{r}
+factor_summary_prop <- function(object, maxsum = 20) {
+  object %>%
+    dplyr::mutate_if(is.character, as.factor) %>%
+    purrr::map_df(~{
+      x <- summary(.x, maxsum = maxsum)
+      tibble::tibble(
+        level = names(x),
+        count = as.numeric(x),
+        prop = count / sum(count)
+      )
+    }, .id = "variable")
+}
+
+data_partition %>%
+          select(Trial_response, Trial, Response) %>%
+          factor_summary_prop()
+
+data_partition_folds_df <- data_partition %>%
+          select(Trial_response, Trial, Response) %>%
+          factor_summary_prop() %>%
+  mutate(Partition = "All")
+
+for (current_fold in names(outer_folds)){
+  print(outer_folds[current_fold])
+  print(length(outer_folds[[current_fold]]))
+
+  print(data_partition[outer_folds[[current_fold]], ] %>%
+          select(Trial_response, Trial, Response) %>%
+          factor_summary_prop())
+  
+  current_data_partition_folds_df <- data_partition[
+    outer_folds[[current_fold]], ] %>%
+          select(Trial_response, Trial, Response) %>%
+          factor_summary_prop() %>%
+    mutate(Partition = paste0("Outer_", current_fold))
+
+  data_partition_folds_df <- data_partition_folds_df %>%
+    rbind(current_data_partition_folds_df)
+}
+
+data_partition_folds_df %>%
+  filter(variable == "Trial") %>%
+  ggplot(aes(x = level, y = prop)) + facet_wrap(~Partition) +
+  geom_point() + theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+data_partition_folds_df %>%
+  filter(variable == "Trial") %>%
+  ggplot(aes(x = Partition, y = prop)) + facet_wrap(~level) +
+  geom_point() + theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+outer_folds
+for (current_fold in outer_folds) {
+  print(current_fold)
+  data_partition[current_fold, c("Trial", "Response", "Trial_response")] %>%
+    factor_summary() %>%
+    print()
+
+}
+
+```
+
+## Define model data
+
+```{r}
+model_data <-  wes_rna_meta_features_df %>%
+  column_to_rownames("Patient") %>%
+  select(-Trial) %>%
+  mutate(Sex = ifelse(Sex == "Female", 1, 0)) %>%
+  mutate(Baseline_N_h = ifelse(Baseline_N_h == "N+", 1, 0)) %>%
+  mutate(GIE_AP = ifelse(GIE_AP == TRUE, 1, 0)) %>%
+  mutate(TP53 = ifelse(TP53 == TRUE, 1, 0)) %>%
+  mutate(BRCA1_2 = ifelse(BRCA1_2 == TRUE, 1, 0))%>%
+  mutate(HLA_alteration = ifelse(HLA_alteration == "HLA-Altered", 1, 0)) %>%
+  mutate(SIGPW_Wnt_B_Cat = ifelse(SIGPW_Wnt_B_Cat == TRUE, 1, 0)) %>%
+  mutate(SIGPW_PI3K_signaling = ifelse(SIGPW_PI3K_signaling == TRUE, 1, 0)) %>%
+  mutate(SIGPW_Cell_cycle = ifelse(SIGPW_Cell_cycle == TRUE, 1, 0)) %>%
+  mutate(SIGPW_TGFB_signaling = ifelse(SIGPW_TGFB_signaling == TRUE, 1, 0)) %>%
+  mutate(GIE_IFNy = ifelse(GIE_IFNy == TRUE, 1, 0))  %>%
+  mutate(RAS_RAF = ifelse(RAS_RAF == TRUE, 1, 0)) 
+  
+model_data$Response <- relevel(model_data$Response, ref = "NR")
+levels(model_data$Response)
+table(model_data$Response)
+str(model_data)
+factor_summary(model_data)
+```
+
+### Train outer 5-fold CV loop
+
+```{r}
+train_nested_cv_model <- FALSE
+
+if (train_nested_cv_model) {
+  # Store and report mean AUC and SD across 5 outer folds, also for sensitivity, specificity etc
+  outer_fold_models <- list()
+  outer_fold_results <- list()
+  removed_predictors <- list()
+  varimps <- list()
+
+  # Iterate over outer folds
+  for (i in seq_along(outer_folds)) {
+    
+    message("Outer fold: ", i)
+    
+    # Outer training and test sets indexes
+    test_idx  <- outer_folds[[i]]
+    train_idx <- setdiff(seq_len(nrow(data_partition)), test_idx)
+  
+    # Still has the partition information to balance the nested 10-CV inner loops
+    train_outer <- data_partition[train_idx, ]
+    test_outer  <- data_partition[test_idx, ]
+    
+    train_outer %>% select(Trial_response) %>% factor_summary() %>% print()
+    test_outer %>% select(Trial_response) %>% factor_summary() %>% print()
+    
+    # Only contains the model data for prediction + Response
+    train_data <- model_data[train_idx, ]
+    test_data  <- model_data[test_idx, ]
+    
+    # Remove constant predictors inside this outer fold
+    # unlikely given the distribution of these features
+    constant_cols <- names(train_data)[sapply(train_data, function(x) length(unique(x)) == 1)]
+    removed_predictors[[i]] <- constant_cols
+    
+     if (length(constant_cols) > 0) {
+      train_data <- train_data[, !(names(train_data) %in% constant_cols), drop = FALSE]
+      test_data  <- test_data[, !(names(test_data) %in% constant_cols), drop = FALSE]
+    }
+    
+    # Create inner folds on the SAME data used for training 
+    # 10 fold CV stratified by Trial_response
+    inner_folds <- createFolds(
+      train_outer$Trial_response, k = 10, returnTrain = TRUE)
+    inner_indexOut <- lapply(
+      inner_folds, function(idx) setdiff(seq_len(nrow(train_outer)), idx))
+  
+    # TrainControl using inner folds
+    ctrl <- trainControl(
+      method = "cv",
+      number = 10,
+      classProbs = TRUE,
+      summaryFunction = twoClassSummary,
+      savePredictions = TRUE,
+      index = inner_folds,
+      indexOut = inner_indexOut
+    )
+  
+    # Train model on outer training set
+    model <- train(
+      Response ~ .,
+      data = train_data,
+      method = "rf",
+      trControl = ctrl,
+      metric = "ROC"
+    )
+  
+    # Evaluate on outer test set
+    pred <- predict(model, newdata = test_data, type = "prob")[, 2]
+  
+    outer_fold_results[[i]] <- data.frame(
+      outer_fold = i,
+      row_index = test_idx,
+      truth = test_data$Response,
+      pred = pred
+    )
+    
+    outer_fold_models[[i]] <- model
+    
+    # Variable importance for this outer model
+    varimps[[i]] <- varImp(model)$importance
+    
+  }
+  
+  outer_fold_models %>% saveRDS(here(output_dir, "outer_fold_models.rds"))
+  outer_fold_results %>% saveRDS(here(output_dir, "outer_fold_results.rds"))
+  removed_predictors %>% saveRDS(here(output_dir,
+                                      "outer_fold_removed_predictors.rds"))
+  varimps %>% saveRDS(here(output_dir, "outer_fold_varimps.rds"))
+}
+
+outer_fold_models <- readRDS(here(output_dir, "outer_fold_models.rds"))
+outer_fold_results <- readRDS(here(output_dir, "outer_fold_results.rds"))
+removed_predictors <- readRDS(here(output_dir,
+                                   "outer_fold_removed_predictors.rds"))
+varimps <- readRDS(here(output_dir, "outer_fold_varimps.rds"))
+
+```
+
+```{r}
+all_outer <- bind_rows(outer_fold_results) %>%
+  mutate(ground_truth = truth) %>%
+  mutate(truth = ifelse(truth %in% c(1, "R"), 1, 0)) %>%
+  mutate(outer_fold = paste0("fold_", outer_fold)) %>%
+  mutate(row_index = as.character(row_index)) %>%
+  left_join(data_partition %>%
+              mutate(row_index  = as.character(1:nrow(data_partition))))
+
+table(all_outer$ground_truth, all_outer$truth)
+table(all_outer$Trial)
+table(all_outer$Trial_response)
+table(all_outer$outer_fold, all_outer$Trial)
+table(all_outer$outer_fold, all_outer$Response)
+table(all_outer$outer_fold, all_outer$Trial_response)
+
+```
+
+### ROC per outer folds
+```{r}
+plot(NULL, xlim=c(0,1), ylim=c(0,1),
+     xlab="1 - Specificity", ylab="Sensitivity")
+
+for (f in unique(all_outer$outer_fold)) {
+  df_fold <- all_outer[all_outer$outer_fold == f, ]
+  
+  truth <- factor(df_fold$ground_truth, levels = c("NR", "R"))
+  pred   <- df_fold$pred
+  
+  if (length(unique(truth)) < 2) next
+  
+  roc_obj <- roc(truth, pred)
+  lines(1 - roc_obj$specificities, roc_obj$sensitivities, col = "grey70")
+}
+
+abline(0,1,lty=2)
+```
+
+```{r}
+folds <- unique(all_outer$outer_fold)
+roc_list <- list()
+
+for (f in folds) {
+  df_fold <- all_outer[all_outer$outer_fold == f, ]
+  
+  truth <- factor(df_fold$ground_truth, levels = c("NR", "R"))
+  pred   <- df_fold$pred
+  
+  # Skip folds with only one class
+  if (length(unique(truth)) < 2) {
+    cat("Skipping", f, "→ only one class present\n")
+    next
+  }
+  
+  roc_list[[f]] <- roc(truth, pred, quiet = TRUE)
+}
+
+# Common grid of FPR values
+fpr_grid <- seq(0, 1, length.out = 200)
+
+# Interpolate TPR for each fold
+tpr_mat <- sapply(roc_list, function(r) {
+  approx(
+    x = 1 - r$specificities,
+    y = r$sensitivities,
+    xout = fpr_grid
+  )$y
+})
+
+mean_tpr <- rowMeans(tpr_mat, na.rm = TRUE)
+sd_tpr   <- apply(tpr_mat, 1, sd, na.rm = TRUE)
+
+plot(NULL, xlim=c(0,1), ylim=c(0,1),
+     xlab="False Positive Rate", ylab="True Positive Rate")
+
+# Per-fold ROC curves
+for (r in roc_list) {
+  lines(1 - r$specificities, r$sensitivities, col = "grey80")
+}
+
+# Shaded SD band
+upper <- pmin(mean_tpr + sd_tpr, 1)
+lower <- pmax(mean_tpr - sd_tpr, 0)
+polygon(
+  c(fpr_grid, rev(fpr_grid)),
+  c(upper, rev(lower)),
+  col = adjustcolor("skyblue", alpha.f = 0.3),
+  border = NA
+)
+
+# Mean ROC curve
+lines(fpr_grid, mean_tpr, col="blue", lwd = 2)
+
+abline(0, 1, lty = 2)
+
+```
+
+```{r}
+all_outer %>% ggplot(aes(x = ground_truth, y = pred, fill = Response)) +
+  geom_boxplot() + theme_Publication()+
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  stat_compare_means(method = "wilcox")
+```
+
+```{r, fig.height = 8, fig.width = 8}
+all_outer %>% ggplot(aes(x = ground_truth, y = pred, fill = Response)) +
+  geom_boxplot() + theme_Publication() + facet_wrap(~outer_fold) +
+  scale_fill_manual(values = c(Color_NR, Color_R))+
+  stat_compare_means(method = "wilcox")
+```
+
+```{r, fig.height = 10, fig.width = 8}
+all_outer %>% 
+  mutate(outer_fold_ground_truth = paste0(ground_truth, "_", outer_fold)) %>%
+  ggplot(aes(x = outer_fold_ground_truth, y = pred, fill = Response)) +
+  geom_boxplot() + theme_Publication() + facet_wrap(~Trial) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+```
+
+```{r, fig.height = 5, fig.width = 8}
+all_outer %>% 
+  ggplot(aes(x = Trial_response, y = pred, fill = Response)) +
+  geom_boxplot() + theme_Publication() + facet_wrap(~outer_fold) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  scale_fill_manual(values = c(Color_NR, Color_R))
+```
+
+### Summary of metrics across outer folds
+```{r}
+table(all_outer$ground_truth)
+roc(all_outer$truth, all_outer$pred)
+
+auc_per_fold <- all_outer %>%
+  group_by(outer_fold) %>%
+  summarise(
+    auc = as.numeric(pROC::auc(pROC::roc(truth, pred)))
+  )
+
+auc_per_fold 
+
+summary_auc <- auc_per_fold %>%
+  summarise(
+    mean_auc = mean(auc),
+    sd_auc = sd(auc)
+  )
+
+summary_auc %>% round(2)
+
+safe_sens <- function(truth, pred) {
+  if (length(unique(truth)) < 2 || length(unique(pred)) < 2) return(NA_real_)
+  caret::sensitivity(truth, pred, positive = "R")
+}
+
+safe_spec <- function(truth, pred) {
+  if (length(unique(truth)) < 2 || length(unique(pred)) < 2) return(NA_real_)
+  caret::specificity(truth, pred, negative = "NR")
+}
+
+results <- list()
+
+for (folds in unique(all_outer$outer_fold)) {
+  
+  cat("Processing:", folds, "\n")
+  
+  df_fold <- all_outer[all_outer$outer_fold == folds, ]
+  
+  truth_f <- factor(df_fold$truth == 1, levels = c(FALSE, TRUE))
+  pred_f  <- factor(df_fold$pred > 0.5, levels = c(FALSE, TRUE))
+  
+  # Check class presence
+  if (length(unique(truth_f)) < 2) {
+    cat("  Skipped:", folds, "→ only one class present in ground truth\n")
+    sens <- NA_real_
+    spec <- NA_real_
+  } else if (length(unique(pred_f)) < 2) {
+    cat("  Warning:", folds, "→ model predicted only one class\n")
+    sens <- NA_real_
+    spec <- NA_real_
+  } else {
+    sens <- caret::sensitivity(truth_f, pred_f, positive = TRUE)
+    spec <- caret::specificity(truth_f, pred_f, negative = FALSE)
+  }
+  
+  results[[folds]] <- data.frame(
+    outer_fold = folds,
+    sens = sens,
+    spec = spec
+  )
+}
+
+sens_spec_per_fold <- do.call(rbind, results)
+
+sens_spec_per_fold %>%
+  mutate(sens = round(sens, 2))%>%
+  mutate(spec = round(spec, 2))
+
+summary_sens_spec <- sens_spec_per_fold %>%
+  summarise(
+    mean_sens = mean(sens),
+    sd_sens = sd(sens),
+    mean_spec = mean(spec),
+    sd_spec = sd(spec)
+  )
+
+summary_sens_spec %>% round(2)
+```
+
+### Varimps over outer folds
+```{r, fig.height = 16, fig.width = 8}
+varimp_df <- map2_df(
+  varimps,
+  seq_along(varimps),
+  ~ mutate(.x, outer_fold = .y, Variable = rownames(.x))
+)
+
+varimp_summary <- varimp_df %>%
+  group_by(Variable) %>%
+  summarise(
+    mean_imp = mean(Overall),
+    sd_imp = sd(Overall)
+  ) %>%
+  arrange(desc(mean_imp))
+
+varimp_df %>%
+  ggplot(aes(x = fct_rev(factor(Variable, levels = varimp_summary$Variable)),
+             y = Overall)) + geom_boxplot(outlier.shape = NA) +
+  geom_point(aes(col = as.factor(outer_fold))) +
+  coord_flip() + theme_Publication()
+
+varimp_summary %>%
+  ggplot(aes(x = reorder(Variable, mean_imp), y = mean_imp)) +
+  geom_col() + coord_flip() + theme_Publication()
+
+varimp_summary %>% write_csv2(here(output_dir, "varimp_summary.csv"))
+
+varimp_df %>% filter(Overall == 100)
+```
+
+# ---------------
+# LOSO Leave trial out outer folds
+## Use each cohort as the outer test folds, nested CV on remaining pancan data
+```{r}
+train_nested_cv_model <- FALSE
+if (train_nested_cv_model) {
+  trial_outer_fold_models <- list()
+  trial_outer_fold_results <- list()
+  trial_outer_fold_removed_predictors <- list()
+  trial_outer_fold_varimps <- list()
+  
+  # Iterate over trials as outer folds (Leave one study out - LOSO)
+  for (current_trial in c("BELLINI", "IMCISION", "NABUCCO", "NICHE-MSS",
+                          "OpACIN_neo", "PRADO", "MATISSE")) {
+    
+    message("Outer fold: ", current_trial)
+    
+    train_ids <- rownames(data_partition)[data_partition$Trial != current_trial]
+    test_ids  <- rownames(data_partition)[data_partition$Trial == current_trial]
+    
+    # Still has the partition information to balance the nested 10-CV inner loops
+    train_outer <- data_partition %>% filter(Patient %in% train_ids)
+    test_outer  <- data_partition %>% filter(Patient %in% test_ids)
+    
+    train_outer %>% select(Trial, Trial_response) %>% factor_summary() %>% print()
+    test_outer %>% select(Trial, Trial_response) %>% factor_summary() %>% print()
+    
+    # Only contains the model data for prediction + Response
+    train_data <- model_data[data_partition$Trial != current_trial, ]
+    test_data <- model_data[data_partition$Trial == current_trial, ]
+    
+    # Remove constant predictors inside this outer fold
+    constant_cols <- names(train_data)[sapply(train_data, function(x) length(unique(x)) == 1)]
+    trial_outer_fold_removed_predictors[[current_trial]] <- constant_cols
+    
+     if (length(constant_cols) > 0) {
+      train_data <- train_data[, !(names(train_data) %in% constant_cols), drop = FALSE]
+      test_data  <- test_data[, !(names(test_data) %in% constant_cols), drop = FALSE]
+    }
+    
+    # Create inner folds on the SAME data used for training 
+    # 10 fold CV stratified by Trial_response
+    inner_folds_ids <- createFolds(train_outer$Trial_response, k = 10, returnTrain = TRUE)
+    
+    # Convert fold indices → sample_IDs
+    inner_folds_ids <- lapply(inner_folds_ids, function(idx) rownames(train_outer)[idx])
+    # Map sample_IDs to integer row positions in train_data
+    inner_folds <- lapply(inner_folds_ids, function(ids) match(ids, rownames(train_data)))
+    inner_indexOut <- lapply(inner_folds, function(idx) setdiff(seq_len(nrow(train_data)), idx))
+
+    # TrainControl using inner folds
+    ctrl <- trainControl(
+      method = "cv",
+      number = 10,
+      classProbs = TRUE,
+      summaryFunction = twoClassSummary,
+      savePredictions = TRUE,
+      index = inner_folds,
+      indexOut = inner_indexOut
+    )
+  
+    # Train model on outer training set
+    model <- train(
+      Response ~ .,
+      data = train_data,
+      method = "rf",
+      trControl = ctrl,
+      metric = "ROC"
+    )
+  
+    # Evaluate on outer test set
+    pred <- predict(model, newdata = test_data, type = "prob")[,2]
+  
+    trial_outer_fold_results[[current_trial]] <- data.frame(
+      outer_fold = current_trial,
+      sample_ID = rownames(test_data),
+      Left_out_trial = current_trial,
+      truth = test_data$Response,
+      pred = pred,
+      strategy = "LOSO"
+    )
+    
+    trial_outer_fold_models[[current_trial]] <- model
+    
+    # Variable importance for this outer model
+    trial_outer_fold_varimps[[current_trial]] <- varImp(model)$importance
+    
+  }
+  
+  trial_outer_fold_models %>%
+    saveRDS(here(output_dir, "trial_outer_fold_models.rds"))
+  trial_outer_fold_results %>%
+    saveRDS(here(output_dir, "trial_outer_fold_results.rds"))
+  trial_outer_fold_removed_predictors %>%
+    saveRDS(here(output_dir, "trial_outer_fold_removed_predictors.rds"))
+  trial_outer_fold_varimps %>%
+    saveRDS(here(output_dir, "trial_outer_fold_varimps.rds"))
+}
+
+trial_outer_fold_models <- readRDS(
+  here(output_dir, "trial_outer_fold_models.rds"))
+trial_outer_fold_results <- readRDS(
+  here(output_dir, "trial_outer_fold_results.rds"))
+trial_outer_fold_removed_predictors <- readRDS(
+  here(output_dir, "trial_outer_fold_removed_predictors.rds"))
+trial_outer_fold_varimps <- readRDS(
+  here(output_dir, "trial_outer_fold_varimps.rds"))
+
+```
+
+```{r}
+LOSO_trial_outer_folds <- bind_rows(trial_outer_fold_results) %>%
+  mutate(ground_truth = truth) %>%
+  mutate(truth = ifelse(truth %in% c(1, "R"), 1, 0)) %>%
+  mutate(outer_fold = paste0("fold_", outer_fold)) %>%
+  mutate(Patient = sample_ID) %>%
+  left_join(data_partition)
+
+LOSO_trial_outer_folds %>% dim()
+
+# Check encoding direction
+table(LOSO_trial_outer_folds$ground_truth, LOSO_trial_outer_folds$truth)
+table(LOSO_trial_outer_folds$outer_fold, LOSO_trial_outer_folds$Trial_response)
+```
+
+## Plot LOSO ROC
+```{r}
+plot(NULL, xlim=c(0,1), ylim=c(0,1),
+     xlab="1 - Specificity", ylab="Sensitivity")
+
+for (f in unique(LOSO_trial_outer_folds$outer_fold)) {
+  print(f)
+  df_fold <- LOSO_trial_outer_folds[LOSO_trial_outer_folds$outer_fold == f, ]
+  
+  truth <- factor(df_fold$ground_truth, levels = c("NR", "R"))
+  pred   <- df_fold$pred
+  
+  if (length(unique(truth)) < 2) next
+  
+  roc_obj <- roc(truth, pred)
+  print(roc_obj)
+  lines(1 - roc_obj$specificities, roc_obj$sensitivities,
+        col = trial_colors[unique(df_fold$Left_out_trial)])
+}
+
+abline(0,1,lty=2)
+
+```
+
+## Plot LOSO ROC + Nested CV
+
+```{r}
+plot(NULL, xlim=c(0,1), ylim=c(0,1),
+     xlab="1 - Specificity", ylab="Sensitivity")
+
+folds <- unique(all_outer$outer_fold)
+roc_list <- list()
+
+for (f in folds) {
+  df_fold <- all_outer[all_outer$outer_fold == f, ]
+  
+  truth <- factor(df_fold$ground_truth, levels = c("NR", "R"))
+  pred   <- df_fold$pred
+  
+  # Skip folds with only one class
+  if (length(unique(truth)) < 2) {
+    cat("Skipping", f, "→ only one class present\n")
+    next
+  }
+  
+  roc_list[[f]] <- roc(truth, pred, quiet = TRUE)
+}
+
+# Common grid of FPR values
+fpr_grid <- seq(0, 1, length.out = 200)
+
+# Interpolate TPR for each fold
+tpr_mat <- sapply(roc_list, function(r) {
+  approx(
+    x = 1 - r$specificities,
+    y = r$sensitivities,
+    xout = fpr_grid
+  )$y
+})
+
+mean_tpr <- rowMeans(tpr_mat, na.rm = TRUE)
+sd_tpr   <- apply(tpr_mat, 1, sd, na.rm = TRUE)
+
+# Per-fold ROC curves
+for (r in roc_list) {
+  lines(1 - r$specificities, r$sensitivities, col="grey80")
+}
+
+# Shaded SD band
+upper <- pmin(mean_tpr + sd_tpr, 1)
+lower <- pmax(mean_tpr - sd_tpr, 0)
+polygon(
+  c(fpr_grid, rev(fpr_grid)),
+  c(upper, rev(lower)),
+  col = adjustcolor("skyblue", alpha.f = 0.3),
+  border = NA
+)
+
+# Mean ROC curve
+lines(fpr_grid, mean_tpr, col="blue", lwd=2)
+
+for (f in unique(LOSO_trial_outer_folds$outer_fold)) {
+  print(f)
+  df_fold <- LOSO_trial_outer_folds[LOSO_trial_outer_folds$outer_fold == f, ]
+  
+  truth <- factor(df_fold$ground_truth, levels = c("NR", "R"))
+  pred   <- df_fold$pred
+  
+  if (length(unique(truth)) < 2) next
+  
+  roc_obj <- roc(truth, pred)
+  print(roc_obj)
+  lines(1 - roc_obj$specificities, roc_obj$sensitivities,
+        col = trial_colors[unique(df_fold$Left_out_trial)])
+}
+
+abline(0, 1, lty = 2)
+```
+
+```{r}
+LOSO_trial_outer_folds %>%
+  ggplot(aes(x = ground_truth, y = pred, fill = Response)) +
+  geom_boxplot() + theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE) +
+  labs(title = "Leave one study out set")
+```
+
+```{r, fig.height = 10, fig.width = 8}
+LOSO_trial_outer_folds %>%
+  ggplot(aes(x = ground_truth, y = pred, fill = Response)) + geom_boxplot() +
+  facet_wrap(~Trial) + theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE) + stat_compare_means(method = "wilcox") +
+  labs(title = "Leave one study out set")
+
+LOSO_trial_outer_folds %>%
+  ggplot(aes(x = ground_truth, y = pred, fill = Left_out_trial)) +
+  geom_boxplot() +
+  facet_wrap(~Trial) + theme_Publication() +
+  scale_fill_manual(values = c(trial_colors)) +
+  labs(title = "Leave one study out set")
+```
+
+## Summary of metrics across LOSO
+```{r}
+roc(LOSO_trial_outer_folds$truth, LOSO_trial_outer_folds$pred)
+
+LOSO_auc_per_fold <- LOSO_trial_outer_folds %>%
+  group_by(outer_fold, Left_out_trial) %>%
+  summarise(
+    auc = as.numeric(pROC::auc(pROC::roc(truth, pred)))
+  )
+
+LOSO_auc_per_fold
+
+LOSO_auc_per_fold %>%
+  write_csv2(here(prediction_dir, "LOSO_auc_per_fold.csv"))
+```
+
+
+```{r}
+LOSO_summary_auc <- LOSO_auc_per_fold %>%
+  ungroup() %>%
+  summarise(
+    mean_auc = mean(auc),
+    sd_auc = sd(auc)
+  )
+
+LOSO_summary_auc 
+LOSO_summary_auc %>% round(2)
+
+LOSO_results <- list()
+
+for (folds in unique(LOSO_trial_outer_folds$outer_fold)) {
+  
+  cat("Processing:", folds, "\n")
+  
+  df_fold <- LOSO_trial_outer_folds[
+    LOSO_trial_outer_folds$outer_fold == folds, ]
+  
+  truth_f <- factor(df_fold$truth == 1, levels = c(FALSE, TRUE))
+  pred_f  <- factor(df_fold$pred > 0.5, levels = c(FALSE, TRUE))
+  
+  # Check class presence
+  if (length(unique(truth_f)) < 2) {
+    cat("  Skipped:", folds, "→ only one class present in ground truth\n")
+    sens <- NA_real_
+    spec <- NA_real_
+  } else if (length(unique(pred_f)) < 2) {
+    cat("  Warning:", folds, "→ model predicted only one class\n")
+    sens <- NA_real_
+    spec <- NA_real_
+  } else {
+    sens <- caret::sensitivity(truth_f, pred_f, positive = TRUE)
+    spec <- caret::specificity(truth_f, pred_f, negative = FALSE)
+  }
+  
+  LOSO_results[[folds]] <- data.frame(
+    outer_fold = folds,
+    sens = sens,
+    spec = spec
+  )
+}
+
+LOSO_results
+LOSO_sens_spec_per_fold <- do.call(rbind, LOSO_results)
+
+LOSO_summary_sens_spec <- LOSO_sens_spec_per_fold %>%
+  summarise(
+    mean_sens = mean(sens),
+    sd_sens = sd(sens),
+    mean_spec = mean(spec),
+    sd_spec = sd(spec)
+  )
+
+LOSO_summary_sens_spec
+
+LOSO_varimp_df <- map2_df(
+  trial_outer_fold_varimps,
+  names(trial_outer_fold_varimps),
+  ~ mutate(.x, outer_fold = .y, Variable = rownames(.x))
+) %>%
+  mutate(Left_out_trial = outer_fold)
+
+LOSO_varimp_summary <- LOSO_varimp_df %>%
+  group_by(Variable) %>%
+  summarise(
+    mean_imp = mean(Overall),
+    sd_imp = sd(Overall)
+  ) %>%
+  arrange(desc(mean_imp))
+
+```
+
+## Varimps over outer folds
+
+```{r, fig.height = 16, fig.width = 8}
+LOSO_varimp_df %>%
+  ggplot(aes(x = fct_rev(factor(Variable, levels = varimp_summary$Variable)),
+             y = Overall)) + geom_boxplot(outlier.shape = NA) +
+  geom_point(aes(col = as.factor(Left_out_trial))) +
+  coord_flip() + theme_Publication() +
+  scale_color_manual(values = trial_colors) +
+  labs(title = "Leave one study out sets")
+```
+
+# ---------------
+
+# Per cohort RF LOOCV
+```{r}
+
+# Convert features to numeric, logistic becomes 1, categories get a reference 0/1
+model_data_excl_dmmr <-  wes_rna_meta_features_df %>%
+  filter(!Trial %in% c("NICHE-MSI")) %>%
+  mutate(Patient = paste0(Patient, "_")) %>% # Prepare for adding numeric idx
+    column_to_rownames("Patient") %>%
+  mutate(Sex = ifelse(Sex == "Female", 1, 0)) %>%
+  mutate(Baseline_N_h = ifelse(Baseline_N_h == "N+", 1, 0)) %>%
+  mutate(GIE_AP = ifelse(GIE_AP == TRUE, 1, 0)) %>%
+  mutate(TP53 = ifelse(TP53 == TRUE, 1, 0)) %>%
+  mutate(BRCA1_2 = ifelse(BRCA1_2 == TRUE, 1, 0))%>%
+  mutate(HLA_alteration = ifelse(HLA_alteration == "HLA-Altered", 1, 0)) %>%
+  mutate(SIGPW_Wnt_B_Cat = ifelse(SIGPW_Wnt_B_Cat == TRUE, 1, 0)) %>%
+  mutate(SIGPW_PI3K_signaling = ifelse(SIGPW_PI3K_signaling == TRUE, 1, 0)) %>%
+  mutate(SIGPW_Cell_cycle = ifelse(SIGPW_Cell_cycle == TRUE, 1, 0)) %>%
+  mutate(SIGPW_TGFB_signaling = ifelse(SIGPW_TGFB_signaling == TRUE, 1, 0)) %>%
+  mutate(GIE_IFNy = ifelse(GIE_IFNy == TRUE, 1, 0))  %>%
+  mutate(RAS_RAF = ifelse(RAS_RAF == TRUE, 1, 0)) 
+  
+model_data_excl_dmmr$Response <- relevel(model_data_excl_dmmr$Response,
+                                         ref = "NR")
+levels(model_data_excl_dmmr$Response)
+table(model_data_excl_dmmr$Response)
+str(model_data_excl_dmmr)
+factor_summary(model_data_excl_dmmr)
+head(rownames(model_data_excl_dmmr))
+
+train_loocv_rf_models <- FALSE
+
+if (train_loocv_rf_models) {
+    rf_models <- list()
+    removed_features <- list()
+    
+    for(current_trial in unique(model_data_excl_dmmr$Trial)) {
+      print(sprintf("Processing trial: %s", current_trial))
+      
+      df_current <- subset(model_data_excl_dmmr,
+                           Trial == current_trial) %>%
+        select(-Trial) 
+      factor_summary(df_current)
+    
+      # Detect and remove constant features
+      constant_cols <- names(df_current)[sapply(
+        df_current, function(x) length(unique(x)) == 1)]
+      removed_features[[current_trial]] <- constant_cols
+      
+      df_current <- df_current[
+        , !(names(df_current) %in% constant_cols), drop = FALSE]
+      
+      ctrl  <- trainControl(method  = "LOOCV",
+                    classProbs = TRUE,
+                    summaryFunction = twoClassSummary,
+                    savePredictions = TRUE) 
+      
+      rf_models[[current_trial]] <- train(
+        Response ~ ., 
+        data = df_current,
+        method = "rf",
+        trControl = ctrl
+      )
+    }
+    
+    rf_models %>%
+      saveRDS(here(output_dir, "random_forest_loocv_trial_fit.rds"))
+    
+    removed_features %>%
+      saveRDS(here(output_dir, "random_forest_removed_features_trial_fit.rds"))
+  }
+
+rf_models <- readRDS(
+  here(output_dir, "random_forest_loocv_trial_fit.rds"))
+
+rf_removed_features <- readRDS(
+  here(output_dir, "random_forest_removed_features_trial_fit.rds"))
+
+rf_models
+rf_removed_features
+
+loocv_feature_imp <- bind_rows(
+  lapply(names(rf_models), function(current_trial) {
+    varImp(rf_models[[current_trial]])$importance %>%
+      mutate(model = current_trial)
+  }), .id = "Trial")
+
+loocv_feature_imp <- bind_rows(
+  lapply(names(rf_models), function(current_trial) {
+    varImp(rf_models[[current_trial]])$importance %>%
+      mutate(model = current_trial)
+  })) %>% rownames_to_column("Variable")
+
+loocv_feature_imp$Variable <- gsub("\\.{3}(\\d+)", "",
+                                   loocv_feature_imp$Variable)
+
+rf_get_pred_scores_auc_values <- function(model, trial){
+  
+  print(trial)
+  print(sprintf("Best model mtry %s", model$bestTune$mtry))
+  
+  df <- model$pred
+  # Subset to best tuning parameter
+  best_mtry <- model$bestTune$mtry
+  df_best <- df %>% filter(mtry == best_mtry)
+  
+  plot <- df_best %>%
+    ggplot(aes(x = obs, y = NR)) + geom_boxplot() + geom_point() +
+    labs(title = trial, y = "NR pred class score") +
+    theme_Publication()
+  print(plot)
+
+  plot <- df_best %>%
+    ggplot(aes(x = obs, y = R)) + geom_boxplot() + geom_point() +
+    labs(title = trial, y = "R pred class score")+
+    theme_Publication()
+  print(plot)
+  
+    # Ensure correct factor levels
+  truth <- factor(df_best$obs, levels = c("NR", "R"))
+  pred  <- df_best$R
+  
+  # Skip if only one class present
+  if (length(unique(truth)) < 2) {
+    auc_val <- NA_real_
+  } else {
+    auc_val <- as.numeric(auc(truth, pred))
+  }
+  
+  data.frame(
+    Trial = trial,
+    AUC = auc_val
+  )
+}
+
+rf_loocv_auc <- lapply(
+  names(rf_models),
+  function(Trial) rf_get_pred_scores_auc_values(rf_models[[Trial]], Trial)
+)
+
+rf_loocv_auc <- do.call(rbind, rf_loocv_auc)
+rf_loocv_auc %>% arrange(-AUC)
+
+rf_loocv_auc %>% write_csv2(here(output_dir, "rf_loocv_auc.csv"))
+```
+
+# ---------------
+# AUC comparison
+```{r}
+auc_comparison <- rf_loocv_auc %>%
+  add_row(Trial = "Combined_outer_folds", AUC = summary_auc$mean_auc)
+
+auc_comparison
+
+auc_comparison %>%
+  ggplot(aes(x = reorder(Trial, AUC), y = AUC, fill = Trial)) +
+  geom_col() + theme_Publication() + coord_flip() +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  scale_fill_manual(values = trial_colors)
+
+auc_comparison %>%
+  mutate(model = "RF") %>%
+  full_join(glmnet_loocv_auc %>%
+  mutate(model = "glmnet")) %>%
+  ggplot(aes(x = as.factor(model), y = AUC, col = Trial, group = Trial)) +
+  geom_point() + geom_line(aes(group = Trial)) + theme_Publication() +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  scale_color_manual(values = trial_colors)
+
+```
+
+# Varimp comparison
+```{r, fig.height = 16, fig.width = 8}
+
+importance_df <- varimp_summary %>%
+    mutate(model = "Combined") %>%
+    rename(Overall = mean_imp) %>%
+  full_join(loocv_feature_imp) %>%
+  rename(Overall_var_imp = Overall)
+  
+importance_df_summary <- importance_df %>%
+  group_by(Variable) %>%
+  summarize(mean = mean(Overall_var_imp)) %>%
+  arrange(-mean)
+
+importance_df_summary
+
+importance_df %>%
+  ggplot(aes(x = factor(Variable, levels = rev(varimp_summary$Variable)),
+             y = Overall_var_imp, col = model)) +
+  geom_point() +
+  coord_flip() + theme_Publication() +
+  labs(x = "", title = "Variable importance") +
+  scale_color_manual(values = trial_colors)
+
+importance_df %>%
+  ggplot(aes(x = factor(Variable, levels = rev(importance_df_summary$Variable)),
+             y = Overall_var_imp, col = model),
+         alpha = ifelse(model == "Combined", 1, 0.5)) +
+  geom_point() +
+  coord_flip() + theme_Publication() +
+  labs(x = "", title = "Variable importance") +
+  scale_color_manual(values = trial_colors)
+
+# Reorder by top importance, should be top ranked in at least one model
+importance_df %>%
+  filter(model == "Combined") %>%
+  ggplot(aes(x = reorder(Variable, Overall_var_imp),
+             y = Overall_var_imp, col = model)) +
+  geom_point() + coord_flip() + theme_Publication() +
+  labs(x = "", title = "Variable importance (Reorder top 100)")
+
+auc_comparison %>% write_csv2(here(prediction_dir, "auc_comparison.csv"))
+importance_df %>% write_csv2(here(prediction_dir, "importance_df.csv"))
+
+importance_df %>% filter(Overall_var_imp == 100)
+```
+
+# Aggregate all
+```{r}
+auc_comparison <- rf_loocv_auc %>%
+  mutate(Training_set = "Trial_specific",
+         outer_fold = NA) %>%
+  add_row(Trial = "Combined_outer_folds",
+          AUC = summary_auc$mean_auc,
+          Training_set = "Pancancer Nested CV",
+          outer_fold = "mean_outer_folds") %>%
+  full_join(LOSO_auc_per_fold %>%
+              rename(Trial = Left_out_trial, AUC = auc) %>%
+              mutate(Training_set = "Pancancer LOSO")) %>%
+  arrange(Trial)
+
+auc_comparison %>%
+  ggplot(aes(x = Training_set, y = AUC, col = Trial, group = Trial)) +
+  geom_point() + geom_line(aes(group = Trial)) + theme_Publication() +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  scale_color_manual(values = trial_colors)
+
+auc_comparison %>%
+  filter(!Training_set %in% c("Pancancer Nested CV")) %>%
+  ggplot(aes(x = Training_set, y = AUC, col = Trial, group = Trial)) +
+  geom_point() + geom_line(aes(group = Trial)) + theme_Publication() +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  scale_color_manual(values = trial_colors)
+
+```
+
+```{r}
+auc_comparison_aggregate_all <- rf_loocv_auc %>%
+  mutate(Training_set = "Trial_specific",
+         outer_fold = NA) %>%
+  add_row(Trial = "Combined_outer_folds",
+          AUC = summary_auc$mean_auc,
+          Training_set = "Pancancer Nested CV",
+          outer_fold = "mean_outer_folds") %>%
+  full_join(LOSO_auc_per_fold %>%
+              rename(Trial = Left_out_trial, AUC = auc) %>%
+              mutate(Training_set = "Pancancer LOSO")) %>%
+  arrange(Trial) %>%
+  left_join(summary_auc %>%
+              mutate(Trial = "Combined_outer_folds")) %>%
+  full_join(auc_per_fold %>%
+              rename(AUC = auc) %>%
+              mutate(Trial = "Combined_outer_folds",
+                     Training_set = "Pancancer Nested CV"))
+  
+print(auc_comparison_aggregate_all)
+
+auc_comparison %>%
+  left_join(summary_auc %>%
+              mutate(Trial = "Combined_outer_folds")) %>%
+  filter(!Training_set %in% c("Pancancer LOSO")) %>%
+  ggplot(aes(x = reorder(Trial, AUC), y = AUC, fill = Trial,
+             shape = Training_set)) +
+  geom_col() + theme_Publication() + coord_flip() +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  scale_fill_manual(values = trial_colors)  +
+  scale_color_manual(values = trial_colors)+
+  geom_errorbar(
+    aes(ymin = AUC - sd_auc, ymax = AUC + sd_auc),
+    width = 0.2,
+    linewidth = 0.5
+  ) + geom_point(aes(x = Trial, y = AUC), data = auc_per_fold %>%
+              mutate(AUC = auc, Trial = "Combined_outer_folds",
+                     Training_set = "Pancancer Nested CV")) +
+  geom_point(aes(x = Trial, y = AUC, col = "black"),
+             data = auc_comparison %>%
+               filter(Training_set == "Pancancer LOSO")) +
+  labs(x = "") +
+  guides(shape = guide_legend(nrow = 3), size = NULL)
+
+
+auc_comparison_aggregate_all_plot <- auc_comparison_aggregate_all %>%
+  filter(!(Training_set %in% c("Pancancer Nested CV") & outer_fold
+           %in% c("fold_1", "fold_2", "fold_3", "fold_4", "fold_5"))) %>%
+  filter(!Training_set %in% c("Pancancer LOSO")) %>%
+  ggplot(aes(x = reorder(Trial, AUC), y = AUC, fill = Trial,
+             shape = Training_set)) +
+  geom_col() + theme_Publication() + coord_flip() +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  scale_fill_manual(values = trial_colors)  +
+  scale_color_manual(values = trial_colors)+
+  geom_errorbar(
+    aes(ymin = AUC - sd_auc, ymax = AUC + sd_auc),
+    width = 0.2,
+    linewidth = 0.5
+  ) + geom_point(aes(x = Trial, y = AUC), data = auc_comparison_aggregate_all) +
+  geom_point(aes(x = Trial, y = AUC, col = "black"),
+             data = auc_comparison_aggregate_all %>%
+               filter(Training_set == "Pancancer LOSO")) +
+  labs(x = "") +
+  guides(shape = guide_legend(nrow = 3), size = NULL) +
+  # guides(fill = guide_legend(nrow = 3), size = NULL) +
+  guides(fill = NULL, col = NULL)
+
+auc_comparison_aggregate_all_plot
+
+graph2pdf(x = auc_comparison_aggregate_all_plot,
+          file = here(output_dir, "_auc_comparison_aggregate_all_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 4.5,
+          width = 6.5)
+
+auc_comparison_aggregate_all %>%
+  write_csv2(here(output_dir, "auc_comparison_aggregate_all.csv"))
+```
+
+
+```{r, fig.height = 6, fig.width = 8}
+auc_comparison_aggregate_all %>%
+  filter(!outer_fold %in%
+           c("fold_1", "fold_2", "fold_3", "fold_4", "fold_5")) %>%
+  mutate(model = paste0("random_forest_", Trial, "_", Training_set)) %>%
+  full_join(model_auc_data %>%
+              mutate(AUC = as.numeric(AUC),
+                     model = gsub("Response_n ~ ", "", formula))) %>%
+  ggplot(aes(x = reorder(model, AUC), y = AUC)) + geom_col() + coord_flip() 
+
+```
+
+
+```{r}
+auc_comparison %>%
+  left_join(summary_auc %>%
+              mutate(Trial = "Combined_outer_folds"))%>%
+  ggplot(aes(x = reorder(Trial, AUC), y = AUC,
+             col = Trial, shape = Training_set)) +
+  geom_point() + theme_Publication() + coord_flip() +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  scale_color_manual(values = trial_colors)+
+  geom_errorbar(
+    aes(ymin = AUC - sd_auc, ymax = AUC + sd_auc),
+    width = 0.2,
+    linewidth = 0.5
+  ) 
+
+auc_comparison %>%
+  left_join(summary_auc %>%
+              mutate(Trial = "Combined_outer_folds"))%>%
+  ggplot(aes(x = reorder(Trial, AUC), y = AUC,
+             col = Training_set, shape = Training_set)) +
+  geom_point() + theme_Publication() + coord_flip() +
+  geom_hline(yintercept = 0.5, linetype = "dashed")  +
+  geom_errorbar(
+    aes(ymin = AUC - sd_auc, ymax = AUC + sd_auc),
+    width = 0.2,
+    linewidth = 0.5
+  ) 
+
+```
+
+```{r, fig.height = 16, fig.width = 12}
+
+importance_df %>%
+  mutate(Trial = model) %>%
+  full_join(LOSO_varimp_df %>%
+              mutate(Trial = Left_out_trial,
+                     model = paste("Leaving out:", Left_out_trial)) %>%
+              rename(Overall_var_imp = Overall)) %>%
+  mutate(Leave_one_study_out_set = ifelse(
+    !is.na(Left_out_trial), "LOSO", "Other")) %>%
+  ggplot(aes(x = factor(Variable, levels = rev(varimp_summary$Variable)),
+             y = Overall_var_imp, col = Trial,
+             shape = Leave_one_study_out_set),
+         alpha = ifelse(model == "Combined", 1, 0.5)) +
+  geom_point() +
+  coord_flip() + theme_Publication() +
+  labs(x = "", title = "Variable importance") +
+  facet_wrap(~fct_rev(Leave_one_study_out_set)) +
+  scale_color_manual(values = trial_colors)
+```
+
+```{r, fig.height = 16, fig.width = 8}
+
+importance_df %>%
+  full_join(LOSO_varimp_df %>%
+              mutate(model = paste("Leaving out:", Left_out_trial)) %>%
+              rename(Overall_var_imp = Overall)) %>%
+  mutate(Leave_one_study_out_set = ifelse(!is.na(Left_out_trial),
+                                          "LOSO", "Other")) %>%
+  ggplot(aes(x = factor(Variable, levels = rev(varimp_summary$Variable)),
+             y = Overall_var_imp, col = model,
+             shape = Leave_one_study_out_set),
+         alpha = ifelse(model == "Combined", 1, 0.5)) +
+  geom_point() +
+  coord_flip() + theme_Publication() +
+  labs(x = "", title = "Variable importance") # +
+  # scale_color_manual(values = trial_colors)
+```
+
+
+```{r, fig.height = 4, fig.width = 6}
+auc_comparison_aggregate_all %>%
+  filter(Training_set == "Trial_specific") %>%
+  mutate(model = "Trial_specific_rf") %>%
+  full_join(glmnet_loocv_auc %>%
+  mutate(model = "glmnet")) %>%
+  ggplot(aes(x = as.factor(model), y = AUC, col = Trial, group = Trial)) +
+  geom_point() + geom_line(aes(group = Trial)) + theme_Publication() +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  scale_color_manual(values = trial_colors)
+
+```
+
+# ----------
+# Lint script
+```{r}
+# lint("~/NKI_pancancer_neoadj_io/src/pancan_response_prediction.Rmd")
+lint(filename = "~/NKI_pancancer_neoadj_io/src/pancan_response_prediction.Rmd",
+  linters = unused_import_linter()
+)
+```
+
+# ---------------
+# sessionInfo - Package Versions
+```{r sessionInfo}
+sessionInfo()
+```

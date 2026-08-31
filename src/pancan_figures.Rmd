@@ -15,15 +15,10 @@ params:
 
 Author comment:
 File description comment:
-The purpose of this script is to parse results from WES analysis
-vcf files, quality logs, comparing with RNAseq data
-filter_and_parse_vcfs
-
-It receives TRUST4 results as inputs
-and outputs metrics calculated from TCR and BCR repertoires
+The purpose of this script is to produce figure panels, loading the source data
 
 # Loading Packages
-```{r, include=FALSE}
+```{r}
 knitr::opts_chunk$set(
   echo = TRUE, warning = FALSE, message = FALSE, dpi = 300, error = TRUE
   # fig.width = 10, fig.height = 6, output: html_notebook
@@ -31,13 +26,11 @@ knitr::opts_chunk$set(
 
 library(tidyverse)
 library(readxl)
-# library(TMBleR)
 library(maftools)
 source("helper_functions.R")
-source("oncomatrix.R")
+# source("oncomatrix.R")
 library(VariantAnnotation)
 library(ggpubr)
-library(paletteer)
 library(corrplot)
 library(ggpointdensity)
 library(export)
@@ -45,6 +38,8 @@ library(meta)
 library(export)
 library(ggpattern)
 library(scales)
+library(lintr)
+library(pROC)
 MakeDataFrameFromVCF <- getFromNamespace("MakeDataFrameFromVCF", "ICAMS")
 
 set.seed(42)
@@ -59,15 +54,11 @@ export <- params$export
 filter_and_parse_vcfs <- params$filter_and_parse_vcfs
 
 # generate output directory
-metadata_dir <- here("data", "processed", "metadata")
-wes_dir <- here("data", "processed", "WES_analysis")
-meta_wes_dir <- here("data", "processed", "WES_analysis_meta")
-meta_rna_dir <- here("data", "processed", "gene_signatures_meta") 
-wes_rna_dir <- here("data", "processed", "WES_RNA_integration")
-figures_dir <- here("data", "processed", "_pancan_figures")
 output_dir <- here("data", "processed", "_pancan_figures")
+source_data_dir <- here("data", "processed", "source_data")
 
 print(output_dir)
+
 # if output_dir does not exist, create it
 if (!dir.exists(output_dir)) {
     dir.create(output_dir)
@@ -78,19 +69,32 @@ if (!dir.exists(output_dir)) {
 
 ```
 
+
+# ----------
+# Define import directories
+```{r}
+# metadata_dir <- here("data", "processed", "metadata")
+# wes_dir <- here("data", "processed", "WES_analysis")
+# meta_wes_dir <- here("data", "processed", "WES_analysis_meta")
+# meta_rna_dir <- here("data", "processed", "gene_signatures_meta") 
+# wes_rna_dir <- here("data", "processed", "WES_RNA_integration")
+# figures_dir <- here("data", "processed", "_pancan_figures")
+# prediction_dir <- here("data", "processed", "response_prediction")
+# differential_expression_meta_dir <- here(
+#   "data", "processed", "differential_expression_meta")
+# external_analysis_dir <- here("data", "processed",
+#                               "pancan_external_data_analysis")
+# Tissue_PDL1_TILs_dir <- here("data", "processed", "Tissue_PDL1_TILs") 
+
+ssgsea_response_prediction_ssgsea <- read_csv2(
+  here(source_data_dir, "pancan_response_ssgsea_results_df.csv"))
+
+```
+
 # ----------
 # Load metadata
 
 ```{r Load metadata}
-
-# WES target sizes
-WES_target_sizes <- data.frame(
-  Trial = c("IMCISION", "PRADO", "OpACIN_neo", "MATISSE",
-            "NICHE-MSI", "NICHE-MSS", "NABUCCO", "BELLINI"),
-  Kit = c(rep("Twist exome Refseq", 4), rep("Exome-IDT V1", 4)),
-  WES_target_size = c(rep(36.72, 4), rep(39.02, 4)))
-
-WES_target_sizes
 
 histology_df <- data.frame(
   Trial = c("BELLINI", "IMCISION", "NABUCCO", "NICHE-MSS", "NICHE-MSI",
@@ -98,16 +102,16 @@ histology_df <- data.frame(
   Histology = c("TBNC", "HNSCC", "Urothelial", "Colon", "Colon",
                 "LN_melanoma", "LN_melanoma", "CSCC"))
 
-dna_metadata <- read_csv2(here(metadata_dir, "combined_dna_metadata.csv"))
+dna_metadata <- read_csv2(here(source_data_dir, "combined_dna_metadata.csv"))
 
 dna_metadata <- dna_metadata %>%
   filter(!(Trial %in% "NICHE-MSI" & Tumor_nr == "Tumor_2"))
 
 all_cohort_patient_metadata <- read_csv2(
-  here(metadata_dir, "all_cohort_patient_metadata.csv"))
+  here(source_data_dir, "all_cohort_patient_metadata.csv"))
 
 all_cohort_sample_metadata <- read_csv2(
-  here(metadata_dir, "all_cohort_sample_metadata.csv"))
+  here(source_data_dir, "all_cohort_sample_metadata.csv"))
 
 all_cohort_patient_metadata <- all_cohort_patient_metadata %>%
   mutate(Cohort = ifelse(
@@ -143,7 +147,7 @@ all_cohort_sample_metadata <- all_cohort_sample_metadata %>%
 factor_summary(all_cohort_patient_metadata)
 
 patient_metadata_combined <- read_csv2(
-  here(metadata_dir, "patient_metadata_combined.csv"))
+  here(source_data_dir, "patient_metadata_combined.csv"))
 ```
 
 # Annotation color
@@ -155,10 +159,6 @@ Color_R <- "#00BA38" # "#619CFF"
 Color_NA <- "#CD9600"
 Color_Pre <- "#619CFF"
 Color_Post <- "#F564E3"
-Color_Depleted <- "#7CAE00"
-Color_Fibrotic <- "#00BFC4"
-Color_Inflamed_fibrotic <- "#C77CFF"
-Color_Inflamed_non_fibrotic <- "#F8766D"
 Color_HNSCC <- "#009292"
 Color_CSCC <- "#CD9600"
 Color_Urothelial <- "#B66DFF"
@@ -176,7 +176,6 @@ Color_NICHE_MSS <- "#23C26F"
 Color_NICHE_MSI <- "#B73A3A"
 Color_OpACIN_neo <- "#00BFC4"
 Color_PRADO <- "#619CFF"
-
 
 cosmic_colors <- c(Aflatoxin = "#d0e0e3", Aging = "#3d85c6", APOBEC = "#674ea7",
                    Aristolochic_acid = "#d9d2e9", dMMR = "#B73A3A",
@@ -238,7 +237,43 @@ histology_msi_mss_label_colors <- c(`Colon dMMR`= Color_Colon_MSI,
                               CSCC = Color_CSCC, HNSCC = Color_HNSCC, 
                               Melanoma = Color_LN_melanoma, TBNC = Color_TNBC,
                               Urothelial = Color_Urothelial)
-  
+
+
+Color_HNSCC <- "#009292"
+Color_CSCC <- "#CD9600"
+Color_Urothelial <- "#B66DFF"
+Color_LN_melanoma <- "#00BFC4"
+Color_Colon <- "#F8766D"
+Color_Colon_MSI <- "#B73A3A"
+Color_Colon_MSS <- "#23C26F"
+Color_Breast <- "#FEB5DA"
+Color_BELLINI <- "#FEB5DA"
+Color_IMCISION <- "#009292"
+Color_MATISSE <- "#CD9600"
+Color_NABUCCO <- "#B66DFF"
+Color_NICHE_MSS <- "#23C26F"
+Color_NICHE_MSI <- "#B73A3A"
+Color_OpACIN_neo <- "#00BFC4"
+Color_PRADO <- "#619CFF"
+
+Color_Anders <- "#FEB5DA"
+Color_imvigor <- "#B66DFF"
+Color_Liu <- "#00BFC4"
+Color_gide <- "darkslategray3"
+Color_hugo <- "#619CFF"
+Color_immotion <- "tan1"
+Color_choueiri <- "tan3"
+Color_prins <- "coral1"
+
+itlas_trial_label_colors <- c(brca_iatlas_anders_2022 = Color_Anders,
+                              imvigor210_2017 = Color_imvigor,
+                               mel_iatlas_Liu_2019 = Color_Liu,
+                              mel_iatlas_gide_2019 = Color_gide,
+                               hugo_ucla_2016 = Color_hugo,
+                              immotion150_2018 = Color_immotion,
+                               ccrcc_iatlas_choueiri_2016 = Color_choueiri,
+                              gbm_iatlas_prins_2019 = Color_prins)
+
 ```
 
 # Gene sets
@@ -249,6 +284,7 @@ dmmr_ptns <- c("MLH1", "MSH2", "MSH6", "PMS2")
 immune_escape_genes_df <- read.csv2(
   here("data", "external", "paper_supplementaries",
        "Martínez-Jiménez et al. - 2023 Supp Table 1.csv"))
+
 immune_escape_genes_df <- immune_escape_genes_df %>%
   mutate(Pathway.general = ifelse(
     Pathway.general == "IFN-? pathway", "IFN-y pathway", Pathway.general))%>%
@@ -286,53 +322,76 @@ variant_eval_columns <- c("Symbol_Variant", "SYMBOL",
                           "gnomAD_AF", "gnomAD_NFE_AF",
                           "n_depth", "VAF")
 
+signature_overview <- read_csv2(
+  here(source_data_dir, 
+       "_overview_of_signatures_20260705.csv")) 
+
+signature_overview$Signature <- gsub(
+  "B_catenin_signature_pancan_22_Luke_et_al",
+  "B_catenin_signature_Luke_et_al", signature_overview$Signature)
 ```
 
 # ----------
 # Load data
 
 ```{r}
-response_rates <- read_csv2(here(metadata_dir, "Trial_response.csv"))
+response_rates <- read_csv2(here(source_data_dir, "Trial_response.csv"))
 
-dna_metadata_f <- read_csv2(here(wes_dir, "dna_metadata_maf.csv"))
+dna_metadata_f <- read_csv2(here(source_data_dir, "dna_metadata_maf.csv"))
 
 # Only a few patients do not have WES data
 # dna_metadata$Patient[!dna_metadata$Patient %in% combined_maf_df$Patient]
-# all_cohort_sample_metadata %>% filter(Patient %in% c( "OpACIN_neo54", "OpACIN_neo58", "PRADO_178" ,   "MAT_10",       "MAT_32" ,      "MAT_49",       "MAT_48"   ) ) %>% view()
 
 combined_maf_dp20_vaf <- readRDS(
-  here(wes_dir, "combined_maf_dp20_vaf.rds"))
+  here(source_data_dir, "combined_maf_dp20_vaf.rds"))
 
 combined_maf_specific_f <- readRDS(
-  here(wes_dir, "combined_maf_specific_f.rds"))
+  here(source_data_dir, "combined_maf_specific_f.rds"))
 
-wes_features_df <- read_csv2(here(wes_dir, "wes_features_df.csv"))
+wes_features_df <- read_csv2(here(source_data_dir, "wes_features_df.csv"))
+
+wes_features_df$Purity %>% summary()
 
 wes_features_df <- wes_features_df %>%
-  left_join(histology_msi_mss_label_dict)
+  left_join(histology_msi_mss_label_dict) %>%
+      mutate(Purity = ifelse(is.na(Purity), Imputed_purity, Purity)) 
 
-wes_rna_features_df <- read_csv2(here(wes_rna_dir,
+wes_features_df$Purity %>% summary()
+
+rna_features_df_plus_wes <- read_csv2(here(source_data_dir,
                                       "wes_rna_features_df.csv"))
+rna_features_df_plus_wes_pre <- rna_features_df_plus_wes %>%
+  filter(Treatment == "Pre")
 
-wes_rna_features_df <- wes_rna_features_df %>%
+extra_columns <- colnames(
+  rna_features_df_plus_wes)[!colnames(rna_features_df_plus_wes) %in%
+                              colnames(wes_features_df)]
+
+wes_rna_features_df <- wes_features_df %>%
+  left_join(rna_features_df_plus_wes %>%
+              select(all_of(c("Patient", "Treatment", extra_columns))))  %>%
+  filter(Treatment == "Pre")%>%
   left_join(histology_msi_mss_label_dict)
 
 wes_rna_features_df_pre <- wes_rna_features_df %>%
   filter(Treatment == "Pre")
 
 wes_rna_features_df_pre %>% filter(!is.na(TMB)) %>% dim()
-wes_rna_features_df_pre_f <- wes_rna_features_df_pre %>% filter(!is.na(TMB)) 
 
-ssgsea_results_df <- read_csv2(here(meta_rna_dir, "ssgsea_results_df.csv"))
+wes_rna_features_df_pre_f <- wes_rna_features_df_pre %>%
+  filter(!is.na(TMB))
+
+ssgsea_results_df <- read_csv2(here(source_data_dir, "ssgsea_results_df.csv"))
 ssgsea_results_df_pre <- ssgsea_results_df %>%
   filter(Treatment == "Pre")
 
 ssgsea_results_df_pre$Trial %>% table()
 
+rna_features_df_plus_wes_pre
 ```
 
 ```{r}
-tmb_response_rate <- read_csv2(here(wes_dir, "tmb_response_rate.csv"))
+tmb_response_rate <- read_csv2(here(source_data_dir, "tmb_response_rate.csv"))
 
 tmb_response_rate <- tmb_response_rate %>%
   mutate(Response_rate_prop = Response_rate,
@@ -344,7 +403,7 @@ tmb_response_rate <- tmb_response_rate %>%
   left_join(histology_msi_mss_label_dict)
 
 n_variants_dp20_vaf_tmb <- read_csv2(
-  here(wes_dir, "n_variants_dp20_vaf_tmb.csv"))
+  here(source_data_dir, "n_variants_dp20_vaf_tmb.csv"))
 
 n_variants_dp20_vaf_tmb <- n_variants_dp20_vaf_tmb %>%
   filter(!(Trial %in% "NICHE-MSI" & Tumor_nr == "Tumor_2")) %>%
@@ -352,15 +411,18 @@ n_variants_dp20_vaf_tmb <- n_variants_dp20_vaf_tmb %>%
   unique()
 
 tmb_group_trial_response <- read_csv2(
-  here(wes_dir, "tmb_group_trial_response.csv"))
+  here(source_data_dir, "tmb_group_trial_response.csv"))
 
 ```
 
 # ----------
 # Figure 1
-# Metadata plots
+## Fig.1a
+### Study design
 
-## metadata n patients histology
+## Fig.1b
+## Metadata plots
+### metadata n patients histology
 ```{r}
 table(all_cohort_patient_metadata$Trial)
 metadata_n_patients_trial_plot <- table(all_cohort_patient_metadata$Trial) %>%
@@ -371,7 +433,7 @@ metadata_n_patients_trial_plot <- table(all_cohort_patient_metadata$Trial) %>%
   geom_col() +
   theme_Publication() +
   coord_flip() +
-  labs(x = "Trial", y = "Patients") +
+  labs(x = "Trial", y = "Number of Patients") +
   scale_fill_manual(values = c("#B73A3A",  "#CD9600", "#009292",
                                "#00BFC4", "#FEB5DA", "#B66DFF")) +
   theme(text = element_text(family = "Arial"))
@@ -404,7 +466,7 @@ all_cohort_patient_cohort_metadata_plot <- table(
     colour = "black",
     ) +
   coord_flip() +
-  labs(x = "Trial", y = "Patients") +
+  labs(x = "Trial", y = "Number of Patients") +
   scale_fill_manual(values = c("#B73A3A",  "#CD9600", "#009292",
                                "#00BFC4", "#FEB5DA", "#B66DFF")) +
   scale_pattern_manual(values = c("stripe", "none")) +
@@ -422,8 +484,8 @@ graph2pdf(x = all_cohort_patient_cohort_metadata_plot,
           height = 4.5, width = 6.5)
 
 ```
-
-## metadata n sample response
+## Fig.1c
+### metadata n sample response
 ```{r}
 table(all_cohort_sample_metadata$Trial, all_cohort_sample_metadata$Cohort) 
 
@@ -440,7 +502,7 @@ all_cohort_sample_response_metadata_plot <- table(
              fill = Response, group = Response)) +
   geom_col() +
   coord_flip() +
-  labs(x = "Trial", y = "Patients") +
+  labs(x = "Trial", y = "Number of Patients") +
   scale_fill_manual(values = c("#F8766D", "#00BA38")) +
   guides(fill = guide_legend(override.aes = list(pattern = c("none")))) +
   theme_Publication() 
@@ -448,7 +510,8 @@ all_cohort_sample_response_metadata_plot <- table(
 all_cohort_sample_response_metadata_plot
 
 graph2pdf(x = all_cohort_sample_response_metadata_plot,
-          file = here("_metadata_n_sample_trial_response_cohort.pdf"),
+          file = here(output_dir,
+                      "_metadata_n_sample_trial_response_cohort.pdf"),
           colormodel = "rgb",
           font = "Arial",
           height = 4.5, width = 6.5)
@@ -472,7 +535,7 @@ all_cohort_patient_response_metadata_plot <- table(
     colour = "black",
     ) +
   coord_flip() +
-  labs(x = "Trial", y = "Patients", fill = "Response") +
+  labs(x = "Trial", y = "Number of Patients", fill = "Response") +
   scale_fill_manual(values = c("#00BA38", "#F8766D")) + # "#CD9600", 
   scale_pattern_manual(values = c("stripe", "none")) +
   guides(fill = guide_legend(override.aes = list(pattern = c("none")))) +
@@ -490,14 +553,46 @@ graph2pdf(x = all_cohort_patient_response_metadata_plot,
 
 ```
 
+## Fig.1d
+### Combo vs Mono
+```{r}
+all_cohort_patient_metadata_combo_mono <- all_cohort_patient_metadata %>%
+  filter(Trial %in% c("BELLINI", "IMCISION", "MATISSE"))
+
+combo_mono_response_plot <- table(
+  all_cohort_patient_metadata_combo_mono$Trial,
+  all_cohort_patient_metadata_combo_mono$Response,
+  all_cohort_patient_metadata_combo_mono$Cohort) %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "Response", "Cohort", "Count")) %>%
+  ggplot(aes(x = Cohort, y = Count,
+             fill = Response)) +
+  geom_col() +
+  labs(x = "Treatment", y = "Number of Patients", fill = "Response") +
+  facet_wrap(~Trial) +
+  scale_fill_manual(values = c("#00BA38", "#F8766D"), breaks = c("R", "NR")) +
+  theme_Publication()
+
+combo_mono_response_plot
+
+graph2pdf(x = combo_mono_response_plot,
+          file = here(
+            output_dir, "_combo_mono_response_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 4, width = 6.5)
+
+```
+
 # ----------
 # Extended Data Fig 1
-# Interventions treatment schedule panorama
+## Extended Data Fig 1a 
+### Interventions treatment schedule panorama
 ```{r, fig.height = 10, fig.width = 8}
 interventions_format_p <- read_csv2(
-  here("data", "processed", "metadata", "interventions_format_p.csv"))
+  here(source_data_dir, "interventions_format_p.csv"))
 patient_metadata_combined <- read_csv2(
-  here(metadata_dir, "patient_metadata_combined.csv"))
+  here(source_data_dir, "patient_metadata_combined.csv"))
 
 cohort_id_n <- patient_metadata_combined$Cohort_id %>%
   table() %>%
@@ -558,16 +653,18 @@ graph2pdf(x = treatment_schedule_panorama_plot,
           width = 9)
 ```
 
-# Data availability
+## Extended Data Fig 1b
+### Data availability
 ```{r}
 annot_df <- all_cohort_patient_metadata %>%
   select(Trial, Patient, Response) %>%
   column_to_rownames("Patient") %>%
   arrange(Trial, Response)
 
-test <- all_cohort_patient_metadata %>% filter(RNA_pre)
-test$Patient[!test$Patient %in% ssgsea_results_df_pre$Patient]
-all_cohort_patient_metadata$RNA_pre <- all_cohort_patient_metadata$Patient %in% ssgsea_results_df_pre$Patient
+# test <- all_cohort_patient_metadata %>% filter(RNA_pre)
+# test$Patient[!test$Patient %in% ssgsea_results_df_pre$Patient]
+
+all_cohort_patient_metadata$RNA_pre <- all_cohort_patient_metadata$Patient %in% rna_features_df_plus_wes_pre$Patient
   
 all_cohort_patient_metadata_m <- all_cohort_patient_metadata %>%
   select(-c(Trial, Response, Histology, Cohort)) %>%
@@ -620,9 +717,13 @@ save_pheatmap_pdf(x = data_availability_heatmap,
 
 ```
 
+## Extended Data Fig 1c
+### Table on completeness
+
 # ----------
 # Figure 2
-# Plot TMB histologies
+## Fig.2a
+### Plot TMB histologies
 ```{r}
 percentage_above_TMB_10 <- n_variants_dp20_vaf_tmb %>%
   group_by(histology_msi_mss_label) %>%
@@ -660,7 +761,7 @@ n_variants_dp20_vaf_tmb %>%
   scale_fill_manual(values = histology_msi_mss_label_colors) + 
   geom_hline(yintercept = log2(10+1), linetype = "dashed", alpha = 0.5) +
   scale_y_continuous(expand = expand_scale(mult = c(0, 0.1))) +
-  geom_text(data = proportion_above_10,
+  geom_text(data = percentage_above_TMB_10,
             aes(x = histology_msi_mss_label, y = 7,
                 label = paste0(round(proportion * 100), "%")), vjust = -1.5)
 
@@ -707,9 +808,32 @@ n_variants_dp20_vaf_tmb %>%
   scale_fill_manual(values = histology_msi_mss_label_colors) + 
   geom_hline(yintercept = 10, linetype = "dashed", alpha = 0.5) +
   scale_y_continuous(expand = expand_scale(mult = c(0, 0.1))) 
+
+
+TMB_trial_response_plot <- n_variants_dp20_vaf_tmb %>%
+  ggplot(aes(x = factor(Trial,
+                        levels = unique(
+                          tmb_response_rate$Trial)),
+             y = TMB, fill = Response)) + 
+  geom_boxplot(position = position_dodge()) + theme_Publication() +
+  labs(x = "", y = "TMB (mutations/Mb)") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  scale_fill_manual(values = c(Color_NR, Color_R)) + 
+  geom_hline(yintercept = 10, linetype = "dashed", alpha = 0.5) +
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.1)))
+
+TMB_trial_response_plot
+
+graph2pdf(x = TMB_trial_response_plot,
+          file = here(output_dir, "_TMB_trial_response_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 5,
+          width = 5)
 ```
-# ----------
-# TMB High low groups
+
+
+### TMB High low groups
 ```{r}
 n_variants_tmb_group <- n_variants_dp20_vaf_tmb %>%
   mutate(TMB_group = ifelse(TMB > 10, "TMB-H", "TMB-L")) %>%
@@ -727,8 +851,8 @@ table(n_variants_tmb_group$TMB_group, n_variants_tmb_group$Response) %>%
 
 ```
 
-# ----------
-# Plot TMB response
+
+### Plot TMB response
 
 ```{r}
 n_variants_dp20_vaf_tmb$Response %>% table()
@@ -736,7 +860,6 @@ tmb.stat.test <- compare_means(formula = TMB ~ Response,
                            method = "wilcox.test",
                            data = n_variants_dp20_vaf_tmb, paired = FALSE)
 tmb.stat.test
-
 
 n_labels <- n_variants_dp20_vaf_tmb %>%
 group_by(Response) %>%
@@ -769,7 +892,7 @@ graph2pdf(x = tmb_response_plot,
           width = 5)
 ```
 
-## Plot TMB response excl. dMMR
+### Plot TMB response excl. dMMR
 
 ```{r}
 # Filtering out MSI dMMR
@@ -814,7 +937,8 @@ graph2pdf(x = tmb_response_plot,
 
 ```
 
-## Filtering out MSI dMMR & cSCC
+### Filtering out MSI dMMR & cSCC
+
 ```{r}
 # Filtering out MSI dMMR & cSCC
 tmb.dmmr.stat.test <- compare_means(formula = TMB ~ Response,
@@ -859,35 +983,9 @@ graph2pdf(x = tmb_response_plot,
           width = 5)
 ```
 
+## Fig.2b 
 
-```{r}
-n_labels <- n_variants_dp20_vaf_tmb %>%
-  filter(TMB < 10) %>%
-  filter(!is.na(Response)) %>%
-group_by(Response) %>%
-summarise(n = n()) %>%
-mutate(label = paste0(Response, "\n(n = ", n, ")"))
-label_map <- setNames(n_labels$label, n_labels$Response)
-
-n_variants_dp20_vaf_tmb %>%
-  filter(TMB < 10) %>%
-  filter(!is.na(Response)) %>%
-  ggplot(aes(x = Response, y = TMB)) + 
-  stat_boxplot(geom = "errorbar", width = 0.1) +
-  geom_boxplot(aes(fill = Response)) + #, outlier.shape = NA
-  geom_point(aes(col = Trial)) +
-  theme_Publication()  +
-  stat_compare_means() +
-  scale_fill_manual(values = c(Color_NR, Color_R)) +
-  expand_limits(y = 0) +
-  labs(y = "TMB (mutations/Mb)", title = "TMB < 10") +
-  guides(fill = FALSE) +
-  theme(axis.title.x = element_blank()) +
-  scale_x_discrete(labels = label_map) 
-```
-
-# ----------
-# Plot TMB response + sensitivity sets excl. dMMR & cSCC
+### Plot TMB response + sensitivity sets excl. dMMR & cSCC
 
 ```{r}
 n_variants_dp20_vaf_tmb_sets <- n_variants_dp20_vaf_tmb %>%
@@ -941,8 +1039,10 @@ graph2pdf(x = tmb_response_sensitivity_plot,
           height = 4.5,
           width = 6.5)
 ```
-# ----------
-# Plot TMB response rate regression vs. Yarchoan regression
+
+## Fig.2c 
+
+### Plot TMB response rate regression vs. Yarchoan regression
 
 ```{r}
 tmb_response_rate %>%
@@ -1034,9 +1134,9 @@ graph2pdf(x = tmb_rr_regression_plot,
           width = 5)
 ```
 
-# ----------
+## Fig.2d
 
-# TMB quantile bins
+### TMB quantile bins
 ```{r}
 tmb_quantiles <- n_variants_dp20_vaf_tmb %>%
   arrange(TMB) %>%
@@ -1188,35 +1288,51 @@ process_and_plot(tmb_quantiles %>%
 # ----------
 # Figure 3
 
-## WES Meta-analysis SMD continuous
+## Fig.3a
+### WES Meta-analysis SMD continuous
 ```{r}
 meta_studies_results <- read_csv2(
-  here(meta_wes_dir, "meta_studies_results_smd_all.csv"))
+  here(source_data_dir, "wes_meta_studies_results_smd_all.csv"))
 meta_combined_effects <- read_csv2(
-  here(meta_wes_dir, "meta_combined_effects_random_effects.csv"))
+  here(source_data_dir, "wes_meta_combined_effects_random_effects.csv"))
 
 combined_wes_smd <- read_csv2(
-  here(meta_wes_dir, "combined_wes_smd.csv"))
+  here(source_data_dir, "combined_wes_smd.csv"))
 
 combined_wes_smd$Trial <- factor(
   combined_wes_smd$Trial,
   c("Combined", "Combined_excl_dMMR", "BELLINI", "IMCISION", "MATISSE",
     "NABUCCO", "NICHE-MSS", "OpACIN_neo", "PRADO"))
 
+meta_studies_results %>%
+  select(studlab, n.e, n.c) %>%
+  mutate(total = n.e + n.c) %>%
+  unique()
 ```
-
 ```{r}
 meta_combined_effects <- meta_combined_effects %>%
   arrange(-TE.random)
 
-smd_variable_order <- c("TMB", "APOBEC_abs", "UV_abs", "dMMR_abs",
+meta_combined_effects %>%
+    arrange(-TE.random) %>% pull(Variable)
+
+smd_variable_order <- c("TMB", 
+                        "pvactools_filtered_neoantigen_load",
+                        "pyclone_subclonal_TMB", "pyclone_clonal_TMB", 
+                        "APOBEC_abs", "UV_abs",
+                        "dMMR_abs",
                         "TMB_frameshift", "HRD_abs", "Ploidy",
                         "Aneuploidy_score", "wgII_0.6_bases",
                         "scna_loss", "Purity")
-smd_variable_labels = c("TMB", "APOBEC SBS", "UV SBS", "dMMR SBS",
+smd_variable_labels = c("TMB", 
+                        "neoantigen load",
+                        "subclonal TMB", "clonal TMB",
+                        "APOBEC abs", "UV abs",
+                         "dMMR SBS",
                         "TMB frameshift", "HRD SBS", "Ploidy",
                         "Aneuploidy score", "wgII",
                         "SCNA loss", "Purity")
+data.frame(smd_variable_order, smd_variable_labels)
 
 meta_studies_results_sample_sizes <- meta_studies_results %>%
   select(studlab, n.e, n.c) %>%
@@ -1281,10 +1397,7 @@ meta_combined_smd_plot <- meta_combined_effects %>%
     aes(label = pval.random, y = 0.9, hjust = 0),
     data = meta_combined_effects %>%
       mutate(pval.random = sprintf("P = %s", FormatDecimals(pval.random)))) +
-  scale_x_discrete(labels = rev(c("TMB", "APOBEC SBS", "UV SBS", "dMMR SBS",
-                                  "TMB frameshift", "HRD SBS", "Ploidy",
-                                  "Aneuploidy score", "wgII",
-                                  "SCNA loss", "Purity"))) + 
+  scale_x_discrete(labels = rev(c(smd_variable_labels))) + 
   theme(plot.margin = unit(c(1,4,1,1), "lines")) 
 meta_combined_smd_plot
 
@@ -1294,54 +1407,26 @@ graph2pdf(x = meta_combined_smd_plot,
           font = "Arial",
           height = 5,
           width = 5)
-meta_studies_results %>%
-  mutate(label = cut(
-    pval,
-    breaks = c(0, 0.001, 0.01, 0.05, 0.1, 1),
-    labels = c("***", "**", "*", ".", "")
-  ))  %>%
-  ggplot(aes(
-    x = factor(studlab,
-               levels = c("Combined", "Combined_excl_dMMR", "BELLINI",
-                          "IMCISION", "MATISSE", "NABUCCO", "NICHE-MSS",
-                          "OpACIN_neo", "PRADO")),
-    y = factor(
-      Variable, levels = rev(smd_variable_order)),
-    fill = TE,
-    label = label)) +
-  geom_tile() +
-  geom_text() +
-  scale_fill_gradient2(low = "#075AFF",
-                       mid = "white",
-                       high = "#FF0000") +
-  theme_Publication() +
-  labs(y = "", fill = "SMD\n(Hedge's g)") +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
-  theme(legend.position = "right", legend.direction = "vertical") +
-  theme(legend.key.size = unit(0.75, 'cm')) +
-  labs(x = "") +
-  scale_x_discrete(labels = c("Combined", "Combined excl dMMR", "BELLINI",
-                              "IMCISION", "MATISSE", "NABUCCO", "NICHE pMMR",
-                              "OpACIN-neo", "PRADO")) +
-  scale_y_discrete(labels = rev(smd_variable_labels))
 
 ```
 
-## WES Meta-analysis Log OR discrete
+### WES Meta-analysis Log OR discrete
 ```{r}
 meta_studies_results_or_all <- read_csv2(
-  here(meta_wes_dir, "meta_studies_results_or_all.csv"))
+  here(source_data_dir, "meta_studies_results_or_all.csv"))
 
 meta_log_or_combined_effects_random_effects <- read_csv2(
-  here(meta_wes_dir, "meta_log_or_combined_effects_random_effects.csv"))
+  here(source_data_dir, "meta_log_or_combined_effects_random_effects.csv"))
+
 
 log_or_variable_order <- c("GIE_AP", "TP53", "BRCA1_2", "SIGPW_Wnt_B_Cat",
                            "SIGPW_PI3K_signaling", "SIGPW_Cell_cycle",
-                           "SIGPW_TGFB_signaling", "GIE_IFNy", "RAS_RAF")
+                           "SIGPW_TGFB_signaling", "GIE_IFNy", "RAS_RAF",
+                           "HLA_alteration")
 log_or_variable_labels = c(
   "Antigen presentation mut", "TP53 mut", "BRCA 1/2 mut", "Wnt/B-cat mut",
   "PI3K signaling mut", "Cell cycle mut",
-  "TGF-B signaling mut", "IFNy mut", "RAS/RAF mut")
+  "TGF-B signaling mut", "IFNy mut", "RAS/RAF mut", "HLA del/LOH")
 
 meta_log_or_combined_effects_random_effects  %>%
   ggplot(aes(x = factor(feature, levels = rev(log_or_variable_order)),
@@ -1361,19 +1446,19 @@ meta_log_or_combined_effects_random_effects  %>%
 
 or_features_to_exclude <- c("JAK1_JAK2", "B2M")
 trial_odds_ratio_df <- read_csv2(
-  here(meta_wes_dir, "trial_odds_ratio_df.csv"))
+  here(source_data_dir, "trial_odds_ratio_df.csv"))
 
 trial_odds_ratio_df <- trial_odds_ratio_df %>%
   filter(!feature %in% or_features_to_exclude)
 
 meta_log_or_results <- read_csv2(
-  here(meta_wes_dir, "meta_log_or_results_combined.csv"))
+  here(source_data_dir, "meta_log_or_results_combined.csv"))
 
 meta_log_or_results <- meta_log_or_results %>%
   filter(!feature %in% or_features_to_exclude)
 
 meta_log_or_combined_effects <- read_csv2(
-  here(meta_wes_dir, "meta_log_or_combined_effects_random_effects.csv"))
+  here(source_data_dir, "meta_log_or_combined_effects_random_effects.csv"))
 
 meta_log_or_combined_effects <- meta_log_or_combined_effects %>%
   filter(!feature %in% or_features_to_exclude)
@@ -1381,32 +1466,6 @@ meta_log_or_combined_effects <- meta_log_or_combined_effects %>%
 meta_log_or_combined_effects <- meta_log_or_combined_effects %>%
   arrange(TE.random)
 
-meta_studies_results_or_all %>%
-  mutate(label = cut(
-    pval,
-    breaks = c(0, 0.001, 0.01, 0.05, 1),
-    labels = c("***", "**", "*", "")
-  )) %>%
-  ggplot(aes(x = factor(studlab,
-                        c("Combined", "Combined_excl_dMMR", "BELLINI",
-                          "IMCISION", "MATISSE",
-                          "NABUCCO", "NICHE-MSS", "OpACIN_neo", "PRADO")),
-             y = factor(feature,
-                        levels = rev(log_or_variable_order)),
-             fill = TE, 
-             label = label)) +
-  geom_tile() +
-  geom_text() + 
-  scale_fill_gradient2(low = "#075AFF",
-                       mid = "white",
-                       high = "#FF0000",
-                       na.value = "#CCCCCC") +
-  labs(x = "", y = "", fill = "log(OR)") +
-  theme_Publication() +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
-  scale_x_discrete(labels = c("Combined", "Combined excl dMMR", "BELLINI",
-                              "IMCISION", "MATISSE", "NABUCCO",
-                              "NICHE pMMR", "OpACIN-neo", "PRADO"))
 
 combined_log_or_plot <- meta_studies_results_or_all %>%
   mutate(label = cut(
@@ -1414,7 +1473,6 @@ combined_log_or_plot <- meta_studies_results_or_all %>%
     breaks = c(0, 0.001, 0.01, 0.05, 1),
     labels = c("***", "**", "*", "")
   )) %>%
-  # filter(gene %in% meta_combined_effects_random_effects_f$gene) %>% 
   ggplot(aes(x = factor(studlab,
                         c("Combined", "Combined_excl_dMMR", "BELLINI",
                           "IMCISION", "MATISSE", "NABUCCO",
@@ -1511,11 +1569,32 @@ graph2pdf(x = meta_combined_log_or_plot,
           height = 5,
           width = 5)
 ```
+```{r}
 
+meta_combined_effects_random_effects_wes <- meta_combined_effects %>%
+  arrange(TE.random) %>%
+  full_join(meta_log_or_combined_effects_random_effects %>%
+              rename(Variable = feature) %>%
+  arrange(TE.random)) %>%
+  mutate(meta_FDR = p.adjust(pval.random, method = "BH"))
 
-## WES correlation plot
+meta_combined_effects_random_effects_wes %>%
+  select(Variable, pval.random, meta_FDR) %>%
+  mutate(Variable = factor(Variable,
+                           levels = c(fct_rev(smd_variable_order),
+                                      fct_rev(log_or_variable_order)))) %>%
+  arrange(Variable)  %>%
+  mutate(pval.random = round(pval.random, 2))%>%
+  mutate(meta_FDR = round(meta_FDR, 2)) %>%
+  print(n = 30)
+```
+
+## Fig.3b
+### WES correlation plot
 ```{r, fig.height = 8, fig.width = 8}
-wes_features_m <- wes_features_df %>%
+wes_features_m <- wes_features_df  %>%
+  mutate(HLA_alteration = ifelse(HLA_grouped %in% c("HLA-LOH", "HLA-DEL"), "HLA-Altered", HLA_grouped)) %>%
+  mutate(HLA_alteration = HLA_alteration == "HLA-Altered") %>%
   select(all_of(c(smd_variable_order, log_or_variable_order)))  %>%
  setNames(c(smd_variable_labels, log_or_variable_labels)) %>% 
   as.matrix()
@@ -1548,12 +1627,132 @@ wes_features_m_excl_dMMR %>%
   corrplot(order = "hclust", type = "lower", tl.col = "black")
 
 ```
+
+## Fig.3c
+### Aggregate WES meta
+#### Sensitivity subsets WES SMD
+```{r}
+wes_meta_aggregated <- read_csv2(
+  here(source_data_dir, "wes_meta_aggregated.csv"))
+
+
+smd_variable_order <- c("TMB", 
+                        "pvactools_filtered_neoantigen_load",
+                        "pyclone_subclonal_TMB", "pyclone_clonal_TMB", 
+                        "APOBEC_abs", "UV_abs", "dMMR_abs",
+                        "TMB_frameshift", "HRD_abs", "Ploidy",
+                        "Aneuploidy_score", "wgII_0.6_bases",
+                        "scna_loss", "Purity")
+
+smd_variable_labels = c("TMB", 
+                        "neoantigen load",
+                        "subclonal TMB", "clonal TMB",
+                        "APOBEC abs", "UV abs", "dMMR SBS",
+                        "TMB frameshift", "HRD SBS", "Ploidy",
+                        "Aneuploidy score", "wgII",
+                        "SCNA loss", "Purity")
+
+wes_smd_sensitivity_plot <- wes_meta_aggregated %>%
+  mutate(Variable = factor(Variable, levels = fct_rev(smd_variable_order))) %>%
+  mutate(label = cut(
+    pval.random,
+    breaks = c(0, 0.001, 0.01, 0.05, 1),
+    labels = c("***", "**", "*", "")
+  ))  %>%
+  ggplot(aes(
+    x = factor(
+      Analysis_subset,
+      levels = c("Original", "Excl_mono.", "Excl_clin.", "MPR", "pCR")), 
+    y = fct_rev(Variable),
+    fill = TE.random,
+    label = label)
+    ) +
+  geom_tile() +
+  geom_text() +
+  scale_fill_gradient2(low = "#075AFF",
+                       mid = "white",
+                       high = "#FF0000") +
+  theme_Publication() +
+  labs(y = "") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  theme(legend.position = "right", legend.direction = "vertical") +
+  theme(legend.key.size = unit(0.75, 'cm')) +
+  labs(x = "", title = "Meta-analysis sensitivity", fill = "Meta-analysis\nSMD (Hedge's g)") +
+  scale_y_discrete(labels = rev(smd_variable_labels))
+
+wes_smd_sensitivity_plot
+
+graph2pdf(x = wes_smd_sensitivity_plot,
+          file = here(output_dir, "_wes_smd_sensitivity_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 5,
+          width = 7)
+```
+
+## Fig.3d
+### Sensitivity subsets WES OR
+
+```{r}
+log_or_variable_order <- c("GIE_AP", "TP53", "BRCA1_2",
+                           "SIGPW_Wnt_B_Cat",
+                           "SIGPW_PI3K_signaling", "SIGPW_Cell_cycle",
+                           "SIGPW_TGFB_signaling", "GIE_IFNy", "RAS_RAF",
+                           "HLA_alteration")
+log_or_variable_labels = c(
+  "Antigen presentation mut", "TP53 mut", "BRCA 1/2 mut",
+  "Wnt/B-cat mut",
+  "PI3K signaling mut", "Cell cycle mut",
+  "TGF-B signaling mut", "IFNy mut", "RAS/RAF mut",
+  "HLA del/LOH")
+
+wes_or_meta_aggregated <- read_csv2(
+  here(source_data_dir, "wes_or_meta_aggregated.csv"))
+
+wes_or_meta_aggregated$feature <- factor(wes_or_meta_aggregated$feature,
+                                         levels = c(log_or_variable_order))
+
+wes_or_meta_aggregated_plot <- wes_or_meta_aggregated %>%
+  mutate(label = cut(
+    pval.random,
+    breaks = c(0, 0.001, 0.01, 0.05, 1),
+    labels = c("***", "**", "*", "")
+  ))  %>%
+  ggplot(aes(
+    x = factor(Analysis_subset,
+               levels = c("Original", "Excl_mono.", "Excl_clin.", "MPR", "pCR")), 
+    y = factor(
+      feature, levels = fct_rev(as.factor(log_or_variable_order))),
+    fill = TE.random,
+    label = label)) +
+  geom_tile() +
+  geom_text() +
+  scale_fill_gradient2(low = "#075AFF",
+                       mid = "white",
+                       high = "#FF0000") +
+  theme_Publication() +
+  labs(y = "") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  theme(legend.position = "right", legend.direction = "vertical") +
+  theme(legend.key.size = unit(0.75, 'cm')) +
+  labs(x = "", title = "Meta-analysis OR sensitivity", fill = "Meta-analysis\nlog(OR)") 
+
+wes_or_meta_aggregated_plot
+
+graph2pdf(x = wes_or_meta_aggregated_plot,
+          file = here(output_dir, "_wes_or_meta_aggregated_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 5,
+          width = 7)
+
+```
+
 # ----------
-# Extended Data Fig 2
-## COSMIC
+## Extended Data Fig 2 COSMIC
 ```{r}
 cosmic_v2_aetiology <- read_excel(
-  here("data","external", "COSMIC", "COSMIC_SBS_Aetiology_20250728.xlsx"),
+  here(source_data_dir, "COSMIC_SBS_Aetiology_20250728.xlsx"),
   sheet = "v2.0")
 cosmic_v2_aetiology_p <- cosmic_v2_aetiology %>%
   mutate(Aetiology_simplified = Aetiology_simplified_later,
@@ -1563,9 +1762,11 @@ cosmic_v2_aetiology_p <- cosmic_v2_aetiology %>%
   mutate(cosmic_signature = gsub(" ", ".", `Signature Number`))
 
 cosmic_combined <- read_csv2(
-  here(wes_dir, "cosmic_combined_v2_GRCh38.csv"))
+  here(source_data_dir, "cosmic_combined_v2_GRCh38.csv"))
 cosmic_perc_combined <- read_csv2(
-  here(wes_dir, "cosmic_perc_combined_v2_GRCh38.csv"))
+  here(source_data_dir, "cosmic_perc_combined_v2_GRCh38.csv"))
+
+cosmic_v2_aetiology_p
 
 cosmic_combined <- cosmic_combined %>%
   filter(CF_sample_tumor %in% dna_metadata_f$CF_sample_tumor)
@@ -1618,12 +1819,121 @@ cosmic_perc_combined_p <- cosmic_perc_combined_l %>%
 ```
 
 ```{r, fig.width = 12, fig.height = 12}
-mean_cosmic_abs <- read_csv2(here(wes_dir, "mean_cosmic_abs.csv"))
-mean_cosmic_percs <- read_csv2(here(wes_dir, "mean_cosmic_percs.csv"))
+mean_cosmic_abs <- read_csv2(here(source_data_dir, "mean_cosmic_abs.csv"))
+mean_cosmic_percs <- read_csv2(here(source_data_dir, "mean_cosmic_percs.csv"))
+```
 
+## Extended Fig. 2a
+### Perc COSMIC proportions
+```{r, fig.width = 5.5, fig.height = 6}
+mean_cosmic_perc_plot <- mean_cosmic_percs %>%
+  left_join(cosmic_v2_aetiology_p) %>%
+  mutate(Aetiology_simplified = ifelse(
+    Aetiology_simplified %in% c("Aflatoxin", "Aristolochic_acid",
+                                "POL1", "POLH"),
+    "Other", Aetiology_simplified)) %>%
+  group_by(Aetiology_simplified, Trial) %>%
+  summarize(mean_percentage = sum(mean_percentage)) %>%
+  ggplot(aes(x = Trial, y = mean_percentage, fill = Aetiology_simplified)) +
+  geom_col() + theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  scale_fill_manual(values = cosmic_colors) +
+  labs(x = "", y = "Mean relative frequency", fill = "COSMIC aetiology") +
+  guides(fill = guide_legend(nrow = 4)) +
+  theme(axis.title.x = element_blank())
+
+mean_cosmic_perc_plot
+graph2pdf(x = mean_cosmic_perc_plot,
+          file = here(output_dir, "_mean_cosmic_perc_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 5.5,
+          width = 6)
+```
+
+## Extended Fig. 2b-d
+
+### TMB vs COSMIC
+```{r}
+
+TMB_UV_plot <- wes_features_df %>%
+  ggplot(aes(x = TMB, y = UV_abs, col = Trial)) +
+  geom_point() +
+  theme_Publication() +
+  scale_color_manual(values = trial_colors)
+
+TMB_UV_plot 
+graph2pdf(x = TMB_UV_plot,
+          file = here(output_dir, "_TMB_UV_trial.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 5,
+          width = 6)
+
+TMB_apobec_plot <- wes_features_df %>%
+  ggplot(aes(x = TMB, y = APOBEC_abs, col = Trial)) +
+  geom_point() +
+  theme_Publication() +
+  scale_color_manual(values = trial_colors)
+
+TMB_apobec_plot
+graph2pdf(x = TMB_apobec_plot,
+          file = here(output_dir, "_TMB_APOBEC_trial.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 5,
+          width = 6)
+
+
+TMB_dMMR_plot <- wes_features_df %>%
+  ggplot(aes(x = TMB, y = dMMR_abs, col = Trial)) +
+  geom_point() +
+  theme_Publication() +
+  scale_color_manual(values = trial_colors)
+
+TMB_dMMR_plot
+graph2pdf(x = TMB_dMMR_plot,
+          file = here(output_dir, "_TMB_dMMR_trial.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 5,
+          width = 6)
+
+wes_features_df %>%
+  ggplot(aes(x = TMB, y = HRD_abs, col = Trial)) +
+  geom_point() +
+  theme_Publication() +
+  scale_color_manual(values = trial_colors)
+ggsave(here(output_dir, "TMB_HRD_trial.png"), height = 5, width = 6)
+
+```
+
+## Extended Fig. 2e
+
+### TMB vs frameshift
+```{r}
+TMB_frameshift_plot <- n_variants_dp20_vaf_tmb %>%
+  ggplot(aes(x = TMB, y = TMB_frameshift, col = Trial)) +
+  geom_point() +
+  theme_Publication() +
+  scale_color_manual(values = trial_colors)
+
+TMB_frameshift_plot 
+graph2pdf(x = TMB_frameshift_plot,
+          file = here(output_dir, "_TMB_frameshift_trial.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 5,
+          width = 6)
+```
+
+
+## Extended Fig. 2f
+### Mean absolute COSMIC fits
+```{r, fig.width = 12, fig.height = 12}
 mean_cosmic_abs_plot <- mean_cosmic_abs %>%
-  left_join(cosmic_v2_aetiology_p)  %>%
-  left_join(histology_msi_mss_label_dict)%>%
+  left_join(cosmic_v2_aetiology_p) %>%
+  left_join(histology_df) %>%
   select(Trial, Aetiology_simplified, mean_abs) %>%
   group_by(Trial, Aetiology_simplified) %>%
   summarize(mean_abs = sum(mean_abs)) %>%
@@ -1643,104 +1953,13 @@ graph2pdf(x = mean_cosmic_abs_plot,
           font = "Arial",
           height = 12,
           width = 12)
-
-mean_cosmic_perc_plot <- mean_cosmic_percs %>%
-  left_join(cosmic_v2_aetiology_p) 
-  mutate(Aetiology_simplified = ifelse(
-    Aetiology_simplified %in% c("Aflatoxin", "Aristolochic_acid",
-                                "POL1", "POLH"),
-    "Other", Aetiology_simplified)) %>%
-  group_by(Aetiology_simplified, Trial) %>%
-  summarize(mean_percentage = sum(mean_percentage)) %>%
-  left_join() %>%
-  ggplot(aes(x = Trial, y = mean_percentage, fill = Aetiology_simplified)) +
-  geom_col() + theme_Publication() +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
-  scale_fill_manual(values = cosmic_colors) +
-  labs(x = "", y = "Mean relative frequency", fill = "COSMIC aetiology") +
-  guides(fill = guide_legend(nrow = 4)) +
-  theme(axis.title.x = element_blank())
-
-mean_cosmic_perc_plot
-graph2pdf(x = mean_cosmic_perc_plot,
-          file = here(output_dir, "_mean_cosmic_perc_plot.pdf"),
-          colormodel = "rgb",
-          font = "Arial",
-          height = 5.5,
-          width = 6)
 ```
 
-## TMB vs COSMIC
-```{r}
-TMB_apobec_plot <- wes_features_df %>%
-  ggplot(aes(x = TMB, y = APOBEC_abs, col = Trial)) +
-  geom_point() +
-  theme_Publication() +
-  scale_color_manual(values = trial_colors)
-
-graph2pdf(x = TMB_apobec_plot,
-          file = here(output_dir, "_TMB_APOBEC_trial.pdf"),
-          colormodel = "rgb",
-          # font = "Arial",
-          height = 5,
-          width = 6)
-
-TMB_UV_plot <- wes_features_df %>%
-  ggplot(aes(x = TMB, y = UV_abs, col = Trial)) +
-  geom_point() +
-  theme_Publication() +
-  scale_color_manual(values = trial_colors)
-
-graph2pdf(x = TMB_UV_plot,
-          file = here(output_dir, "_TMB_UV_trial.pdf"),
-          colormodel = "rgb",
-          # font = "Arial",
-          height = 5,
-          width = 6)
-
-TMB_dMMR_plot <- wes_features_df %>%
-  ggplot(aes(x = TMB, y = dMMR_abs, col = Trial)) +
-  geom_point() +
-  theme_Publication() +
-  scale_color_manual(values = trial_colors)
-
-graph2pdf(x = TMB_dMMR_plot,
-          file = here(output_dir, "_TMB_dMMR_trial.pdf"),
-          colormodel = "rgb",
-          # font = "Arial",
-          height = 5,
-          width = 6)
-
-wes_features_df %>%
-  ggplot(aes(x = TMB, y = HRD_abs, col = Trial)) +
-  geom_point() +
-  theme_Publication() +
-  scale_color_manual(values = trial_colors)
-ggsave(here(output_dir, "TMB_HRD_trial.png"), height = 5, width = 6)
-
-```
-
-## TMB vs frameshift
-```{r}
-TMB_frameshift_plot <- n_variants_dp20_vaf_tmb %>%
-  ggplot(aes(x = TMB, y = TMB_frameshift, col = Trial)) +
-  geom_point() +
-  theme_Publication() +
-  scale_color_manual(values = trial_colors)
-
-TMB_frameshift_plot 
-graph2pdf(x = TMB_frameshift_plot,
-          file = here(output_dir, "_TMB_frameshift_trial.pdf"),
-          colormodel = "rgb",
-          # font = "Arial",
-          height = 5,
-          width = 6)
-
-```
 
 # ----------
 # Extended Data Fig 3
-# Oncoplot
+## Extended Data Fig 3a
+### Oncoplot
 ```{r}
 genes_to_assess_shortlist <- unique(c(ddr_ptns, crc_risk_ptns, immune_escape_genes,
                      "CD58", "CD274", "SETDB1", "CDKN2A", "TRAF2", "CCND1")) %>%
@@ -1790,16 +2009,9 @@ png(file = here(output_dir, "_oncoplot_specific_genes_trial.png"),
 
 ```
 
-
-# Pathway data
+## Extended Data Fig 3b
+### Pathway data
 ```{r}
-pathway_data_combined <- read.csv2(
-  here(wes_dir, "pathway_proportions", "pathway_data_combined.csv")) %>%
-  left_join(trial_group_map)
-pathway_gene_data_combined <- read.csv2(
-  here(wes_dir, "pathway_proportions", "pathway_gene_data_combined.csv")) %>%
-  left_join(trial_group_map)
-
 trial_list <- c("Combined", "BELLINI", "IMCISION", "MATISSE",
                 "NABUCCO", "NICHE-MSS",  "NICHE-MSI", "OpACIN_neo", "PRADO")
 
@@ -1807,6 +2019,13 @@ trial_group_map <- data.frame(Trial = c(trial_list, trial_list, trial_list),
            Group = c(trial_list,
                      sprintf("%s_R", trial_list),
                      sprintf("%s_NR", trial_list)))
+
+pathway_data_combined <- read.csv2(
+  here(source_data_dir, "pathway_data_combined.csv")) %>%
+  left_join(trial_group_map)
+pathway_gene_data_combined <- read.csv2(
+  here(source_data_dir, "pathway_gene_data_combined.csv")) %>%
+  left_join(trial_group_map)
 
 pathway_data_combined$Group <- factor(pathway_data_combined$Group,
                                       levels = c(trial_list,
@@ -1847,65 +2066,326 @@ graph2pdf(x = pathway_data_combined_plot,
           height = 6, #9
           width = 8) #11
 
-pathway_data_combined_response_plot <- pathway_data_combined %>%
-  filter(! Trial %in% c("NICHE-MSI")) %>%
-  filter(str_detect(Group, "_R|_NR")) %>%
-  mutate(Response = ifelse(str_detect(Group, "_R"), "R", "NR")) %>%
-  filter(! Pathway %in% c("Other", "Other_signaling")) %>%
-  ggplot(aes(x = Pathway, y = Fraction_mutated_samples, fill = Response)) +
-  geom_col(position = "dodge") +
-  theme_Publication()  +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
-  scale_fill_manual(values = c(Color_NR, Color_R)) +
-  guides(fill = FALSE) +
-  labs(x = "", y = "Fraction mutated") + facet_wrap(~Trial, ncol = 4) +
-  coord_flip()
-pathway_data_combined_response_plot
-
-graph2pdf(x = pathway_data_combined_response_plot,
-          file = here(output_dir, "_pathway_data_combined_response_plot.pdf"),
-          colormodel = "rgb",
-          font = "Arial",
-          height = 9,
-          width = 11)
-
-pathway_data_combined_response_mean_diff <- read_csv2(
-  here(wes_dir, "pathway_data_combined_response_mean_diff.csv"))
-
-pathway_data_combined_response_mean_diff_plot <- pathway_data_combined_response_mean_diff %>%
-  mutate(NR = -NR) %>%
-  pivot_longer(cols = c(R, NR),
-               values_to = "Fraction_mutated_samples", names_to = "Response") %>%
-  ggplot(aes(x = Pathway, y = Fraction_mutated_samples, fill = Response)) +
-  geom_col(alpha = 0.75)   +
-  facet_wrap(~Trial, ncol = 4) +
-  coord_flip()  + theme_Publication() +
-  geom_point(aes(x = Pathway, y = mean_diff, col = Trial, size = 0.25), shape = 17) +
-  facet_wrap(~Trial, ncol = 4) +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
-  scale_color_manual(values = trial_colors_combined) +
-  scale_fill_manual(values = c(Color_NR, Color_R)) +
-  guides(fill = FALSE, size = FALSE, alpha = 0.5) +
-  labs(x = "", y = "Mutation frequency (NR vs R delta)") + 
-  geom_hline(yintercept = 0, linetype = "dashed")
-pathway_data_combined_response_mean_diff_plot
-
-graph2pdf(x = pathway_data_combined_response_mean_diff_plot,
-          file = here(
-            output_dir, "_pathway_data_combined_response_mean_diff_plot.pdf"),
-          colormodel = "rgb",
-          font = "Arial",
-          height = 7,
-          width = 10)
 
 ```
 
+## Extended Data Fig 3c-h
+
+### AP Trial Response
+
+```{r, fig.height = 4, fig.width = 6}
+# GIE_AP Genetic Immune evasion - Antigen Presentation
+
+ap_mt_response_plot <- table(wes_features_df$Trial,
+       wes_features_df$GIE_AP,
+      wes_features_df$Response, useNA = "ifany") %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "GIE_AP", "Response", "Freq")) %>%
+  mutate(GIE_AP = ifelse(GIE_AP == TRUE,
+                         "Antigen presentation mut", "Antigen presentation wt")) %>%
+  ggplot(aes(x = Response, y = Freq, fill = Trial)) +
+  geom_col() + theme_Publication() +
+  scale_fill_manual(values = trial_colors) + facet_wrap(~GIE_AP)
+ 
+ap_mt_response_plot
+
+graph2pdf(x = ap_mt_response_plot,
+          file = here(
+            output_dir, "_ap_mt_response_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 4,
+          width = 5.5)
+
+wes_features_df_excl_dmmr <- wes_features_df %>% filter(!Trial %in% c("NICHE-MSI"))
+
+ap_mt_response_plot_excl_dmmr <- table(wes_features_df_excl_dmmr$Trial,
+       wes_features_df_excl_dmmr$GIE_AP,
+      wes_features_df_excl_dmmr$Response, useNA = "ifany") %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "GIE_AP", "Response", "Freq")) %>%
+  mutate(GIE_AP = ifelse(GIE_AP == TRUE,
+                         "Antigen presentation mut", "Antigen presentation wt")) %>%
+  ggplot(aes(x = Response, y = Freq, fill = Trial)) +
+  geom_col() + theme_Publication() +
+  scale_fill_manual(values = trial_colors) + facet_wrap(~GIE_AP) +
+  labs(title = "Excluding dMMR")
+
+ap_mt_response_plot_excl_dmmr
+
+graph2pdf(x = ap_mt_response_plot_excl_dmmr,
+          file = here(
+            output_dir, "_ap_mt_response_plot_excl_dmmr.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 4,
+          width = 5.5)
+
+table(wes_features_df$Response,
+      wes_features_df$GIE_AP) %>%
+  `colnames<-`( c("AP wt", "AP mt"))
+
+table(wes_features_df$Response,
+      wes_features_df$GIE_AP) %>%
+  fisher.test()
+
+table(wes_features_df$Response,
+      wes_features_df$GIE_AP) %>%
+  prop.table(margin = 1) %>%
+  round(2)  %>%
+  `colnames<-`( c("AP wt", "AP mt"))
+
+table(wes_features_df$Response,
+      wes_features_df$GIE_AP) %>%
+  prop.table(margin = 2) %>%
+  round(2) %>%
+  `colnames<-`( c("AP wt", "AP mt"))
+
+table(wes_features_df_excl_dmmr$Response,
+      wes_features_df_excl_dmmr$GIE_AP) %>%
+  `colnames<-`( c("AP wt", "AP mt"))
+
+table(wes_features_df_excl_dmmr$Response,
+      wes_features_df_excl_dmmr$HLA_alteration) %>%
+  fisher.test()
+
+table(wes_features_df_excl_dmmr$Response,
+      wes_features_df_excl_dmmr$GIE_AP) %>%
+  prop.table(margin = 1) %>%
+  round(2)  %>%
+  `colnames<-`( c("AP wt", "AP mt"))
+
+table(wes_features_df_excl_dmmr$Response,
+      wes_features_df_excl_dmmr$GIE_AP) %>%
+  prop.table(margin = 2) %>%
+  round(2)  %>%
+  `colnames<-`( c("AP wt", "AP mt"))
+```
+### IFNy Trial Response
+```{r, fig.height = 4, fig.width = 6}
+ifny_mt_response_plot <- table(wes_features_df$Trial,
+       wes_features_df$GIE_IFNy,
+      wes_features_df$Response, useNA = "ifany") %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "GIE_IFNy", "Response", "Freq")) %>%
+  mutate(GIE_IFNy = ifelse(GIE_IFNy == TRUE,
+                         "IFNy pathway mut", "IFNy pathway wt")) %>%
+  ggplot(aes(x = Response, y = Freq, fill = Trial)) +
+  geom_col() + theme_Publication() +
+  scale_fill_manual(values = trial_colors) + facet_wrap(~GIE_IFNy)
+ 
+ifny_mt_response_plot
+
+graph2pdf(x = ifny_mt_response_plot,
+          file = here(
+            output_dir, "_ifny_mt_response_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 4,
+          width = 5.5)
+
+ifny_mt_response_plot_excl_dmmr <- table(wes_features_df_excl_dmmr$Trial,
+       wes_features_df_excl_dmmr$GIE_IFNy,
+      wes_features_df_excl_dmmr$Response, useNA = "ifany") %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "GIE_IFNy", "Response", "Freq")) %>%
+  mutate(GIE_IFNy = ifelse(GIE_IFNy == TRUE,
+                         "IFNy pathway mut", "IFNy pathway wt")) %>%
+  ggplot(aes(x = Response, y = Freq, fill = Trial)) +
+  geom_col() + theme_Publication() +
+  scale_fill_manual(values = trial_colors) + facet_wrap(~GIE_IFNy) +
+  labs(title = "Excluding dMMR")
+
+ifny_mt_response_plot_excl_dmmr
+
+graph2pdf(x = ifny_mt_response_plot_excl_dmmr,
+          file = here(
+            output_dir, "_ifny_mt_response_plot_excl_dmmr.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 4,
+          width = 5.5)
+
+table(wes_features_df$Response,
+      wes_features_df$GIE_IFNy) %>%
+  `colnames<-`( c("IFNy wt", "IFNy mt"))
+
+table(wes_features_df$Response,
+      wes_features_df$GIE_IFNy) %>%
+  fisher.test()
+
+table(wes_features_df$Response,
+      wes_features_df$GIE_IFNy) %>%
+  prop.table(margin = 1) %>%
+  round(2) %>%
+  `colnames<-`( c("IFNy wt", "IFNy mt"))
+
+table(wes_features_df$Response,
+      wes_features_df$GIE_IFNy) %>%
+  prop.table(margin = 2) %>%
+  round(2) %>%
+  `colnames<-`( c("IFNy wt", "IFNy mt"))
+
+table(wes_features_df_excl_dmmr$Response,
+      wes_features_df_excl_dmmr$GIE_IFNy) %>%
+  `colnames<-`( c("IFNy wt", "IFNy mt"))
+
+table(wes_features_df_excl_dmmr$Response,
+      wes_features_df_excl_dmmr$HLA_alteration) %>%
+  fisher.test()
+
+table(wes_features_df_excl_dmmr$Response,
+      wes_features_df_excl_dmmr$GIE_IFNy) %>%
+  prop.table(margin = 1) %>%
+  round(2) %>%
+  `colnames<-`( c("IFNy wt", "IFNy mt"))
+
+table(wes_features_df_excl_dmmr$Response,
+      wes_features_df_excl_dmmr$GIE_IFNy) %>%
+  prop.table(margin = 2) %>%
+  round(2) %>%
+  `colnames<-`( c("IFNy wt", "IFNy mt"))
+```
+
+### HLA Alteration Response
+```{r}
+hla_alteration_response_plot <- table(wes_features_df$Trial,
+       wes_features_df$HLA_alteration,
+      wes_features_df$Response, useNA = "ifany") %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "HLA_alteration", "Response", "Freq")) %>%
+  mutate(HLA_alteration = ifelse(HLA_alteration == TRUE,
+                         "HLA altered", "HLA intact")) %>%
+  ggplot(aes(x = Response, y = Freq, fill = Trial)) +
+  geom_col() + theme_Publication() +
+  scale_fill_manual(values = trial_colors) + facet_wrap(~HLA_alteration)
+
+hla_alteration_response_plot
+
+graph2pdf(x = hla_alteration_response_plot,
+          file = here(
+            output_dir, "_hla_alteration_response_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 4,
+          width = 5.5)
+
+hla_alteration_response_plot_excl_dmmr <-  table(wes_features_df_excl_dmmr$Trial,
+       wes_features_df_excl_dmmr$HLA_alteration,
+      wes_features_df_excl_dmmr$Response, useNA = "ifany") %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "HLA_alteration", "Response", "Freq"))  %>%
+  mutate(HLA_alteration = ifelse(HLA_alteration == TRUE,
+                         "HLA altered", "HLA intact")) %>%
+  ggplot(aes(x = Response, y = Freq, fill = Trial)) +
+  geom_col() + theme_Publication() +
+  scale_fill_manual(values = trial_colors) + facet_wrap(~HLA_alteration) +
+  labs(title = "Excluding dMMR")
+
+hla_alteration_response_plot_excl_dmmr
+
+graph2pdf(x = hla_alteration_response_plot_excl_dmmr,
+          file = here(
+            output_dir, "_hla_alteration_response_plot_excl_dmmr.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 4,
+          width = 5.5)
+table(wes_features_df$Response,
+      wes_features_df$HLA_alteration) %>%
+  `colnames<-`( c("HLA_normal", "HLA_alteration"))
+
+table(wes_features_df$Response,
+      wes_features_df$HLA_alteration) %>%
+  fisher.test()
+
+table(wes_features_df$Response,
+      wes_features_df$HLA_alteration) %>%
+  prop.table(margin = 1) %>%
+  round(2) %>%
+  `colnames<-`( c("HLA_normal", "HLA_alteration"))
+
+table(wes_features_df$Response,
+      wes_features_df$HLA_alteration) %>%
+  prop.table(margin = 2) %>%
+  round(2) %>%
+  `colnames<-`( c("HLA_normal", "HLA_alteration"))
+
+table(wes_features_df_excl_dmmr$Response,
+      wes_features_df_excl_dmmr$HLA_alteration) %>%
+  `colnames<-`( c("HLA_normal", "HLA_alteration"))
+
+table(wes_features_df_excl_dmmr$Response,
+      wes_features_df_excl_dmmr$HLA_alteration) %>%
+  fisher.test()
+
+table(wes_features_df_excl_dmmr$Response,
+      wes_features_df_excl_dmmr$HLA_alteration) %>%
+  prop.table(margin = 1) %>%
+  round(2) %>%
+  `colnames<-`( c("HLA_normal", "HLA_alteration"))
+
+table(wes_features_df_excl_dmmr$Response,
+      wes_features_df_excl_dmmr$HLA_alteration) %>%
+  prop.table(margin = 2) %>%
+  round(2) %>%
+  `colnames<-`( c("HLA_normal", "HLA_alteration"))
+
+# `rownames<-`(c("TMB-L", "TMB-H")) %>%
+# `colnames<-`( c("mTIL_low", "mTIL_high"))
+```
+
 # ----------
-# Extended Data Fig 4
-# FACETS
+## Extended Data Fig 4 FACETS
+
+## Extended Data Fig 4a
+```{r}
+aneuploidy_trial_response_plot <- wes_features_df %>%
+  ggplot(aes(x = factor(Trial,
+                        levels = c("NICHE-MSI", "MATISSE",
+                                   "OpACIN_neo", "PRADO", "BELLINI" ,"NICHE-MSS", "IMCISION", "NABUCCO")), y = Aneuploidy_score, fill = Response)) +
+  geom_boxplot(position = position_dodge()) +
+  theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  labs(x = "")
+
+aneuploidy_trial_response_plot
+graph2pdf(x = aneuploidy_trial_response_plot,
+          file = here(output_dir, "_aneuploidy_trial_response_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 5,
+          width = 5)
+
+```
+
+## Extended Data Fig 4b
+```{r}
+scna_trial_response_plot <- wes_features_df %>%
+  ggplot(aes(x = factor(Trial,
+                        levels = c("NICHE-MSI", "MATISSE",
+                                   "OpACIN_neo", "PRADO", "BELLINI",
+                                   "NICHE-MSS", "IMCISION", "NABUCCO")),
+             y = scna_loss, fill = Response)) +
+  geom_boxplot(position = position_dodge()) +
+  theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  labs(x = "")
+
+scna_trial_response_plot
+graph2pdf(x = scna_trial_response_plot,
+          file = here(output_dir, "_scna_trial_response_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 5,
+          width = 5)
+```
+
+## Extended Data Fig 4c
+### Facets Aneuplody vs scna
 ```{r, fig.height = 6, fig.width = 6}
-facets_data <- read_csv2(here(wes_dir, "facets_data.csv"))
-dim(facets_data)
 
 wes_features_df %>%
   ggplot(aes(x = scna_loss, y = Aneuploidy_score,
@@ -1945,13 +2425,48 @@ graph2pdf(x = aneuploidy_scna_plot,
           width = 7)
 ```
 
+
+
+## Extended Data Fig 4d
+### Facets cytobands
+
+```{r}
+facets_c_cytobands_excl_dMMR_del_freq <- read_csv2(
+  here(source_data_dir, "facets_c_cytobands_excl_dMMR_del_freq.csv"))
+
+facets_c_cytobands_excl_dMMR_del_freq_plot <- facets_c_cytobands_excl_dMMR_del_freq[
+  select_top_extremes(facets_c_cytobands_excl_dMMR_del_freq$Delta_del_hemizyg, top_n = 10) |
+    facets_c_cytobands_excl_dMMR_del_freq$chr_arm_cytoband %in% c("chr9_p21.3", "chr9_q34.3"), ] %>%
+  ggplot(aes(x = reorder(chr_arm_cytoband, Delta_del_hemizyg), y = Delta_del_hemizyg)) +
+  geom_col() + coord_flip() + theme_Publication() +
+  labs(x = "", y = "Difference in proportions (R - NR)",
+       title = "Delta in cytoband losses")
+
+facets_c_cytobands_excl_dMMR_del_freq_plot
+
+graph2pdf(x = facets_c_cytobands_excl_dMMR_del_freq_plot,
+          file = here(
+            output_dir, "_facets_c_cytobands_excl_dMMR_del_freq_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 7,
+          width = 6)
+```
+
+
+## Extended Data Fig 4e
+
+
 ```{r}
 cytoband_df <- read.delim(
-  here("data", "external", "cytoBand.txt"), header = F) %>%
+  here(source_data_dir, "cytoBand.txt"), header = F) %>%
   setNames(c("chr", "startpos", "endpos", "cytoband", "giemsa"))
 
 cytoband_df <- cytoband_df %>%
   mutate(chr_arm = paste0(chr, ifelse(str_detect(cytoband, "p"), "p", "q")))
+
+facets_c_cytobands_excl_dMMR_mean_cn  <- read_csv2(
+  here(source_data_dir, "facets_c_cytobands_excl_dMMR_mean_cn.csv"))
 
 cytoband_order <- cytoband_df %>%
   filter(!chr %in% c("chrX", "chrY")) %>%
@@ -1984,7 +2499,9 @@ chr_label_positions <- facets_c_cytobands_excl_dMMR_mean_cn %>%
 chr_label_positions <- facets_c_cytobands_excl_dMMR_mean_cn[
   !duplicated(facets_c_cytobands_excl_dMMR_mean_cn$chr), ] %>%
   filter(!chr %in% c("chrX", "chrY"))
+```
 
+```{r}
 facets_cytoband_cn_plot <- facets_c_cytobands_excl_dMMR_mean_cn %>%
   filter(!chr %in% c("chrX", "chrY")) %>%
   ggplot(aes(x = chr_arm_cytoband, y = mean_cn, col = Response)) +
@@ -1995,6 +2512,7 @@ facets_cytoband_cn_plot <- facets_c_cytobands_excl_dMMR_mean_cn %>%
 geom_text(data = chr_label_positions,
           aes(y = 4, label = chr), col = "black", vjust = -1.5, size = 3.5) 
 
+facets_cytoband_cn_plot 
 graph2pdf(x = facets_cytoband_cn_plot,
           file = here(output_dir, "_facets_cytoband_cn_plot.pdf"),
           colormodel = "rgb",
@@ -2003,49 +2521,27 @@ graph2pdf(x = facets_cytoband_cn_plot,
           width = 20)
 ```
 
-```{r}
-
-facets_c_cytobands_excl_dMMR_del_freq_plot <- facets_c_cytobands_excl_dMMR_del_freq[
-  select_top_extremes(facets_c_cytobands_excl_dMMR_del_freq$Delta_del_hemizyg, top_n = 10) |
-    facets_c_cytobands_excl_dMMR_del_freq$chr_arm_cytoband %in% c("chr9_p21.3", "chr9_q34.3"), ] %>%
-  ggplot(aes(x = reorder(chr_arm_cytoband, Delta_del_hemizyg), y = Delta_del_hemizyg)) +
-  geom_col() + coord_flip() + theme_Publication() +
-  labs(x = "", y = "Difference in proportions (R - NR)",
-       title = "Delta in cytoband losses")
-
-facets_c_cytobands_excl_dMMR_del_freq_plot
-
-graph2pdf(x = facets_c_cytobands_excl_dMMR_del_freq_plot,
-          file = here(
-            output_dir, "_facets_c_cytobands_excl_dMMR_del_freq_plot.pdf"),
-          colormodel = "rgb",
-          font = "Arial",
-          height = 7,
-          width = 6)
-```
-
 # ----------
 # Figure 4
-# Transcriptomics Meta-analysis plots
+## Fig.4a
+### Transcriptomics Meta-analysis plots
 
 ```{r, fig.height = 12, fig.width = 10}
 meta_rna_studies_results <- read_csv2(
-  here(meta_rna_dir, "meta_studies_results.csv"))
+  here(source_data_dir, "meta_studies_results.csv"))
 meta_rna_combined_effects <- read_csv2(
-  here(meta_rna_dir, "meta_combined_effects.csv"))
+  here(source_data_dir, "meta_combined_effects.csv"))
 meta_rna_combined_effects <- meta_rna_combined_effects %>%
   arrange(-TE.random)
 
 meta_studies_results_random_effects <- read_csv2(
-  here(meta_rna_dir, "meta_studies_results_random_effects.csv"))
+  here(source_data_dir, "meta_studies_results_random_effects.csv"))
 
 meta_combined_effects_random_effects <- read_csv2(
-  here(meta_rna_dir, "meta_combined_effects_random_effects.csv"))
+  here(source_data_dir, "meta_combined_effects_random_effects.csv"))
 
 meta_studies_results_rna_all <- read_csv2(
-  here(meta_rna_dir, "meta_studies_results_smd_all.csv"))
-
-meta_studies_results_rna_all %>% select()
+  here(source_data_dir, "meta_studies_results_smd_all.csv"))
 
 meta_combined_effects_random_effects_f <- meta_combined_effects_random_effects %>%
   arrange(TE.random)
@@ -2056,6 +2552,8 @@ rna_meta_studies_results_sample_sizes <- meta_studies_results_rna_all %>%
   unique()
 rna_meta_studies_results_sample_sizes
 
+meta_studies_results_rna_all$studlab %>% unique()
+
 combined_rna_smd_plot <- meta_studies_results_rna_all %>%
   mutate(label = cut(
     pval,
@@ -2063,8 +2561,10 @@ combined_rna_smd_plot <- meta_studies_results_rna_all %>%
     labels = c("***", "**", "*", "")
   ))  %>%
   ggplot(aes(
-    x = factor(studlab, levels = c("Combined","BELLINI", "IMCISION", "MATISSE",
-                            "NABUCCO", "NICHE-MSS", "OpACIN_neo", "PRADO")),
+    x = factor(studlab, levels = c("Combined", "Combined_excl_dMMR", "BELLINI",
+                                   "IMCISION", "MATISSE",
+                                   "NABUCCO", "NICHE-MSS",
+                                   "OpACIN_neo", "PRADO")),
     y = factor(
       Variable, levels = meta_combined_effects_random_effects_f$Variable),
     fill = TE,
@@ -2116,34 +2616,8 @@ graph2pdf(x = random_effects_meta_rna_plot,
           height = 9,
           width = 6)
 
-meta_studies_results_rna_all %>%
-  mutate(label = cut(
-    pval,
-    breaks = c(0, 0.001, 0.01, 0.05, 0.1, 1),
-    labels = c("***", "**", "*", ".", "")
-  ))  %>%
-  ggplot(aes(
-    x = factor(studlab, levels = c("Combined","BELLINI", "IMCISION", "MATISSE",
-                            "NABUCCO", "NICHE-MSS", "OpACIN_neo", "PRADO")), #  "Combined_excl_dMMR", 
-    y = factor(
-      Variable, levels = meta_combined_effects_random_effects_f$Variable),
-    fill = TE,
-    label = label)) +
-  geom_tile() +
-  geom_text() +
-  scale_fill_gradient2(low = "#075AFF",
-                       mid = "white",
-                       high = "#FF0000") +
-  theme_Publication() +
-  labs(y = "") +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
-  theme(legend.position = "right", legend.direction = "vertical") +
-  theme(legend.key.size = unit(0.75, 'cm')) +
-  labs(x = "")
-
 ```
 
-## SMD
 ```{r, fig.height = 12, fig.width = 10}
 combined_rna_smd_plot <- signature_response_c %>%
   filter(contrast == "Pre R x NR") %>%
@@ -2195,9 +2669,11 @@ graph2pdf(x = meta_rna_combined_smd_plot,
 
 ```
 
-# RNA corr_plot
+## Fig.4b
+
+### RNA corr_plot
 ```{r, fig.height = 20, fig.width = 20}
-tmb_rna_features_pre_m <- wes_rna_features_df_pre %>%
+tmb_rna_features_pre_m <- rna_features_df_plus_wes_pre %>%
   select(all_of(c(meta_combined_effects_random_effects_f$Variable, "TMB"))) %>%
   as.matrix()
 
@@ -2206,76 +2682,727 @@ tmb_rna_features_pre_m %>%
   corrplot(order = "hclust", type = "lower", tl.col = "black")
 
 save_pheatmap_pdf(
-  x = 
-tmb_rna_features_pre_m %>%
-  cor(use = "pairwise.complete.obs", method = "spearman") %>%
-  corrplot(order = "hclust", type = "lower", tl.col = "black"),
-                  filename = here(
-                    output_dir,
-                    "rna_dna_pre_corplot.pdf"),
-                  width = 9, height = 9)
+  x = tmb_rna_features_pre_m %>%
+    cor(use = "pairwise.complete.obs", method = "spearman") %>%
+    corrplot(order = "hclust", type = "lower", tl.col = "black"),
+  filename = here(
+    output_dir,
+    "rna_dna_pre_corplot.pdf"),
+  width = 9, height = 9)
 
-# RNA dna
-rna_dna_features_pre_m <- wes_rna_features_df_pre %>%
+# RNA DNA
+rna_dna_features_pre_m <- rna_features_df_plus_wes_pre %>%
   select(all_of(c(meta_combined_effects_random_effects_f$Variable,
-                  "TMB", "APOBEC_abs", "UV_abs", "Aneuploidy_score")))  %>%
+                  "TMB", "APOBEC_abs", "UV_abs", "Aneuploidy_score"))) %>%
   as.matrix() 
 
 rna_dna_features_pre_m %>%
   cor(use = "pairwise.complete.obs", method = "spearman") %>%
   corrplot(order = "hclust", type = "lower", tl.col = "black")
 
-save_pheatmap_pdf(
-  x = 
-rna_dna_features_pre_m %>%
-  cor(use = "pairwise.complete.obs", method = "spearman") %>%
-  corrplot(order = "hclust", type = "lower", tl.col = "black")
-,
-                  filename = here(
-                    output_dir,
-                    "rna_dna_pre_corplot.pdf"),
-                  width = 9, heighst = 9)
+# save_pheatmap_pdf(
+#   x =  rna_dna_features_pre_m %>%
+#   cor(use = "pairwise.complete.obs", method = "spearman") %>%
+#   corrplot(order = "hclust", type = "lower", tl.col = "black"),
+#   filename = here(
+#     output_dir,
+#     "rna_dna_pre_corplot.pdf"),
+#   width = 9, heighst = 9)
+
+```
+
+## Fig.4c
+### PD-L1 combined
+
+```{r}
+PDL1_cat_combined <- read_csv2(here(source_data_dir, "PDL1_cat_combined.csv"))
+
+n_labels <- PDL1_cat_combined %>%
+group_by(Trial, PDL1_group) %>%
+summarise(n = n()) %>%
+mutate(
+  Trial_PDL1_group = paste0(Trial, " ", PDL1_group),
+  label = paste0(PDL1_group, "\n(n = ", n, ")"))
+label_map <- setNames(n_labels$label, n_labels$Trial_PDL1_group)
+
+PDL1_category_response_plot <- table(PDL1_cat_combined$PDL1_group,
+      PDL1_cat_combined$Response,
+      PDL1_cat_combined$Trial) %>%
+  as.data.frame() %>%
+  setNames(c("PDL1_group", "Response", "Trial", "Freq")) %>%
+  filter(! (Trial %in% c("BELLINI", "IMCISION", "NABUCCO") & PDL1_group %in% c("TPS < 1", "TPS >= 1"))) %>%
+  filter(! (Trial %in% c("PRADO", "OpACIN_neo") & PDL1_group %in% c("CPS < 10", "CPS >= 10")))  %>%
+  pivot_wider(values_from = Freq, names_from = Response) %>%
+  mutate(Total = NR + R, Response_rate = R / Total) %>%
+  mutate(Trial_PDL1_group = paste0(Trial, " ", PDL1_group)) %>%
+  ggplot(aes(Trial_PDL1_group, y = Response_rate)) + geom_col() +
+  theme_Publication() + facet_wrap(~Trial, scales = "free")+
+  labs(x = "", y = "Response rate")  +
+  scale_x_discrete(labels = label_map) 
+
+PDL1_category_response_plot
+
+graph2pdf(x = PDL1_category_response_plot,
+          file = here(output_dir, "_PDL1_category_response_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 4.5,
+          width = 6.75)
+```
+
+## Fig.4d
+### CD8_combined
+```{r}
+CD8_combined <- read_csv2(
+  here(source_data_dir, "CD8_combined.csv"))
+```
+
+```{r}
+table(CD8_combined$Trial, CD8_combined$Response)
+table(CD8_combined$Response)
+
+n_labels <- CD8_combined %>%
+  group_by(Response) %>%
+  summarise(n = n()) %>%
+mutate(
+  label = paste0(Response, "\n(n = ", n, ")"))
+label_map <- setNames(n_labels$label, n_labels$Response)
+
+CD8_combined_response_plot <- CD8_combined %>%
+  ggplot(aes(x = Response, y = CD8_per_mm2, fill = Response)) +
+  geom_boxplot() + geom_point() +
+  stat_compare_means(method = "wilcox") + theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE) +
+  labs(title = "Pooled Cohort (TNBC, HNSCC, \nUrothelial, Colon pMMR)",
+       x = "", y = "CD8+ cells/mm2") +
+  scale_x_discrete(labels = label_map)
+  
+CD8_combined_response_plot
+graph2pdf(x = CD8_combined_response_plot,
+          file = here(output_dir, "_CD8_combined_response_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 4.5,
+          width = 4.5)
+```
+
+
+## Fig.4e
+### CD8_PD1_combined
+```{r}
+CD8_PD1_combined  <- read_csv2(
+  here(source_data_dir, "CD8_PD1_combined.csv"))
+```
+
+
+```{r}
+table(CD8_PD1_combined$Trial, CD8_PD1_combined$Response)
+table(CD8_PD1_combined$Response)
+
+n_labels <- CD8_PD1_combined %>%
+  group_by(Response) %>%
+  summarise(n = n()) %>%
+mutate(
+  label = paste0(Response, "\n(n = ", n, ")"))
+label_map <- setNames(n_labels$label, n_labels$Response)
+
+CD8_PD1_combined_response_plot <- CD8_PD1_combined %>%
+  ggplot(aes(x = Response, y = CD8_PD1_per_mm2, fill = Response)) +
+  geom_boxplot() + geom_point() +
+  stat_compare_means(method = "wilcox") + theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE) +
+  labs(title = "Pooled Cohort (TNBC, \nUrothelial, Colon pMMR)",
+       x = "", y = "CD8+ PD-1+ cells/mm2") +
+  scale_x_discrete(labels = label_map)
+  
+CD8_PD1_combined_response_plot
+graph2pdf(x = CD8_PD1_combined_response_plot,
+          file = here(output_dir, "_CD8_PD1_combined_response_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 4.5,
+          width = 4.5)
+```
+
+
+```{r}
+CD8_PD1_combined %>%
+  ggplot(aes(x = Response, y = CD8_PD1_per_mm2, fill = Response)) +
+  geom_boxplot() + geom_point() +
+  stat_compare_means(method = "wilcox") + theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE)
+```
+
+```{r, fig.height = 5, fig.width = 10}
+
+table(CD8_PD1_combined$Trial, CD8_PD1_combined$Response,
+      is.na(CD8_PD1_combined$CD8_PD1_per_mm2))
+
+CD8_PD1_combined %>%
+  ggplot(aes(x = Response, y = CD8_PD1_per_mm2, fill = Response)) +
+  geom_boxplot() + geom_point() + facet_wrap(~Trial) +
+  stat_compare_means(method = "wilcox") + theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE)
+
+```
+
+
+# ----------
+# Extended data Fig. 5
+## Extended data Fig. 5a
+### RNA Meta analysis sensitivity
+
+```{r, fig.height = 8, fig.width = 7}
+
+rna_meta_random_effects <- read_csv2(
+    here(source_data_dir,
+         "meta_combined_effects_random_effects.csv"))
+
+rna_meta_aggregated <- read_csv2(here(source_data_dir,
+                                      "rna_meta_aggregated_all_statistics.csv"))
+
+signature_variable_order <- rna_meta_random_effects %>%
+  mutate(Variable = ifelse(Variable == "Gamma_delta_TCR_Yu",
+                           "Gamma_delta_TCRs", Variable)) %>%
+  arrange(TE.random) %>%
+  pull("Variable")
+
+rna_smd_sensitivity_plot <- rna_meta_aggregated %>%
+  mutate(label = cut(
+    pval.random,
+    breaks = c(0, 0.001, 0.01, 0.05, 1),
+    labels = c("***", "**", "*", "")
+  ))  %>%
+  ggplot(aes(
+    x = factor(Analysis_subset,
+               levels = c("Original", "Excl_mono.", "Excl_clin.", "MPR", "pCR")), 
+    y = factor(
+      Variable, levels = signature_variable_order),
+    fill = TE.random,
+    label = label)) +
+  geom_tile() +
+  geom_text() +
+  scale_fill_gradient2(low = "#075AFF",
+                       mid = "white",
+                       high = "#FF0000") +
+  theme_Publication() +
+  labs(y = "") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  theme(legend.position = "right", legend.direction = "vertical") +
+  theme(legend.key.size = unit(0.75, 'cm')) +
+  labs(x = "", title = "Meta-analysis sensitivity",
+       fill = "Meta-analysis\nSMD (Hedge's g)")
+
+rna_smd_sensitivity_plot
+
+graph2pdf(x = rna_smd_sensitivity_plot,
+          file = here(output_dir, "_rna_smd_sensitivity_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 9,
+          width = 7.7)
+```
+
+## Extended data Fig. 5b
+### CD8_combined per cohort
+
+```{r, fig.height = 4, fig.width = 10}
+table(CD8_combined$Trial, CD8_combined$Response)
+
+CD8_combined %>%
+  ggplot(aes(x = Response, y = CD8_per_mm2, fill = Response)) +
+  geom_boxplot() + geom_point() +
+  facet_wrap(~Trial, scales = "free", nrow = 1) +
+  stat_compare_means(method = "wilcox") + theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE) +
+  labs(title = "Combined")
+
+n_labels <- CD8_combined %>%
+  group_by(Response, Trial) %>%
+  summarise(n = n()) %>%
+mutate(
+  label = paste0(Response, "\n(n = ", n, ")"),
+  Trial_response = paste0(Trial, "_", Response))
+label_map <- setNames(n_labels$label, n_labels$Trial_response)
+
+CD8_per_cohort_response_plot <- CD8_combined %>%
+  mutate(Trial_response = paste0(Trial, "_", Response)) %>%
+  ggplot(aes(x = Trial_response, y = CD8_per_mm2)) +
+  geom_boxplot(aes(fill = Response)) + geom_point() +
+  facet_wrap(~Trial, scales = "free", nrow = 1) + theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE) +
+  labs(x = "", y = "CD8+ cells/mm2") +
+  scale_x_discrete(labels = label_map)
+
+CD8_per_cohort_response_plot
+graph2pdf(x = CD8_per_cohort_response_plot,
+          file = here(output_dir, "_CD8_per_cohort_response_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 4,
+          width = 8)
+```
+
+## Extended data Fig. 5c
+### CD8_PD1_combined per cohort
+
+```{r, fig.height = 5, fig.width = 10}
+table(CD8_PD1_combined$Trial, CD8_PD1_combined$Response)
+
+CD8_PD1_combined %>%
+  ggplot(aes(x = Response, y = CD8_PD1_per_mm2, fill = Response)) +
+  geom_boxplot() + geom_point() + facet_wrap(~Trial, scales = "free") +
+  stat_compare_means(method = "wilcox") + theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE) +
+  labs(title = "Combined")
+
+n_labels <- CD8_PD1_combined %>%
+  group_by(Response, Trial) %>%
+  summarise(n = n()) %>%
+mutate(
+  label = paste0(Response, "\n(n = ", n, ")"),
+  Trial_response = paste0(Trial, "_", Response))
+label_map <- setNames(n_labels$label, n_labels$Trial_response)
+
+CD8_PD1_per_cohort_response_plot <- CD8_PD1_combined %>%
+  mutate(Trial_response = paste0(Trial, "_", Response)) %>%
+  ggplot(aes(x = Trial_response, y = CD8_PD1_per_mm2)) +
+  geom_boxplot(aes(fill = Response)) + geom_point() +
+  facet_wrap(~Trial, scales = "free") + theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE) +
+  labs(x = "", y = "CD8+ PD-1+ cells/mm2") +
+  scale_x_discrete(labels = label_map)
+
+CD8_PD1_per_cohort_response_plot
+
+graph2pdf(x = CD8_PD1_per_cohort_response_plot,
+          file = here(output_dir, "_CD8_PD1_per_cohort_response_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 4,
+          width = 5.5)
+```
+
+
+## Extended Data Fig. 5d
+### B catenin TIL score correlations per trial
+
+```{r, fig.height = 8, fig.width = 8}
+B_cat_til_trial_corr_plot <- rna_features_df_plus_wes_pre %>%
+  ggplot(aes(x = B_catenin_signature_Luke_et_al, y = TIL_score, col = Trial)) +
+  geom_point(aes()) + theme_Publication() + stat_cor(method = "pearson") +
+  geom_smooth(method = "lm") +
+  scale_color_manual(values = trial_colors) + facet_wrap(~Trial) +
+  guides(col = FALSE) +
+  labs(x = "B-catenin signature ssGSEA", y = "TIL score ssGSEA")
+
+B_cat_til_trial_corr_plot
+
+graph2pdf(x = B_cat_til_trial_corr_plot,
+          file = here(output_dir, "_B_cat_til_trial_corr_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 7,
+          width = 7)
+```
+
+## Extended Data Fig. 5e
+### B catenin per trial
+```{r, fig.height = 4, fig.width = 5}
+B_cat_trial_plot <- rna_features_df_plus_wes_pre %>%
+  ggplot(aes(x = Trial, y = B_catenin_signature_Luke_et_al)) +
+  geom_boxplot() +
+  geom_point(aes(col = Trial)) + theme_Publication() +
+  scale_color_manual(values = trial_colors) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))+
+  labs(y = "B-catenin signature ssGSEA") +
+  theme(axis.title.x = element_blank()) +
+  guides(col = FALSE)
+
+B_cat_trial_plot
+
+graph2pdf(x = B_cat_trial_plot,
+          file = here(output_dir, "_B_cat_trial_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 4,
+          width = 5)
 ```
 
 # ----------
 # Figure 5
+## Fig.5a
+### ML RF CV Schemes
 
-# Quadrant plots TMB TIL score
 ```{r}
-median_til_score_pre <- median(
-  wes_rna_features_df_pre$TIL_score)
-median_til_score_pre
+metastatic_wes_rna_features_df_pre <- read_csv2(
+  here(source_data_dir, "metastatic_wes_rna_features_df_pre.csv"))
+```
 
-wes_rna_features_df_pre_f %>% 
-  ggplot(aes(x = TMB, y = TIL_score, shape = Response, col = Trial)) +
-  geom_point() + theme_Publication() +
-  geom_vline(xintercept = 10, linetype = "dashed") +
-  geom_hline(yintercept = median_til_score_pre, linetype = "dashed") +
-  scale_x_continuous(trans = "log2") +
-  scale_color_manual(values = trial_colors) +
-  guides(col = guide_legend(nrow = 3))
+```{r}
+outer_fold_results <- readRDS(here(source_data_dir, "outer_fold_results.rds"))
+data_partition <- read_csv2(here(source_data_dir, "data_partition.csv"))
 
-TMB_TIL_quadrant_trial_plot <- wes_rna_features_df_pre_f %>% 
-  ggplot(aes(x = TMB, y = TIL_score, shape = Response, col = Trial)) +
-  geom_point() + theme_Publication() + facet_wrap(~Response) +
-  geom_vline(xintercept = 10, linetype = "dashed") +
-  geom_hline(yintercept = median_til_score_pre, linetype = "dashed")  +
-  scale_x_continuous(trans = "log2") +
-  scale_color_manual(values = trial_colors) +
-  guides(col = guide_legend(nrow = 3))
+all_outer <- bind_rows(outer_fold_results) %>%
+  mutate(ground_truth = truth) %>%
+  mutate(truth = ifelse(truth %in% c(1, "R"), 1, 0)) %>%
+  mutate(outer_fold = paste0("fold_", outer_fold)) %>%
+  mutate(row_index = as.character(row_index)) %>%
+  left_join(data_partition %>%
+              mutate(row_index  = as.character(1:nrow(data_partition))))
 
-TMB_TIL_quadrant_trial_plot
+table(all_outer$ground_truth, all_outer$truth)
+# table(all_outer$outer_fold, all_outer$trial_response)
 
-graph2pdf(x = TMB_TIL_quadrant_trial_plot,
-          file = here(output_dir, "_TMB_TIL_quadrant_trial_plot.pdf"),
+varimp_summary <- read_csv2(here(source_data_dir, "varimp_summary.csv"))
+
+```
+
+## Fig.5b
+### ROC plot Outer Folds CV
+```{r}
+folds <- unique(all_outer$outer_fold)
+roc_list <- list()
+
+# --- Compute ROC per fold ---
+roc_list <- list()
+
+for (f in folds) {
+  df_fold <- all_outer[all_outer$outer_fold == f, ]
+  
+  truth <- factor(df_fold$ground_truth, levels = c("NR", "R"))
+  pred   <- df_fold$pred
+  
+  if (length(unique(truth)) < 2) {
+    cat("Skipping", f, "→ only one class present\n")
+    next
+  }
+  
+  roc_list[[f]] <- roc(truth, pred, quiet = TRUE)
+}
+
+# Common FPR grid
+fpr_grid <- seq(0, 1, length.out = 200)
+
+# Interpolate each fold onto the grid
+interp_df <- map_df(names(roc_list), function(f) {
+  r <- roc_list[[f]]
+  tibble(
+    fold = f,
+    fpr  = fpr_grid,
+    tpr  = approx(
+      x = 1 - r$specificities,
+      y = r$sensitivities,
+      xout = fpr_grid
+    )$y
+  )
+})
+
+# Mean and SD across folds
+summary_df <- interp_df %>%
+  group_by(fpr) %>%
+  summarise(
+    mean_tpr = mean(tpr, na.rm = TRUE),
+    sd_tpr   = sd(tpr, na.rm = TRUE),
+    upper    = pmin(mean_tpr + sd_tpr, 1),
+    lower    = pmax(mean_tpr - sd_tpr, 0)
+  )
+
+# --- ggplot ---
+Outer_fold_ROC_plot <- ggplot() +
+  # Per-fold ROC curves
+  geom_line(
+    data = interp_df,
+    aes(x = fpr, y = tpr, group = fold),
+    color = "grey80"
+  ) +
+  # SD ribbon
+  geom_ribbon(
+    data = summary_df,
+    aes(x = fpr, ymin = lower, ymax = upper),
+    fill = "skyblue",
+    alpha = 0.3
+  ) +
+  # Mean ROC curve
+  geom_line(
+    data = summary_df,
+    aes(x = fpr, y = mean_tpr),
+    color = "blue",
+    linewidth = 1.2
+  ) +
+  
+  # Diagonal reference line
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  
+  labs( x = "False Positive Rate", y = "True Positive Rate"
+  ) +coord_equal() +
+  theme_Publication()
+
+Outer_fold_ROC_plot
+
+graph2pdf(x = Outer_fold_ROC_plot,
+          file = here(output_dir, "_Outer_fold_ROC_plot.pdf"),
           colormodel = "rgb",
-          font = "Arial",
-          height = 5,
-          width = 7)
+          # font = "Arial",
+          height = 4.5,
+          width = 5.5)
+```
+
+### Performance metrics outer fold summaries
+```{r}
+
+auc_per_fold <- all_outer %>%
+  group_by(outer_fold) %>%
+  summarise(
+    auc = as.numeric(pROC::auc(pROC::roc(truth, pred)))
+  )
+
+summary_auc <- auc_per_fold %>%
+  summarise(
+    mean_auc = mean(auc),
+    sd_auc = sd(auc)
+  )
+
+summary_auc %>% round(2)
+
+safe_sens <- function(truth, pred) {
+  if (length(unique(truth)) < 2 || length(unique(pred)) < 2) return(NA_real_)
+  caret::sensitivity(truth, pred, positive = "R")
+}
+
+safe_spec <- function(truth, pred) {
+  if (length(unique(truth)) < 2 || length(unique(pred)) < 2) return(NA_real_)
+  caret::specificity(truth, pred, negative = "NR")
+}
+
+results <- list()
+
+for (folds in unique(all_outer$outer_fold)) {
+  
+  cat("Processing:", folds, "\n")
+  
+  df_fold <- all_outer[all_outer$outer_fold == folds, ]
+  
+  truth_f <- factor(df_fold$truth == 1, levels = c(FALSE, TRUE))
+  pred_f  <- factor(df_fold$pred > 0.5, levels = c(FALSE, TRUE))
+  
+  # Check class presence
+  if (length(unique(truth_f)) < 2) {
+    cat("  Skipped:", folds, "→ only one class present in ground truth\n")
+    sens <- NA_real_
+    spec <- NA_real_
+  } else if (length(unique(pred_f)) < 2) {
+    cat("  Warning:", folds, "→ model predicted only one class\n")
+    sens <- NA_real_
+    spec <- NA_real_
+  } else {
+    sens <- caret::sensitivity(truth_f, pred_f, positive = TRUE)
+    spec <- caret::specificity(truth_f, pred_f, negative = FALSE)
+  }
+  
+  results[[folds]] <- data.frame(
+    outer_fold = folds,
+    sens = sens,
+    spec = spec
+  )
+}
+
+sens_spec_per_fold <- do.call(rbind, results)
+
+summary_sens_spec <- sens_spec_per_fold %>%
+  summarise(
+    mean_sens = mean(sens),
+    sd_sens = sd(sens),
+    mean_spec = mean(spec),
+    sd_spec = sd(spec)
+  )
+
+summary_sens_spec %>% round(2)
+
 
 ```
 
 ```{r}
+folds <- unique(all_outer$outer_fold)
+roc_list <- list()
+
+# postscript("roc_plot.ps", width = 6, height = 6, horizontal = FALSE, paper = "special")
+for (f in folds) {
+  df_fold <- all_outer[all_outer$outer_fold == f, ]
+  
+  truth <- factor(df_fold$ground_truth, levels = c("NR", "R"))
+  pred   <- df_fold$pred
+  
+  # Skip folds with only one class
+  if (length(unique(truth)) < 2) {
+    cat("Skipping", f, "→ only one class present\n")
+    next
+  }
+  
+  roc_list[[f]] <- roc(truth, pred, quiet = TRUE)
+}
+
+# Common grid of FPR values
+fpr_grid <- seq(0, 1, length.out = 200)
+
+# Interpolate TPR for each fold
+tpr_mat <- sapply(roc_list, function(r) {
+  approx(
+    x = 1 - r$specificities,
+    y = r$sensitivities,
+    xout = fpr_grid
+  )$y
+})
+
+mean_tpr <- rowMeans(tpr_mat, na.rm = TRUE)
+sd_tpr   <- apply(tpr_mat, 1, sd, na.rm = TRUE)
+
+plot(NULL, xlim=c(0,1), ylim=c(0,1),
+     xlab="False Positive Rate", ylab="True Positive Rate")
+
+# Per-fold ROC curves
+for (r in roc_list) {
+  lines(1 - r$specificities, r$sensitivities, col="grey80")
+}
+
+# Shaded SD band
+upper <- pmin(mean_tpr + sd_tpr, 1)
+lower <- pmax(mean_tpr - sd_tpr, 0)
+polygon(
+  c(fpr_grid, rev(fpr_grid)),
+  c(upper, rev(lower)),
+  col=adjustcolor("skyblue", alpha.f=0.3),
+  border=NA
+)
+
+# Mean ROC curve
+lines(fpr_grid, mean_tpr, col="blue", lwd=2)
+
+abline(0,1,lty=2)
+
+# Close the device and write the file
+dev.off()
+```
+
+## Fig.5c
+### ROC LOOCV and combined outer folds
+
+```{r}
+auc_comparison <- read_csv2(here(source_data_dir, "auc_comparison.csv"))
+
+auc_comparison_plot <- auc_comparison %>%
+  left_join(summary_auc %>%
+              mutate(Trial = "Combined_outer_folds")) %>%
+  ggplot(aes(x = reorder(Trial, AUC), y = AUC, fill = Trial)) +
+  geom_col() +
+  geom_errorbar(
+    aes(ymin = AUC - sd_auc, ymax = AUC + sd_auc),
+    width = 0.2,
+    linewidth = 0.5
+  )  + theme_Publication() + coord_flip() +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  scale_fill_manual(values = trial_colors) +
+  labs(x = "") +
+  guides(fill = FALSE)
+
+auc_comparison_plot
+
+graph2pdf(x = auc_comparison_plot,
+          file = here(output_dir, "_auc_comparison_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 4.5,
+          width = 6.5)
+
+```
+
+```{r}
+
+auc_comparison_aggregate_all <- read_csv2(
+  here(source_data_dir, "auc_comparison_aggregate_all.csv"))
+
+auc_comparison_aggregate_all_plot <- auc_comparison_aggregate_all %>%
+  filter(!(Training_set %in% c("Pancancer Nested CV") & outer_fold
+           %in% c("fold_1", "fold_2", "fold_3", "fold_4", "fold_5"))) %>%
+  filter(!Training_set %in% c("Pancancer LOSO")) %>%
+  ggplot(aes(x = reorder(Trial, AUC), y = AUC, fill = Trial,
+             shape = Training_set)) +
+  geom_col() + theme_Publication() + coord_flip() +
+  geom_hline(yintercept = 0.5, linetype = "dashed") +
+  scale_fill_manual(values = trial_colors)  +
+  scale_color_manual(values = trial_colors)+
+  geom_errorbar(
+    aes(ymin = AUC - sd_auc, ymax = AUC + sd_auc),
+    width = 0.2,
+    linewidth = 0.5
+  ) + geom_point(aes(x = Trial, y = AUC), data = auc_comparison_aggregate_all) +
+  geom_point(aes(x = Trial, y = AUC, col = "black"),
+             data = auc_comparison_aggregate_all %>%
+               filter(Training_set == "Pancancer LOSO")) +
+  labs(x = "") +
+  guides(shape = guide_legend(nrow = 3), size = NULL) +
+  # guides(fill = guide_legend(nrow = 3), size = NULL) +
+  guides(fill = NULL, col = NULL)
+
+auc_comparison_aggregate_all_plot
+
+graph2pdf(x = auc_comparison_aggregate_all_plot,
+          file = here(output_dir, "_auc_comparison_aggregate_all_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 4.5,
+          width = 6.5)
+
+```
+
+## Fig.5d
+### Feature importance
+
+```{r, fig.height = 16, fig.width = 8}
+importance_df <- read_csv2(here(source_data_dir, "importance_df.csv"))
+dim(importance_df)
+n_distinct(importance_df$Variable)
+
+importance_df_summary <- importance_df %>%
+  group_by(Variable) %>%
+  summarize(mean = mean(Overall_var_imp)) %>%
+  arrange(-mean)
+
+importance_df_summary
+
+feature_importance_plot <- importance_df %>%
+  ggplot(aes(x = factor(Variable, levels = rev(varimp_summary$Variable)),
+             y = Overall_var_imp, col = model)) +
+  geom_point() +
+  coord_flip() + theme_Publication() +
+  labs(x = "") +
+  scale_color_manual(values = trial_colors_combined)
+
+feature_importance_plot
+
+graph2pdf(x = feature_importance_plot,
+          file = here(output_dir, "_feature_importance_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 12,
+          width = 6)
+```
+
+## Fig.5e
+### Neoadjuvant quadrant response
+```{r}
+median_til_score_pre <- median(
+  rna_features_df_plus_wes_pre$TIL_score)
+median_til_score_pre
+
 wes_rna_features_df_pre_f %>%
   ggplot(aes(x = log2(TMB), y = TIL_score, shape = Response, col = Trial)) +
   geom_point() + theme_Publication()
@@ -2285,10 +3412,6 @@ table(wes_rna_features_df_pre_f$TMB >= 10,
       wes_rna_features_df_pre_f$TIL_score >= median_til_score_pre) %>%
   `rownames<-`(c("TMB-L", "TMB-H")) %>%
   `colnames<-`( c("mTIL_low", "mTIL_high"))
-
-quadrant_response_proportions %>%
-  select(quadrant, Response, Freq) %>%
-  pivot_wider(names_from = Response, values_from = Freq) %>% chisq.test()
 
 quadrant_response_proportions <- table(
   wes_rna_features_df_pre_f$TMB >= 10,
@@ -2339,66 +3462,26 @@ graph2pdf(x = TMB_TIL_quadrant_response_proportions_plot,
           font = "Arial",
           height = 4,
           width = 4)
-
-trial_quadrant_proportions <- table(
-  wes_rna_features_df_pre_f$TMB >= 10,
-  wes_rna_features_df_pre_f$TIL_score > median_til_score_pre,
-  wes_rna_features_df_pre_f$Trial) %>%
-  as.data.frame() %>%
-  setNames(c("TMB_group", "mTIL_group", "Trial", "Freq")) %>%
-  mutate(TMB_group = ifelse(TMB_group == TRUE, "TMB-H", "TMB-L")) %>%
-  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
-  group_by(Trial) %>% add_count(Trial, wt = Freq, name = "Total") %>%
-  mutate(quadrant = paste0(TMB_group, "_", mTIL_group),
-         quadrant_prop = Freq / Total)
-  
-trial_quadrant_proportions %>% select(quadrant, quadrant_prop, Trial) %>%
-  ggplot(aes(x = Trial, y = quadrant_prop, fill = quadrant)) +
-  geom_col() +
-  theme_Publication() +
-  coord_flip() +
-  labs(x = "", y = "", col = "") +
-  guides(fill = guide_legend(nrow = 2))
-
-quadrant_trial_proportions <- table(
-  wes_rna_features_df_pre_f$TMB >= 10,
-  wes_rna_features_df_pre_f$TIL_score > median_til_score_pre,
-  wes_rna_features_df_pre_f$Trial) %>%
-  as.data.frame() %>%
-  setNames(c("TMB_group", "mTIL_group", "Trial", "Freq")) %>%
-  mutate(TMB_group = ifelse(TMB_group == TRUE, "TMB-H", "TMB-L")) %>%
-  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
-  mutate(quadrant = paste0(TMB_group, "_", mTIL_group)) %>%
-  group_by(quadrant) %>% add_count(quadrant, wt = Freq, name = "Total") %>%
-  mutate(quadrant_prop = Freq / Total)
-
-TMB_TIL_quadrant_trial_proportions_plot <- 
-quadrant_trial_proportions %>%
-  ggplot(aes(x = quadrant, y = quadrant_prop, fill = Trial)) + geom_col() +
-  scale_fill_manual(values = trial_colors) + theme_Publication() +
-  labs(x = "", y = "", col = "") +
-  guides(fill = guide_legend(nrow = 3)) +
-  coord_flip()
-
-TMB_TIL_quadrant_trial_proportions_plot
-graph2pdf(x = TMB_TIL_quadrant_trial_proportions_plot,
-          file = here(
-            output_dir, "_TMB_TIL_quadrant_trial_proportions_plot.pdf"),
-          colormodel = "rgb",
-          font = "Arial",
-          height = 4,
-          width = 6)
 ```
 
-# Quadrant plots Proliferation TIL score
+## Fig.5g
+## Neoadjuvant Quadrant plots Proliferation TIL score
 
 ```{r}
 # Not filtering for TMB paired samples
-median_Tumor_proliferation_rate_pre <- wes_rna_features_df_pre %>%
-  filter(Treatment == "Pre") %>% pull(Tumor_proliferation_rate) %>% median()
+dim(rna_features_df_plus_wes_pre)
+
+median_til_score_pre <- median(
+  rna_features_df_plus_wes_pre$TIL_score)
+median_til_score_pre
+
+median_Tumor_proliferation_rate_pre <- rna_features_df_plus_wes_pre %>%
+  filter(Treatment == "Pre") %>%
+  pull(Tumor_proliferation_rate) %>%
+  median()
 median_Tumor_proliferation_rate_pre
 
-wes_rna_features_df_pre %>%
+rna_features_df_plus_wes_pre %>%
   filter(Treatment == "Pre") %>% 
   ggplot(aes(x = Tumor_proliferation_rate, y = TIL_score,
              shape = Response, col = Trial)) +
@@ -2408,47 +3491,14 @@ wes_rna_features_df_pre %>%
   geom_hline(yintercept = median_til_score_pre, linetype = "dashed") +
   scale_color_manual(values = trial_colors) +
   guides(col = guide_legend(nrow = 3))
+```
 
-prolif_TIL_quadrant_trial_plot <- wes_rna_features_df_pre %>%
-  ggplot(aes(x = Tumor_proliferation_rate, y = TIL_score,
-             shape = Response, col = Trial)) +
-  geom_point() + theme_Publication() +
-  geom_vline(xintercept = median_Tumor_proliferation_rate_pre,
-             linetype = "dashed") +
-  geom_hline(yintercept = median_til_score_pre, linetype = "dashed") +
-  scale_color_manual(values = trial_colors) +
-  guides(col = guide_legend(nrow = 3)) + facet_wrap(~Response)
 
-prolif_TIL_quadrant_trial_plot
-
-graph2pdf(x = prolif_TIL_quadrant_trial_plot,
-          file = here(output_dir, "_prolif_TIL_quadrant_trial_plot.pdf"),
-          colormodel = "rgb",
-          font = "Arial",
-          height = 5,
-          width = 7)
-
-trial_quadrant_proportions <- table(
-  wes_rna_features_df_pre$Tumor_proliferation_rate > median_Tumor_proliferation_rate_pre,
-  wes_rna_features_df_pre$TIL_score > median_til_score_pre,
-  wes_rna_features_df_pre$Trial) %>%
-  as.data.frame() %>%
-  setNames(c("Prolif_group", "mTIL_group", "Trial", "Freq")) %>%
-  mutate(Prolif_group = ifelse(Prolif_group == TRUE,
-                               "Prolif_high", "Prolif_low")) %>%
-  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
-  group_by(Trial) %>%
-  add_count(Trial, wt = Freq, name = "Total") %>%
-  mutate(quadrant = paste0(Prolif_group, "_", mTIL_group),
-         quadrant_prop = Freq / Total)
-  
-dim(wes_rna_features_df_pre)
-table(wes_rna_features_df_pre$Response)
-
+```{r}
 quadrant_response_proportions <- table(
-  wes_rna_features_df_pre$Tumor_proliferation_rate > median_Tumor_proliferation_rate_pre,
-  wes_rna_features_df_pre$TIL_score > median_til_score_pre,
-  wes_rna_features_df_pre$Response) %>%
+  rna_features_df_plus_wes_pre$Tumor_proliferation_rate > median_Tumor_proliferation_rate_pre,
+  rna_features_df_plus_wes_pre$TIL_score > median_til_score_pre,
+  rna_features_df_plus_wes_pre$Response) %>%
   as.data.frame() %>%
   setNames(c("Prolif_group", "mTIL_group", "Response", "Freq")) %>%
   mutate(Prolif_group = ifelse(Prolif_group == TRUE,
@@ -2471,9 +3521,9 @@ quadrant_response_proportions %>% select(quadrant, Response, Freq) %>%
 
 ```{r}
 trial_quadrant_proportions <- table(
-  wes_rna_features_df_pre$Tumor_proliferation_rate > median_Tumor_proliferation_rate_pre,
-  wes_rna_features_df_pre$TIL_score > median_til_score_pre,
-  wes_rna_features_df_pre$Trial) %>%
+  rna_features_df_plus_wes_pre$Tumor_proliferation_rate > median_Tumor_proliferation_rate_pre,
+  rna_features_df_plus_wes_pre$TIL_score > median_til_score_pre,
+  rna_features_df_plus_wes_pre$Trial) %>%
   as.data.frame() %>%
   setNames(c("Prolif_group", "mTIL_group", "Trial", "Freq")) %>%
   mutate(Prolif_group = ifelse(Prolif_group == TRUE, "Prolif_high", "Prolif_low")) %>%
@@ -2494,9 +3544,9 @@ trial_quadrant_proportions %>%
   guides(fill = guide_legend(nrow = 2))
 
 quadrant_trial_proportions <- table(
-  wes_rna_features_df_pre$Tumor_proliferation_rate > median_Tumor_proliferation_rate_pre,
-  wes_rna_features_df_pre$TIL_score > median_til_score_pre,
-  wes_rna_features_df_pre$Trial) %>%
+  rna_features_df_plus_wes_pre$Tumor_proliferation_rate > median_Tumor_proliferation_rate_pre,
+  rna_features_df_plus_wes_pre$TIL_score > median_til_score_pre,
+  rna_features_df_plus_wes_pre$Trial) %>%
   as.data.frame() %>%
   setNames(c("Prolif_group", "mTIL_group", "Trial", "Freq")) %>%
   mutate(Prolif_group = ifelse(Prolif_group == TRUE,
@@ -2507,9 +3557,9 @@ quadrant_trial_proportions <- table(
   mutate(quadrant_prop = Freq / Total)
 
 quadrant_response_proportions <- table(
-  wes_rna_features_df_pre$Tumor_proliferation_rate > median_Tumor_proliferation_rate_pre,
-  wes_rna_features_df_pre$TIL_score > median_til_score_pre,
-  wes_rna_features_df_pre$Response) %>%
+  rna_features_df_plus_wes_pre$Tumor_proliferation_rate > median_Tumor_proliferation_rate_pre,
+  rna_features_df_plus_wes_pre$TIL_score > median_til_score_pre,
+  rna_features_df_plus_wes_pre$Response) %>%
   as.data.frame() %>%
   setNames(c("Prolif_group", "mTIL_group", "Response", "Freq")) %>%
   mutate(Prolif_group = ifelse(Prolif_group == TRUE,
@@ -2587,21 +3637,12 @@ trial_quadrant_proportions %>% select(quadrant, quadrant_prop, Trial) %>%
   labs(x = "", y = "", col = "") +
   guides(fill = guide_legend(nrow = 2))
 
-ssgsea_wes_results_df %>%
-  filter(Treatment == "Pre") %>% 
+rna_features_df_plus_wes_pre %>%
   ggplot(aes(x = Tumor_proliferation_rate, y = TIL_score,
              shape = Response, col = Trial)) +
   geom_point() + theme_Publication() + facet_wrap(~Response)
 
-ssgsea_wes_results_df %>%
-  filter(Treatment == "Pre") %>% 
-  ggplot(aes(x = Tumor_proliferation_rate, y = TIL_score,
-             shape = Response, col = Trial)) +
-  geom_point() + theme_Publication() + facet_wrap(~Response)
 
-ssgsea_wes_results_df %>%
-  ggplot(aes(x = TIL_score, y = Ayers_T_cell_inflamed)) +
-  geom_point() + theme_Publication()
 ```
 
 ```{r}
@@ -2612,10 +3653,10 @@ wes_rna_features_df_pre_f %>%
   geom_hline(yintercept = median_til_score_pre, linetype = "dashed") +
   scale_x_continuous(trans = "log2") +
   scale_color_manual(values = trial_colors) +
-  guides(col = guide_legend(nrow = 3)) + stat_cor(method = "spearman") +
+  guides(col = guide_legend(nrow = 3)) +
   geom_smooth(method = "lm")
 
-wes_rna_features_df_pre %>% 
+rna_features_df_plus_wes_pre%>% 
   ggplot(aes(x = Tumor_proliferation_rate, y = TIL_score)) +
   geom_point(aes(col = Trial, shape = Response)) + theme_Publication() +
   geom_vline(xintercept = median_Tumor_proliferation_rate_pre,
@@ -2623,85 +3664,410 @@ wes_rna_features_df_pre %>%
   geom_hline(yintercept = median_til_score_pre, linetype = "dashed") +
   scale_x_continuous(trans = "log2") +
   scale_color_manual(values = trial_colors) +
-  guides(col = guide_legend(nrow = 3)) + stat_cor() +
+  guides(col = guide_legend(nrow = 3)) +
   geom_smooth(method = "lm")
 ```
 
-# ----------
-# Extended Data Fig 5
-## B cat vs TIL score correlation
+## Fig.5f
+### Metastatic Quadrant plots TMB TIL score
+
 ```{r}
-wes_rna_features_df_pre$Trial %>% table()
+median_metastatic_til_score_pre <- median(
+  metastatic_wes_rna_features_df_pre$TIL_score)
 
-wes_rna_features_df_pre %>%
-  ggplot(aes(x = B_catenin_signature_Luke_et_al, y = TIL_score)) +
-  geom_point(aes(col = Trial)) + theme_Publication() + stat_cor() +
-  geom_smooth(method = "lm") + scale_color_manual(values = trial_colors)
+# Quadrant RR
+table(metastatic_wes_rna_features_df_pre$TMB_NONSYNONYMOUS >= 10,
+      metastatic_wes_rna_features_df_pre$TIL_score >= median_metastatic_til_score_pre) %>%
+  `rownames<-`(c("TMB-L", "TMB-H")) %>%
+  `colnames<-`( c("mTIL_low", "mTIL_high"))
 
-wes_rna_features_df_pre  %>%
-  filter(!is.na(TMB)) %>%
-  ggplot(aes(x = B_catenin_signature_Luke_et_al, y = TIL_score)) +
-  geom_point(aes(col = Trial)) + theme_Publication() + stat_cor() +
-  geom_smooth(method = "lm") + scale_color_manual(values = trial_colors) +
-  facet_wrap(~ifelse(TMB >= 10, "TMB-high", "TMB-low"))
+metastatic_wes_rna_features_df_pre %>%
+  ggplot(aes(x = log2(TMB), y = TIL_score, shape = Response, col = Trial)) +
+  geom_point() + theme_Publication()
 
-wes_rna_features_df_pre  %>%
-  ggplot(aes(x = Trial, y = B_catenin_signature_Luke_et_al)) +
-  geom_boxplot() +
-  geom_point(aes(col = Trial)) + theme_Publication() +
-  scale_color_manual(values = trial_colors) + facet_wrap(~Response) +
+# Quadrant RR
+table(metastatic_wes_rna_features_df_pre$TMB >= 10,
+      metastatic_wes_rna_features_df_pre$TIL_score >= median_metastatic_til_score_pre) %>%
+  `rownames<-`(c("TMB-L", "TMB-H")) %>%
+  `colnames<-`( c("mTIL_low", "mTIL_high"))
+
+metastatic_quadrant_response_proportions <- table(
+  metastatic_wes_rna_features_df_pre$TMB >= 10,
+  metastatic_wes_rna_features_df_pre$TIL_score > median_metastatic_til_score_pre,
+  metastatic_wes_rna_features_df_pre$Response) %>%
+  as.data.frame() %>%
+  setNames(c("TMB", "mTIL_group", "Response", "Freq")) %>%
+  mutate(TMB_group = ifelse(TMB == TRUE, "TMB_high", "TMB_low")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  mutate(quadrant = paste0(TMB_group, "_", mTIL_group))  %>%
+  group_by(quadrant) %>% add_count(quadrant, wt = Freq, name = "Total") %>%
+  mutate(quadrant_prop = round(Freq / Total, 2))
+
+metastatic_quadrant_response_proportions
+
+metastatic_TMB_TIL_quadrant_response_proportions_plot <- metastatic_quadrant_response_proportions %>%
+  filter(Response == "R") %>%
+  rename(Response_rate = quadrant_prop) %>%
+  ggplot(aes(x = quadrant, y = Response_rate)) + geom_col() +
+  theme_Publication() + labs(x = "") +
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
 
-wes_rna_features_df_pre  %>%
-  mutate(Trial = ifelse(Trial %in% c("NICHE-MSS"), "NICHE-MSS", "Other")) %>%
-  ggplot(aes(x = Trial, y = B_catenin_signature_Luke_et_al)) +
-  geom_boxplot() +
-  geom_point(aes(col = Trial)) + theme_Publication() +
-  scale_color_manual(values = trial_colors)  +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
-```
+metastatic_TMB_TIL_quadrant_response_proportions_plot
 
-```{r, fig.height = 8, fig.width = 8}
-B_cat_til_trial_corr_plot <- wes_rna_features_df_pre %>%
-  ggplot(aes(x = B_catenin_signature_Luke_et_al, y = TIL_score, col = Trial)) +
-  geom_point(aes()) + theme_Publication() + stat_cor(method = "pearson") +
-  geom_smooth(method = "lm") +
-  scale_color_manual(values = trial_colors) + facet_wrap(~Trial) +
-  guides(col = FALSE) +
-  labs(x = "B-catenin signature ssGSEA", y = "TIL score ssGSEA")
-
-B_cat_til_trial_corr_plot
-
-graph2pdf(x = B_cat_til_trial_corr_plot,
-          file = here(output_dir, "_B_cat_til_trial_corr_plot.pdf"),
-          colormodel = "rgb",
-          font = "Arial",
-          height = 7,
-          width = 7)
-
-B_cat_trial_plot <- wes_rna_features_df_pre  %>%
-  ggplot(aes(x = Trial, y = B_catenin_signature_Luke_et_al)) +
-  geom_boxplot() +
-  geom_point(aes(col = Trial)) + theme_Publication() +
-  scale_color_manual(values = trial_colors) +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))+
-  labs(y = "B-catenin signature ssGSEA") +
-  theme(axis.title.x = element_blank()) +
-  guides(col = FALSE)
-
-B_cat_trial_plot
-
-graph2pdf(x = B_cat_trial_plot,
-          file = here(output_dir, "_B_cat_trial_plot.pdf"),
+graph2pdf(x = metastatic_TMB_TIL_quadrant_response_proportions_plot,
+          file = here(
+            output_dir, "_metastatic_TMB_TIL_quadrant_response_proportions_plott.pdf"),
           colormodel = "rgb",
           font = "Arial",
           height = 4,
-          width = 5)
+          width = 4)
+
+metastatic_quadrant_response_proportions %>%
+  select(quadrant, Response, Freq) %>%
+  pivot_wider(names_from = Response, values_from = Freq) %>%
+  column_to_rownames("quadrant") %>%
+  as.matrix() %>%
+  chisq.test()
 ```
 
-## PCA feature sets RNA
+
+## Fig 5h
+### Metastatic Quadrant plots Proliferation TIL score
+
 ```{r}
-pca_data <- read_csv2(here(meta_rna_dir, "pca_data.csv"))
+median_metastatic_Tumor_proliferation_rate_pre <- metastatic_wes_rna_features_df_pre %>%
+  pull(Tumor_proliferation_rate) %>%
+  median()
+median_metastatic_Tumor_proliferation_rate_pre
+
+median_metastatic_til_score_pre <- median(
+  metastatic_wes_rna_features_df_pre$TIL_score)
+median_metastatic_til_score_pre
+```
+
+
+```{r}
+trial_quadrant_proportions <- table(
+  metastatic_wes_rna_features_df_pre$Tumor_proliferation_rate > median_metastatic_Tumor_proliferation_rate_pre, 
+  metastatic_wes_rna_features_df_pre$TIL_score > median_metastatic_til_score_pre,
+  metastatic_wes_rna_features_df_pre$Study) %>%
+  as.data.frame() %>%
+  setNames(c("Prolif_group", "mTIL_group", "Trial", "Freq")) %>%
+  mutate(Prolif_group = ifelse(Prolif_group == TRUE,
+                               "Prolif_high", "Prolif_low")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  group_by(Trial) %>% add_count(Trial, wt = Freq, name = "Total") %>%
+  mutate(quadrant = paste0(Prolif_group, "_", mTIL_group),
+         quadrant_prop = Freq / Total)
+  
+dim(metastatic_wes_rna_features_df_pre)
+
+table(metastatic_wes_rna_features_df_pre$Response)
+
+quadrant_response_proportions <- table(
+  metastatic_wes_rna_features_df_pre$Tumor_proliferation_rate > median_metastatic_Tumor_proliferation_rate_pre,
+  metastatic_wes_rna_features_df_pre$TIL_score > median_metastatic_til_score_pre,
+  metastatic_wes_rna_features_df_pre$Response) %>%
+  as.data.frame() %>%
+  setNames(c("Prolif_group", "mTIL_group", "Response", "Freq")) %>%
+  mutate(Prolif_group = ifelse(Prolif_group == TRUE,
+                               "Prolif_high", "Prolif_low")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  mutate(quadrant = paste0(Prolif_group, "_", mTIL_group))  %>%
+  group_by(quadrant) %>% add_count(quadrant, wt = Freq, name = "Total") %>%
+  mutate(quadrant_prop = round(Freq / Total, 2))
+
+quadrant_response_proportions
+
+quadrant_response_proportions %>%
+  select(quadrant, Response, Freq) %>%
+  pivot_wider(names_from = Response, values_from = Freq) %>%
+  column_to_rownames("quadrant") %>%
+  as.matrix() %>%
+  chisq.test()
+
+metastatic_prolif_TIL_quadrant_response_proportions_plot <- quadrant_response_proportions %>%
+  filter(Response == "R") %>%
+  rename(Response_rate = quadrant_prop) %>%
+  mutate(quadrant = factor(quadrant,
+                           levels = c("Prolif_high_mTIL_high",
+                                      "Prolif_low_mTIL_high",
+                                      "Prolif_high_mTIL_low",
+                                      "Prolif_low_mTIL_low"))) %>%
+  ggplot(aes(x = quadrant, y = Response_rate)) + geom_col() +
+  theme_Publication() + labs(x = "") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+metastatic_prolif_TIL_quadrant_response_proportions_plot
+
+graph2pdf(x = metastatic_prolif_TIL_quadrant_response_proportions_plot,
+          file = here(
+            output_dir, "_metastatic_prolif_TIL_quadrant_response_proportions_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 4,
+          width = 4)
+```
+
+
+
+
+## Fig.5i
+### Novel response signature plots
+### Positive component
+```{r}
+pancan_response_ssgsea_results_df <- read_csv2(
+  here(source_data_dir, "pancan_response_ssgsea_results_df.csv"))
+
+dim(pancan_response_ssgsea_results_df)
+table(pancan_response_ssgsea_results_df$Trial)
+
+n_labels <- pancan_response_ssgsea_results_df %>%
+  group_by(Response) %>%
+  summarise(n = n()) %>%
+mutate(
+  label = paste0(Response, "\n(n = ", n, ")"))
+label_map <- setNames(n_labels$label, n_labels$Response)
+
+neoadjuvant_pancan_positive_response_plot <- pancan_response_ssgsea_results_df %>%
+  ggplot(aes(x = Response, y = pancancer_response_sig_1.25, fill = Response)) +
+  geom_boxplot() +
+  stat_compare_means(method = "wilcox") +
+  theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) + guides(fill = FALSE) +
+  labs(x = "", y = "Pancancer Positive Response\ncomponent ssGSEA score",
+       title = "Neoadjuvant Pancancer") +
+  scale_x_discrete(labels = label_map)+
+  guides(fill = FALSE)
+
+neoadjuvant_pancan_positive_response_plot 
+graph2pdf(x = neoadjuvant_pancan_positive_response_plot,
+          file = here(output_dir,
+                      "_neoadjuvant_pancan_positive_response_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 4.5,
+          width = 4.25)
+```
+
+## Fig.5j
+### Negative component
+
+```{r}
+neoadjuvant_pancan_negative_response_plot <- pancan_response_ssgsea_results_df %>%
+  ggplot(aes(x = Response, y = pancancer_nonresponse_sig_1.25,
+             fill = Response)) +
+  geom_boxplot() +
+  stat_compare_means(method = "wilcox") +
+  theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(x = "", y = "Pancancer Negative Response\ncomponent ssGSEA score",
+       title = "Neoadjuvant Pancancer") +
+  scale_x_discrete(labels = label_map)+
+  guides(fill = FALSE)
+neoadjuvant_pancan_negative_response_plot
+
+graph2pdf(x = neoadjuvant_pancan_negative_response_plot,
+          file = here(output_dir,
+                      "_neoadjuvant_pancan_negative_response_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 4.5,
+          width = 4.25)
+```
+
+## Fig.5k
+### Novel signature score
+
+```{r}
+neoadjuvant_pancan_response_score_plot <- pancan_response_ssgsea_results_df %>%
+  ggplot(aes(x = Response, y = pancancer_response_score, fill = Response)) +
+  geom_boxplot() +
+  stat_compare_means(method = "wilcox") +
+  theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(x = "", y = "Pancancer Response score\nssGSEA delta",
+       title = "Neoadjuvant Pancancer") +
+  scale_x_discrete(labels = label_map) +
+  guides(fill = FALSE)
+
+neoadjuvant_pancan_response_score_plot
+
+graph2pdf(x = neoadjuvant_pancan_response_score_plot,
+          file = here(output_dir,
+                      "_neoadjuvant_pancan_response_score_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 4.5,
+          width = 4.25)
+```
+
+
+## Fig.5l
+### Metastatic External iAtlas Response Sigs
+### Positive component
+```{r}
+dim(metastatic_wes_rna_features_df_pre)
+table(metastatic_wes_rna_features_df_pre$Trial)
+table(metastatic_wes_rna_features_df_pre$Trial,
+      metastatic_wes_rna_features_df_pre$CANCER_TYPE)
+
+n_labels <- metastatic_wes_rna_features_df_pre %>%
+  group_by(Response) %>%
+  summarise(n = n()) %>%
+mutate(
+  label = paste0(Response, "\n(n = ", n, ")"))
+label_map <- setNames(n_labels$label, n_labels$Response)
+
+metastatic_pancan_positive_response_plot <- metastatic_wes_rna_features_df_pre %>%
+  ggplot(aes(x = Response, y = pancancer_response_sig_1.25, fill = Response)) +
+  geom_boxplot() +
+  stat_compare_means(method = "wilcox") +
+  theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) + guides(fill = FALSE) +
+  labs(x = "", y = "Pancancer Positive Response\ncomponent ssGSEA score",
+       title = "iATLAS ICB Pancancer") +
+  scale_x_discrete(labels = label_map) +
+  guides(fill = FALSE)
+
+metastatic_pancan_positive_response_plot 
+graph2pdf(x = metastatic_pancan_positive_response_plot,
+          file = here(output_dir,
+                      "_metastatic_pancan_positive_response_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 4.5,
+          width = 4.25)
+```
+
+## Fig.5m
+### Negative component
+
+```{r}
+metastatic_pancan_negative_response_plot <- metastatic_wes_rna_features_df_pre %>%
+  ggplot(aes(x = Response, y = pancan_nonresponse_signature_1.25,
+             fill = Response)) +
+  geom_boxplot() +
+  stat_compare_means(method = "wilcox") +
+  theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(x = "", y = "Pancancer Negative Response\ncomponent ssGSEA score",
+       title = "iATLAS ICB Pancancer") +
+  scale_x_discrete(labels = label_map)+
+  guides(fill = FALSE)
+
+metastatic_pancan_negative_response_plot
+
+graph2pdf(x = metastatic_pancan_negative_response_plot,
+          file = here(output_dir,
+                      "_metastatic_pancan_negative_response_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 4.5,
+          width = 4.25)
+```
+
+
+## Fig.5n
+### Novel signature score
+
+```{r}
+metastatic_pancan_response_score_plot <- metastatic_wes_rna_features_df_pre %>%
+  ggplot(aes(x = Response, y = pancancer_response_score, fill = Response)) +
+  geom_boxplot() +
+  stat_compare_means(method = "wilcox") +
+  theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(x = "", y = "Pancancer Response score\nssGSEA delta",
+       title = "iATLAS ICB Pancancer") +
+  scale_x_discrete(labels = label_map) +
+  guides(fill = FALSE)
+
+metastatic_pancan_response_score_plot
+
+graph2pdf(x = metastatic_pancan_response_score_plot,
+          file = here(output_dir,
+                      "_metastatic_pancan_response_score_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 4.5,
+          width = 4.25)
+```
+
+```{r}
+neoadjuvant_ssgsea_c <- read_csv2(
+  here(source_data_dir, "neoadjuvant_ssgsea_c.csv"))
+
+dim(neoadjuvant_ssgsea_c)
+table(neoadjuvant_ssgsea_c$Trial)
+table(neoadjuvant_ssgsea_c$Trial,
+      neoadjuvant_ssgsea_c$Response)
+
+n_labels <- neoadjuvant_ssgsea_c %>%
+  group_by(Response) %>%
+  summarise(n = n()) %>%
+mutate(
+  label = paste0(Response, "\n(n = ", n, ")"))
+label_map <- setNames(n_labels$label, n_labels$Response)
+
+neoadjuvant_ssgsea_c
+neoadjuvant_ssgsea_c_pancan_response_score_plot <- neoadjuvant_ssgsea_c %>%
+  ggplot(aes(x = Response, y = pancancer_response_score, fill = Response)) +
+  geom_boxplot() +
+  stat_compare_means(method = "wilcox") +
+  theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(x = "", y = "NKI pancancer signature\nssGSEA score delta",
+       title = "nICB+/-chemo\n(ABACUS, I-SPY2, PANDA)") +
+  scale_x_discrete(labels = label_map) +
+  guides(fill = FALSE)
+
+neoadjuvant_ssgsea_c_pancan_response_score_plot
+
+graph2pdf(x = neoadjuvant_ssgsea_c_pancan_response_score_plot,
+          file = here(output_dir,
+                      "_neoadjuvant_ssgsea_c_pancan_response_score_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 4.5,
+          width = 4.25)
+
+```
+
+## Fig.5k
+### Novel signature score
+
+```{r}
+neoadjuvant_external_pancan_response_score_plot <- neoadjuvant_ssgsea_c %>%
+  ggplot(aes(x = Response, y = pancancer_response_score, fill = Response)) +
+  geom_boxplot() +
+  stat_compare_means(method = "wilcox") +
+  theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(x = "", y = "Pancancer Response score\nssGSEA delta",
+       title = "Neoadjuvant Pancancer") +
+  scale_x_discrete(labels = label_map) +
+  guides(fill = FALSE)
+
+neoadjuvant_pancan_response_score_plot
+
+graph2pdf(x = neoadjuvant_pancan_response_score_plot,
+          file = here(output_dir,
+                      "_neoadjuvant_pancan_response_score_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 4.5,
+          width = 4.5)
+```
+
+
+# ----------
+# Extended Data Fig. 6
+
+
+## Extended Data Fig. 6a
+### PCA feature sets RNA
+```{r}
+pca_data <- read_csv2(here(source_data_dir, "pca_data.csv"))
 
 pc1_var <- 44
 pc2_var <- 18
@@ -2729,119 +4095,9 @@ graph2pdf(x = pca_rna_trial_plot,
           width = 6)
 ```
 
-## PCA feature sets pathway mutations
+## Extended Data Fig. 6b
 
-```{r}
-colnames(pathway_level_mutation_m)
-
-pathway_level_mutation_z_norm <- pathway_level_mutation_m[
-  rowSums(pathway_level_mutation_m) != 0,
-  str_detect(colnames(pathway_level_mutation_m),
-             "SIGPW|GIE_IFNy|GIE_AP")] %>% scale()
-dim(pathway_level_mutation_z_norm)
-pca <- prcomp(pathway_level_mutation_z_norm)
-
-percent_var <- pca$sdev^2 / sum(pca$sdev^2)
-
-percent_var <- percent_var %>%
-  as.data.frame() %>%
-  setNames("Var_exp") %>%
-  rownames_to_column("PC") %>%
-  mutate(Cumvar = cumsum(Var_exp), PC = as.numeric(PC))
-percent_var_pc1 <- round(percent_var[1, 2], 2) * 100
-percent_var_pc2 <- round(percent_var[2, 2], 2) * 100
-
-pca_data <- as.data.frame(pca$x) %>%
-  rownames_to_column("Patient") %>%
-  left_join(dna_metadata_f)
-  
-pca_mutations_trial_plot <- pca_data %>%
-  ggplot(aes(x = PC1, y = PC2, col = Trial, shape = Response)) +
-  geom_point() +
-  theme_Publication()  +
-  guides(col = guide_legend(nrow = 3, byrow = TRUE),
-         shape = guide_legend(nrow = 2, byrow = TRUE)) +
-  labs(x = sprintf("PC1: %s%% variance", percent_var_pc1),
-       y = sprintf("PC2: %s%% variance", percent_var_pc2)) +
-  scale_color_manual(values = trial_colors) +
-  labs(col = "") +
-  theme(legend.spacing.x = unit(0.3, "cm"))
-
-pca_mutations_trial_plot
-graph2pdf(x = pca_mutations_trial_plot,
-          file = here(output_dir, "_pca_mutations_trial_plot.pdf"),
-          colormodel = "rgb",
-          font = "Arial",
-          height = 6,
-          width = 6)
-
-```
-
-##  PCA feature sets WES RNA
-```{r}
-pca_wes_rna_features <- c("TMB",
-                          colnames(pathway_level_mutation_m)[
-                            str_detect(colnames(pathway_level_mutation_m),
-                                       "SIGPW|GIE_IFNy|GIE_AP")],
-                          unique(meta_rna_combined_effects$Signature))
-
-wes_rna_features_m <- wes_rna_features_df_pre %>%
-  filter(!is.na(TMB)) %>%
-  left_join(pathway_level_mutation_df %>%
-              select(Patient,
-                     colnames(pathway_level_mutation_m)[
-                       str_detect(colnames(pathway_level_mutation_m),
-                                  "SIGPW|GIE_IFNy|GIE_AP")])) %>%
-  select(Patient, pca_wes_rna_features) %>%
-  column_to_rownames("Patient") %>% 
-  mutate_all(as.numeric) %>%
-  as.matrix()
-
-dim(wes_rna_features_m)
-
-wes_rna_features_m[is.na(wes_rna_features_m)] <- 0 
-wes_rna_features_z_norm <- wes_rna_features_m %>% scale()
-
-dim(wes_rna_features_z_norm)
-pca <- prcomp(wes_rna_features_z_norm)
-
-percent_var <- pca$sdev^2 / sum(pca$sdev^2)
-
-percent_var <- percent_var %>%
-  as.data.frame() %>%
-  setNames("Var_exp") %>%
-  rownames_to_column("PC") %>%
-  mutate(Cumvar = cumsum(Var_exp), PC = as.numeric(PC))
-percent_var_pc1 <- round(percent_var[1, 2], 2) * 100
-percent_var_pc2 <- round(percent_var[2, 2], 2) * 100
-
-pca_data <- as.data.frame(pca$x) %>%
-  rownames_to_column("Patient") %>%
-  left_join(dna_metadata_f)
-  
-pca_wes_rna_trial_plot <- pca_data %>%
-  ggplot(aes(x = PC1, y = PC2, col = Trial, shape = Response)) +
-  geom_point() +
-  theme_Publication()  +
-  guides(col = guide_legend(nrow = 3, byrow = TRUE),
-         shape = guide_legend(nrow = 2, byrow = TRUE)) +
-  labs(x = sprintf("PC1: %s%% variance", percent_var_pc1),
-       y = sprintf("PC2: %s%% variance", percent_var_pc2)) +
-  scale_color_manual(values = trial_colors) +
-  labs(col = "") +
-  theme(legend.spacing.x = unit(0.3, "cm"))
-
-pca_wes_rna_trial_plot
-graph2pdf(x = pca_wes_rna_trial_plot,
-          file = here(output_dir, "_pca_wes_rna_trial_plot.pdf"),
-          colormodel = "rgb",
-          font = "Arial",
-          height = 6,
-          width = 6)
-
-```
-
-##  PCA feature sets RNA signatures 
+###  PCA feature sets RNA signatures 
 ```{r}
 pca_rna_features <- c(unique(meta_rna_combined_effects$Signature))
 dim(wes_rna_features_df_pre)
@@ -2893,37 +4149,35 @@ graph2pdf(x = pca_rna_sig_trial_plot,
 
 ```
 
-# WES RNA 2
+
+## Extended Data Fig. 6c
+
+###  PCA feature sets WES RNA
 ```{r}
-wes_features_log_or
-wes_features_df %>% select(unique(meta_studies_results$Variable))
-wes_features_df %>% select(unique(meta_log_or_combined_effects_random_effects$feature))
+# pca_wes_rna_features <- c("TMB",
+#                           colnames(pathway_level_mutation_m)[
+#                             str_detect(colnames(pathway_level_mutation_m),
+#                                        "SIGPW|GIE_IFNy|GIE_AP")],
+#                           unique(meta_rna_combined_effects$Signature))
 
-wes_rna_features_df2 <- wes_features_df %>%
-  left_join(wes_rna_features_df %>%
-              filter(Treatment == "Pre") %>%
-  filter(!is.na(TMB)) %>%
-    select(Patient, unique(meta_rna_combined_effects$Signature)))
+pca_wes_rna_features <- unique(
+  c(smd_variable_order, log_or_variable_order, signature_variable_order))
+length(pca_wes_rna_features)
 
-wes_rna_features_df %>%
-  left_join(pathway_level_mutation_df %>%
-              select(Patient, colnames(pathway_level_mutation_m)[str_detect(colnames(pathway_level_mutation_m), "SIGPW|GIE_IFNy|GIE_AP")])) %>% select(unique(meta_log_or_combined_effects_random_effects$feature))
-
-unique(meta_log_or_combined_effects_random_effects$feature)
-
-pca_wes_rna_features <- c(unique(meta_studies_results$Variable),
-                          unique(meta_log_or_combined_effects_random_effects$feature),
-                          unique(meta_rna_combined_effects$Signature))
-
-wes_rna_features_m <- wes_rna_features_df2 %>%
-  filter(!is.na(TMB))  %>%
-  filter(!is.na(CXCL13)) %>% select(Patient, pca_wes_rna_features) %>%
+wes_rna_features_m <- wes_rna_features_df_pre_f %>%
+  # left_join(pathway_level_mutation_df %>%
+  #             select(Patient,
+  #                    colnames(pathway_level_mutation_m)[
+  #                      str_detect(colnames(pathway_level_mutation_m),
+  #                                 "SIGPW|GIE_IFNy|GIE_AP")])) %>%
+  select(Patient, pca_wes_rna_features) %>%
   column_to_rownames("Patient") %>% 
   mutate_all(as.numeric) %>%
   as.matrix()
 
+dim(wes_rna_features_m)
+
 wes_rna_features_m[is.na(wes_rna_features_m)] <- 0 
-# pathway_level_mutation_m <- pathway_level_mutation_m[, ]
 wes_rna_features_z_norm <- wes_rna_features_m %>% scale()
 
 dim(wes_rna_features_z_norm)
@@ -2962,74 +4216,107 @@ graph2pdf(x = pca_wes_rna_trial_plot,
           font = "Arial",
           height = 6,
           width = 6)
+
 ```
 
+
+## Extended Data Fig. 6d
+### External iATLAS metastatic metadata plots
 ```{r}
-wes_rna_features_df_pre_f %>%
-  ggplot(aes(x = log2(TMB), y = TIL_score, shape = Response, col = Trial)) +
-  geom_point() + theme_Publication()
 
-# Quadrant RR
-table(wes_rna_features_df_pre_f$TMB >= 10,
-      wes_rna_features_df_pre_f$TIL_score >= median_til_score_pre) %>%
-  `rownames<-`(c("TMB-L", "TMB-H")) %>%
-  `colnames<-`( c("mTIL_low", "mTIL_high"))
-
-quadrant_response_proportions %>%
-  select(quadrant, Response, Freq) %>%
-  pivot_wider(names_from = Response, values_from = Freq) %>%
-  chisq.test()
-
-quadrant_response_proportions <- table(
-  wes_rna_features_df_pre_f$TMB >= 10,
-  wes_rna_features_df_pre_f$TIL_score > median_til_score_pre,
-  wes_rna_features_df_pre_f$Response) %>%
-  as.data.frame() %>%
-  setNames(c("TMB", "mTIL_group", "Response", "Freq")) %>%
-  mutate(TMB_group = ifelse(TMB == TRUE, "TMB_high", "TMB_low")) %>%
-  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
-  mutate(quadrant = paste0(TMB_group, "_", mTIL_group))  %>%
-  group_by(quadrant) %>% add_count(quadrant, wt = Freq, name = "Total") %>%
-  mutate(quadrant_prop = round(Freq / Total, 2))
-
-quadrant_response_proportions
-
-quadrant_response_proportions %>%
-  write_csv2(here(output_dir, "quadrant_response_proportions_tmb_til.csv"))
-
-TMB_TIL_quadrant_response_proportions <- read_csv2(
-  here(output_dir, "quadrant_response_proportions_tmb_til.csv")) 
-
-TMB_TIL_quadrant_chisq <- quadrant_response_proportions %>%
-  select(quadrant, Response, Freq) %>%
-  pivot_wider(names_from = Response, values_from = Freq) %>%
-  column_to_rownames("quadrant") %>%
-  as.matrix() %>%
-  chisq.test()
-TMB_TIL_quadrant_chisq
-
-TMB_TIL_quadrant_response_proportions_plot <- quadrant_response_proportions %>%
-  filter(Response == "R") %>%
-  rename(Response_rate = quadrant_prop) %>%
-  ggplot(aes(x = quadrant, y = Response_rate)) + geom_col() +
-  theme_Publication() + labs(x = "") +
+external_metadata_n_patients_trial_plot <- table(
+  metastatic_wes_rna_features_df_pre$Study,
+  metastatic_wes_rna_features_df_pre$CANCER_TYPE) %>%
+  as.data.frame()  %>%
+  setNames(c("Study", "CANCER_TYPE", "Freq"))  %>%
+  ggplot(aes(x = reorder(CANCER_TYPE, Freq), y = Freq, fill = Study)) +
+  geom_col() + theme_Publication() +
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
-  geom_text(aes(x = 3, y = 0.8, label = label),
-                data = broom::tidy(TMB_TIL_quadrant_chisq) %>%
-                  mutate(label = sprintf("X2 = %s; P = %s",
-                                         round(statistic, 1), round(p.value, 9)))
-                ) +
-  labs(y = "Response rate") + theme(axis.title.x = element_blank())
+  guides(fill = guide_legend(nrow = 3)) +
+  coord_flip() +
+  labs(x = "", y = "Number of patients",
+       title = "iATLAS ICB Pancancer") +
+  theme(text = element_text(family = "Arial")) +
+  scale_fill_manual(values = itlas_trial_label_colors)
 
-TMB_TIL_quadrant_response_proportions_plot
-graph2pdf(x = TMB_TIL_quadrant_response_proportions_plot,
-          file = here(
-            output_dir, "_TMB_TIL_quadrant_response_proportions_plot.pdf"),
+external_metadata_n_patients_trial_plot
+
+graph2pdf(x = external_metadata_n_patients_trial_plot,
+          file = here(output_dir,
+                      "_external_metadata_n_patients_trial_plot.pdf"),
           colormodel = "rgb",
           font = "Arial",
-          height = 4,
-          width = 4)
+          height = 4.5, width = 6.5)
 
+```
+
+
+## Extended Fig. 6e (6h)
+### Neoadjuvant TMB TIL continuous distribution
+
+```{r}
+median_til_score_pre <- median(
+  rna_features_df_plus_wes_pre$TIL_score)
+median_til_score_pre
+
+wes_rna_features_df_pre_f %>% 
+  ggplot(aes(x = TMB, y = TIL_score, shape = Response, col = Trial)) +
+  geom_point() + theme_Publication() +
+  geom_vline(xintercept = 10, linetype = "dashed") +
+  geom_hline(yintercept = median_til_score_pre, linetype = "dashed") +
+  scale_x_continuous(trans = "log2") +
+  scale_color_manual(values = trial_colors) +
+  guides(col = guide_legend(nrow = 3))
+
+TMB_TIL_quadrant_trial_plot <- wes_rna_features_df_pre_f %>% 
+  ggplot(aes(x = TMB, y = TIL_score, shape = Response, col = Trial)) +
+  geom_point() + theme_Publication() + facet_wrap(~Response) +
+  geom_vline(xintercept = 10, linetype = "dashed") +
+  geom_hline(yintercept = median_til_score_pre, linetype = "dashed")  +
+  scale_x_continuous(trans = "log2") +
+  scale_color_manual(values = trial_colors) +
+  guides(col = guide_legend(nrow = 3))
+
+TMB_TIL_quadrant_trial_plot
+
+graph2pdf(x = TMB_TIL_quadrant_trial_plot,
+          file = here(output_dir, "_TMB_TIL_quadrant_trial_continuous_distribution_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 5,
+          width = 7)
+
+```
+
+## Extended Data Fig. 6f (6x)
+### Neoadjuvant Prolif TIL continuous distribution plot
+```{r}
+prolif_TIL_quadrant_trial_plot <- rna_features_df_plus_wes_pre %>%
+  ggplot(aes(x = Tumor_proliferation_rate, y = TIL_score,
+             shape = Response, col = Trial)) +
+  geom_point() + theme_Publication() +
+  geom_vline(xintercept = median_Tumor_proliferation_rate_pre,
+             linetype = "dashed") +
+  geom_hline(yintercept = median_til_score_pre, linetype = "dashed") +
+  scale_color_manual(values = trial_colors) +
+  guides(col = guide_legend(nrow = 3)) + facet_wrap(~Response)
+
+prolif_TIL_quadrant_trial_plot
+
+graph2pdf(x = prolif_TIL_quadrant_trial_plot,
+          file = here(
+            output_dir,
+            "_prolif_TIL_quadrant_trial_continuous_distribution_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 5,
+          width = 7)
+```
+
+## Extended Data Fig. 6g (6x)
+### Neoadjuvant TMB TIL quadrant trial proportions
+
+```{r}
 trial_quadrant_proportions <- table(
   wes_rna_features_df_pre_f$TMB >= 10,
   wes_rna_features_df_pre_f$TIL_score > median_til_score_pre,
@@ -3062,8 +4349,7 @@ quadrant_trial_proportions <- table(
   group_by(quadrant) %>% add_count(quadrant, wt = Freq, name = "Total") %>%
   mutate(quadrant_prop = Freq / Total)
 
-TMB_TIL_quadrant_trial_proportions_plot <- 
-quadrant_trial_proportions %>%
+TMB_TIL_quadrant_trial_proportions_plot <- quadrant_trial_proportions %>%
   ggplot(aes(x = quadrant, y = quadrant_prop, fill = Trial)) + geom_col() +
   scale_fill_manual(values = trial_colors) + theme_Publication() +
   labs(x = "", y = "", col = "") +
@@ -3071,6 +4357,7 @@ quadrant_trial_proportions %>%
   coord_flip()
 
 TMB_TIL_quadrant_trial_proportions_plot
+
 graph2pdf(x = TMB_TIL_quadrant_trial_proportions_plot,
           file = here(
             output_dir, "_TMB_TIL_quadrant_trial_proportions_plot.pdf"),
@@ -3079,6 +4366,1274 @@ graph2pdf(x = TMB_TIL_quadrant_trial_proportions_plot,
           height = 4,
           width = 6)
 ```
+
+## Extended Data Fig. 6h (6x)
+### Neoadjuvant Prolif TIL quadrant trial proportions
+
+```{r}
+median_til_score_pre <- median(
+  rna_features_df_plus_wes_pre$TIL_score)
+median_til_score_pre
+
+median_Tumor_proliferation_rate_pre <- rna_features_df_plus_wes_pre %>%
+  filter(Treatment == "Pre") %>%
+  pull(Tumor_proliferation_rate) %>%
+  median()
+median_Tumor_proliferation_rate_pre
+
+trial_quadrant_proportions <- table(
+  rna_features_df_plus_wes_pre$Tumor_proliferation_rate > median_Tumor_proliferation_rate_pre,
+  rna_features_df_plus_wes_pre$TIL_score > median_til_score_pre,
+  rna_features_df_plus_wes_pre$Trial) %>%
+  as.data.frame() %>%
+  setNames(c("Prolif_group", "mTIL_group", "Trial", "Freq")) %>%
+  mutate(Prolif_group = ifelse(Prolif_group == TRUE,
+                               "Prolif_high", "Prolif_low")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  group_by(Trial) %>%
+  add_count(Trial, wt = Freq, name = "Total") %>%
+  mutate(quadrant = paste0(Prolif_group, "_", mTIL_group),
+         quadrant_prop = Freq / Total)
+  
+dim(rna_features_df_plus_wes_pre)
+table(rna_features_df_plus_wes_pre$Response)
+```
+
+
+## Add Extended Fig 6x (6g) metastatic TMB TIL continuous distributions
+
+```{r}
+metastatic_wes_rna_features_df_pre$Response %>% table()
+metastatic_wes_rna_features_df_pre_f <- metastatic_wes_rna_features_df_pre %>% filter(!is.na(TMB))
+metastatic_wes_rna_features_df_pre_f$Response %>% table()
+
+metastatic_wes_rna_features_df_pre %>% 
+  ggplot(aes(x = TMB, y = TIL_score, shape = Response, col = Trial)) +
+  geom_point() + theme_Publication() +
+  geom_vline(xintercept = 10, linetype = "dashed") +
+  geom_hline(yintercept = median_metastatic_til_score_pre, linetype = "dashed") +
+  scale_x_continuous(trans = "log2") +
+  guides(col = guide_legend(nrow = 3)) +
+  scale_color_manual(values = itlas_trial_label_colors)
+
+metastatic_TMB_TIL_quadrant_trial_plot <- metastatic_wes_rna_features_df_pre %>% 
+  ggplot(aes(x = TMB, y = TIL_score, shape = Response, col = Trial)) +
+  geom_point() + theme_Publication() + facet_wrap(~Response) +
+  geom_vline(xintercept = 10, linetype = "dashed") +
+  geom_hline(yintercept = median_metastatic_til_score_pre, linetype = "dashed")  +
+  scale_x_continuous(trans = "log2") +
+  guides(col = guide_legend(nrow = 3)) +
+  scale_color_manual(values = itlas_trial_label_colors)
+
+metastatic_TMB_TIL_quadrant_trial_plot
+
+graph2pdf(x = metastatic_TMB_TIL_quadrant_trial_plot,
+          file = here(output_dir, "_metastatic_TMB_TIL_quadrant_trial_distribution_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 5,
+          width = 7)
+```
+
+## Add Extended Data Fig. 6x (6h) metastatic prolif TIL continuous distribution plot
+```{r}
+metastatic_wes_rna_features_df_pre$Response %>% table()
+
+metastatic_prolif_TIL_quadrant_trial_plot <- metastatic_wes_rna_features_df_pre %>%
+  ggplot(aes(x = Tumor_proliferation_rate, y = TIL_score,
+             shape = Response, col = Study)) +
+  geom_point() + theme_Publication() +
+  geom_vline(xintercept = median_metastatic_Tumor_proliferation_rate_pre,
+             linetype = "dashed") +
+  geom_hline(yintercept = median_metastatic_til_score_pre, linetype = "dashed") +
+  guides(col = guide_legend(nrow = 3)) + facet_wrap(~Response) +
+    scale_color_manual(values = itlas_trial_label_colors)
+
+metastatic_prolif_TIL_quadrant_trial_plot
+
+graph2pdf(x = metastatic_prolif_TIL_quadrant_trial_plot,
+          file = here(output_dir, "_metastatic_prolif_TIL_quadrant_trial_distribution_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 5,
+          width = 7)
+```
+
+
+## Add Extended Data Fig. 6x metastatic trial proportions
+```{r}
+trial_quadrant_proportions <- table(
+  metastatic_wes_rna_features_df_pre$Tumor_proliferation_rate > median_metastatic_Tumor_proliferation_rate_pre,
+  metastatic_wes_rna_features_df_pre$TIL_score > median_metastatic_til_score_pre,
+  metastatic_wes_rna_features_df_pre$Study) %>%
+  as.data.frame() %>%
+  setNames(c("Prolif_group", "mTIL_group", "Trial", "Freq")) %>%
+  mutate(Prolif_group = ifelse(Prolif_group == TRUE,
+                               "Prolif_high", "Prolif_low")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  group_by(Trial) %>% add_count(Trial, wt = Freq, name = "Total") %>%
+  mutate(quadrant = paste0(Prolif_group, "_", mTIL_group),
+         quadrant_prop = Freq / Total)
+  
+trial_quadrant_proportions
+
+trial_quadrant_proportions %>%
+  select(quadrant, quadrant_prop, Trial) %>%
+  ggplot(aes(x = Trial, y = quadrant_prop, fill = quadrant)) +
+  geom_col() +
+  theme_Publication() +
+  coord_flip() +
+  labs(x = "", y = "", col = "") +
+  guides(fill = guide_legend(nrow = 2))
+
+metastatic_prolif_TIL_quadrant_trial_proportions_plot <- trial_quadrant_proportions %>%
+  select(quadrant, quadrant_prop, Trial) %>%
+  ggplot(aes(x = Trial, y = quadrant_prop, fill = quadrant)) +
+  geom_col() +
+  theme_Publication() +
+  coord_flip() +
+  labs(x = "", y = "", col = "") +
+  guides(fill = guide_legend(nrow = 2))
+
+metastatic_prolif_TIL_quadrant_trial_proportions_plot
+
+graph2pdf(x = metastatic_prolif_TIL_quadrant_trial_proportions_plot,
+          file = here(
+            output_dir,
+            "_metastatic_prolif_TIL_quadrant_trial_proportions_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 4,
+          width = 6)
+
+trial_quadrant_proportions <- table(
+  metastatic_wes_rna_features_df_pre$Tumor_proliferation_rate > median_metastatic_Tumor_proliferation_rate_pre,
+  metastatic_wes_rna_features_df_pre$TIL_score > median_metastatic_til_score_pre,
+  metastatic_wes_rna_features_df_pre$Study) %>%
+  as.data.frame() %>%
+  setNames(c("Prolif_group", "mTIL_group", "Trial", "Freq")) %>%
+  mutate(Prolif_group = ifelse(Prolif_group == TRUE,
+                               "Prolif_high", "Prolif_low")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  group_by(Trial) %>% add_count(Trial, wt = Freq, name = "Total") %>%
+  mutate(quadrant = paste0(Prolif_group, "_", mTIL_group),
+         quadrant_prop = Freq / Total)
+  
+quadrant_trial_proportions <- table(
+  metastatic_wes_rna_features_df_pre$Tumor_proliferation_rate > median_metastatic_Tumor_proliferation_rate_pre,
+  metastatic_wes_rna_features_df_pre$TIL_score > median_metastatic_til_score_pre,
+  metastatic_wes_rna_features_df_pre$Study) %>%
+  as.data.frame() %>%
+  setNames(c("Prolif_group", "mTIL_group", "Trial", "Freq")) %>%
+  mutate(Prolif_group = ifelse(Prolif_group == TRUE,
+                               "Prolif_high", "Prolif_low")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  mutate(quadrant = paste0(Prolif_group, "_", mTIL_group)) %>%
+  group_by(quadrant) %>% add_count(quadrant, wt = Freq, name = "Total") %>%
+  mutate(quadrant_prop = Freq / Total)
+
+
+metastatic_prolif_TIL_quadrant_trial_proportions_plot <- quadrant_trial_proportions %>%
+  ggplot(aes(x = quadrant, y = quadrant_prop, fill = Trial)) + geom_col() +
+  theme_Publication() +
+  labs(x = "", y = "", col = "") +
+  guides(fill = guide_legend(nrow = 3)) +
+  coord_flip() +
+  scale_fill_manual(values = itlas_trial_label_colors)
+
+metastatic_prolif_TIL_quadrant_trial_proportions_plot
+graph2pdf(x = metastatic_prolif_TIL_quadrant_trial_proportions_plot,
+          file = here(
+            output_dir,
+            "_metastatic_prolif_TIL_quadrant_trial_proportions_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 4,
+          width = 6)
+```
+
+
+## Add Extended Fig 6x metastatic TMB TIL trial proportions
+```{r}
+trial_quadrant_proportions <- table(
+  metastatic_wes_rna_features_df_pre$TMB >= 10,
+  metastatic_wes_rna_features_df_pre$TIL_score > median_metastatic_til_score_pre,
+  metastatic_wes_rna_features_df_pre$Trial) %>%
+  as.data.frame() %>%
+  setNames(c("TMB_group", "mTIL_group", "Trial", "Freq")) %>%
+  mutate(TMB_group = ifelse(TMB_group == TRUE, "TMB-H", "TMB-L")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  group_by(Trial) %>% add_count(Trial, wt = Freq, name = "Total") %>%
+  mutate(quadrant = paste0(TMB_group, "_", mTIL_group),
+         quadrant_prop = Freq / Total)
+  
+trial_quadrant_proportions %>%
+  select(quadrant, quadrant_prop, Trial) %>%
+  filter(!Trial %in% c("gbm_iatlas_prins_2019", "mel_iatlas_gide_2019")) %>%
+  ggplot(aes(x = Trial, y = quadrant_prop, fill = quadrant)) +
+  geom_col() +
+  theme_Publication() +
+  coord_flip() +
+  labs(x = "", y = "", col = "") +
+  guides(fill = guide_legend(nrow = 2))
+
+metastatic_quadrant_trial_proportions <- table(
+  metastatic_wes_rna_features_df_pre$TMB >= 10,
+  metastatic_wes_rna_features_df_pre$TIL_score > median_metastatic_til_score_pre,
+  metastatic_wes_rna_features_df_pre$Trial) %>%
+  as.data.frame() %>%
+  setNames(c("TMB_group", "mTIL_group", "Trial", "Freq")) %>%
+  mutate(TMB_group = ifelse(TMB_group == TRUE, "TMB-H", "TMB-L")) %>%
+  mutate(mTIL_group = ifelse(mTIL_group == TRUE, "mTIL_high", "mTIL_low")) %>%
+  mutate(quadrant = paste0(TMB_group, "_", mTIL_group)) %>%
+  group_by(quadrant) %>% add_count(quadrant, wt = Freq, name = "Total") %>%
+  mutate(quadrant_prop = Freq / Total)
+
+metastatic_TMB_TIL_quadrant_trial_proportions_plot <- metastatic_quadrant_trial_proportions %>%
+  filter(!Trial %in% c("gbm_iatlas_prins_2019", "mel_iatlas_gide_2019")) %>%
+  ggplot(aes(x = quadrant, y = quadrant_prop, fill = Trial)) + geom_col() +
+  theme_Publication() +
+  labs(x = "", y = "", col = "") +
+  guides(fill = guide_legend(nrow = 3)) +
+  coord_flip() +
+  scale_fill_manual(values = itlas_trial_label_colors)
+
+metastatic_TMB_TIL_quadrant_trial_proportions_plot
+
+metastatic_TMB_TIL_quadrant_trial_proportions_plot
+graph2pdf(x = metastatic_TMB_TIL_quadrant_trial_proportions_plot,
+          file = here(
+            output_dir,
+            "_metastatic_TMB_TIL_quadrant_trial_proportions_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 4,
+          width = 6)
+```
+
+# ----------
+# Extended Data Fig. 7
+## Extended Data Fig. 7a
+### Positive Response Degs
+```{r, fig.height = 8, fig.width = 8}
+
+deseq_r1_c <- read_csv2(here(source_data_dir, "deseq_r1_c.csv"))
+deseq_r1_meta_df <- read_csv2(here(source_data_dir, "deseq_r1_meta_df.csv"))
+
+pancan_response_signature_1.25 <- read_csv2(
+  here(source_data_dir, "pancan_response_signature_1.25.csv"))
+
+pancan_nonresponse_signature_1.25 <- read_csv2(
+  here(source_data_dir, "pancan_nonresponse_signature_1.25.csv"))
+
+positive_response_component_deg_plot <- deseq_r1_c %>%
+  filter(gene %in% pancan_response_signature_1.25$gene) %>%
+  left_join(deseq_r1_meta_df %>%
+              select(gene, n_responder_enrichment,
+                     n_nresponder_enrichment, mean_log2fc)) %>%
+  ggplot(aes(x = reorder(gene, mean_log2fc),
+             y = log2FoldChange, col = Trial)) +
+  geom_point() +
+  geom_point(aes(x = gene, y = mean_log2fc, col = "black"),
+             shape = 5,
+             data = deseq_r1_meta_df %>%
+               filter(gene %in% pancan_response_signature_1.25$gene)) +
+  geom_hline(yintercept = 0) +
+  theme_Publication() + coord_flip() +
+  scale_color_manual(values = trial_colors_combined) +
+  geom_hline(yintercept = log2(1.25), linetype = "dashed") +
+  labs(x = "")
+
+positive_response_component_deg_plot
+
+graph2pdf(x = positive_response_component_deg_plot,
+          file = here(
+            output_dir,
+            "_positive_response_component_deg_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 8,
+          width = 6)
+```
+
+## Extended Data Fig. 7b
+### Negative Response Degs
+
+```{r, fig.height = 8, fig.width = 8}
+
+negative_response_component_deg_plot <- deseq_r1_c %>%
+  filter(gene %in% pancan_nonresponse_signature_1.25$gene) %>%
+  left_join(deseq_r1_meta_df %>%
+              select(gene, n_responder_enrichment,
+                     n_nresponder_enrichment, mean_log2fc)) %>%
+  ggplot(aes(x = reorder(gene, mean_log2fc),
+             y = log2FoldChange, col = Trial)) +
+  geom_point() +
+  geom_point(aes(x = gene, y = mean_log2fc, col = "black"),
+             shape = 5,
+             data = deseq_r1_meta_df %>%
+               filter(gene %in% pancan_nonresponse_signature_1.25$gene)) +
+  geom_hline(yintercept = 0) +
+  theme_Publication() + coord_flip() +
+  scale_color_manual(values = trial_colors_combined) +
+  geom_hline(yintercept = -log2(1.25), linetype = "dashed") +
+  labs(x = "")
+
+negative_response_component_deg_plot
+
+graph2pdf(x = negative_response_component_deg_plot,
+          file = here(
+            output_dir,
+            "_negative_response_component_deg_plot.pdf"),
+          colormodel = "rgb",
+          font = "Arial",
+          height = 8,
+          width = 6)
+```
+
+## Extended Data Fig. 7e
+### Per trial
+```{r, fig.height = 12, fig.width = 12}
+
+n_labels <- pancan_response_ssgsea_results_df %>%
+  group_by(Trial, Response) %>%
+  summarise(n = n()) %>%
+mutate(
+  Trial_response =  paste0(Trial, " ", Response),
+  label = paste0(Response, "\n(n = ", n, ")"))
+label_map <- setNames(n_labels$label, n_labels$Trial_response)
+label_map
+
+pancan_response_ssgsea_results_df %>%
+  mutate(
+    Trial_response =  paste0(Trial, " ", Response)) %>%
+  ggplot(aes(x = Trial_response,
+             y = pancancer_response_sig_1.25, fill = Response)) +
+  geom_boxplot() +
+  stat_compare_means(method = "wilcox") +
+  facet_wrap(~Trial, scales = "free_x") + 
+  theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R))+
+  labs(x = "", y = "Pancancer Positive Response\ncomponent ssGSEA score",
+       title = "Neoadjuvant Pancancer") +
+  guides(fill = FALSE)
+
+neoadjuvant_pancan_positive_response_per_trial_plot <- pancan_response_ssgsea_results_df %>%
+  mutate(
+    Trial_response =  paste0(Trial, " ", Response)) %>%
+  ggplot(aes(x = Trial_response,
+             y = pancancer_response_sig_1.25, fill = Response)) +
+  geom_boxplot() +
+  facet_wrap(~Trial, scales = "free_x") + 
+  theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(x = "", y = "Pancancer Positive Response\ncomponent ssGSEA score",
+       title = "Neoadjuvant Pancancer") +
+  scale_x_discrete(labels = label_map)  +
+  guides(fill = FALSE)
+
+neoadjuvant_pancan_positive_response_per_trial_plot 
+graph2pdf(x = neoadjuvant_pancan_positive_response_per_trial_plot,
+          file = here(output_dir, "_neoadjuvant_pancan_positive_response_per_trial_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 7.5,
+          width = 7.5)
+
+pancan_response_ssgsea_results_df %>%
+  mutate(
+    Trial_response =  paste0(Trial, " ", Response)) %>%
+  ggplot(aes(x = Response, y = pancancer_nonresponse_sig_1.25,
+             fill = Response)) +
+  geom_boxplot() +
+  stat_compare_means(method = "wilcox") + facet_wrap(~Trial) + theme_Publication()+
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(x = "", y = "Pancancer Negative Response\ncomponent ssGSEA score",
+       title = "Neoadjuvant Pancancer") +
+  guides(fill = FALSE)
+
+neoadjuvant_pancan_negative_response_per_trial_plot <- pancan_response_ssgsea_results_df %>%
+  mutate(
+    Trial_response =  paste0(Trial, " ", Response)) %>%
+  ggplot(aes(x = Trial_response, y = pancancer_nonresponse_sig_1.25,
+             fill = Response)) +
+  geom_boxplot() +
+  stat_compare_means(method = "wilcox") + facet_wrap(~Trial, scales = "free_x") +
+  theme_Publication()+
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(x = "", y = "Pancancer Negative Response\ncomponent ssGSEA score",
+       title = "Neoadjuvant Pancancer") + 
+  scale_x_discrete(labels = label_map)  +
+  guides(fill = FALSE)
+
+neoadjuvant_pancan_negative_response_per_trial_plot 
+graph2pdf(x = neoadjuvant_pancan_negative_response_per_trial_plot,
+          file = here(output_dir, "_neoadjuvant_pancan_negative_response_per_trial_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 7.5,
+          width = 7.5)
+
+pancan_response_ssgsea_results_df %>%
+  mutate(
+    Trial_response =  paste0(Trial, " ", Response)) %>%
+  ggplot(aes(x = Response, y = pancancer_response_score, fill = Response)) +
+  geom_boxplot() + facet_wrap(~Trial, scales = "free_x") +
+  stat_compare_means(method = "wilcox") +
+  theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(x = "", y = "Pancancer Response score\nssGSEA delta",
+       title = "Neoadjuvant Pancancer") +
+  guides(fill = FALSE)
+
+neoadjuvant_pancan_response_score_per_trial_plot <- pancan_response_ssgsea_results_df %>%
+  mutate(
+    Trial_response =  paste0(Trial, " ", Response)) %>%
+  ggplot(aes(x = Trial_response, y = pancancer_response_score, fill = Response)) +
+  geom_boxplot() + facet_wrap(~Trial, scales = "free_x") +
+  theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(x = "", y = "Pancancer Response score\nssGSEA delta",
+       title = "Neoadjuvant Pancancer") + 
+  scale_x_discrete(labels = label_map)  +
+  guides(fill = FALSE)
+
+neoadjuvant_pancan_response_score_per_trial_plot 
+
+graph2pdf(x = neoadjuvant_pancan_response_score_per_trial_plot,
+          file = here(output_dir, "_neoadjuvant_pancan_response_score_per_trial_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 7.5,
+          width = 7.5)
+```
+
+## Extended Data Fig. 7f metastatic response sig  Per trial
+```{r, fig.height = 12, fig.width = 12}
+
+n_labels <- metastatic_wes_rna_features_df_pre %>%
+  group_by(Trial, Response) %>%
+  summarise(n = n()) %>%
+mutate(
+  Trial_response =  paste0(Trial, " ", Response),
+  label = paste0(Response, "\n(n = ", n, ")"))
+label_map <- setNames(n_labels$label, n_labels$Trial_response)
+label_map
+
+
+metastatic_wes_rna_features_df_pre %>%
+  mutate(
+    Trial_response =  paste0(Trial, " ", Response)) %>%
+  ggplot(aes(x = Response, y = pancancer_response_score, fill = Response)) +
+  geom_boxplot() + facet_wrap(~Trial, scales = "free_x") +
+  stat_compare_means(method = "wilcox") +
+  theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(x = "", y = "Pancancer Response score\nssGSEA delta",
+       title = "iATLAS metastatic Pancancer") +
+  guides(fill = FALSE)
+
+metastatic_pancan_response_score_per_trial_plot <- metastatic_wes_rna_features_df_pre %>%
+  mutate(
+    Trial_response =  paste0(Trial, " ", Response)) %>%
+  ggplot(aes(x = Trial_response, y = pancancer_response_score, fill = Response)) +
+  geom_boxplot() + facet_wrap(~Trial, scales = "free_x") +
+  theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(x = "", y = "Pancancer Response score\nssGSEA delta",
+       title = "iATLAS metastatic Pancancer") + 
+  scale_x_discrete(labels = label_map)  +
+  guides(fill = FALSE)
+
+metastatic_pancan_response_score_per_trial_plot 
+
+graph2pdf(x = metastatic_pancan_response_score_per_trial_plot,
+          file = here(output_dir, "_metastatic_pancan_response_score_per_trial_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 7.5,
+          width = 7.5)
+```
+
+### Extended Data Fig. 7 correlations
+### corr Neoadjuvant
+```{r, fig.height = 10, fig.width = 8}
+neoadjuvant_ssgsea_correlations <- wes_rna_features_df_pre %>%
+  left_join(pancan_response_ssgsea_results_df %>%
+              select(c("CF_sample", "pancancer_nonresponse_sig_1.25",
+                     "pancancer_response_sig_1.25",
+                     "pancancer_response_score"))) %>%
+  select(c(signature_variable_order,
+           "pancancer_nonresponse_sig_1.25",
+           "pancancer_response_sig_1.25",
+           "pancancer_response_score")
+         ) %>%
+  cor(method = "spearman")
+
+neoadjuvant_ssgsea_correlations %>%
+  as.data.frame() %>%
+  select(pancancer_response_sig_1.25) %>%
+  setNames(c("pancan_response_sig_corr")) %>%
+  rownames_to_column("Signature") %>%
+  filter(!Signature %in% c("pancancer_response_sig_1.25",
+                           "pancancer_nonresponse_sig_1.25",
+                           "pancancer_response_score")) %>%
+  filter(!is.na(pancan_response_sig_corr)) %>%
+  left_join(signature_overview %>% select(Signature, Signature_abbreviation)) %>%
+  ggplot(aes(x = reorder(Signature_abbreviation, pancan_response_sig_corr),
+                         y = pancan_response_sig_corr)) +
+  geom_col() + theme_Publication() + coord_flip() +
+  labs(x = "",
+       y = "Correlations Positive Response component",
+       title = "Neoadjuvant Cohort")
+
+neoadjuvant_ssgsea_correlations %>%
+  as.data.frame() %>%
+  select(pancancer_nonresponse_sig_1.25) %>%
+  setNames(c("pancancer_nonresponse_sig_1.25")) %>%
+  rownames_to_column("Signature") %>%
+  filter(!Signature %in% c("pancancer_nonresponse_sig_1.25",
+                           "pancancer_response_sig_1.25",
+                           "pancancer_response_score")) %>%
+  filter(!is.na(pancancer_nonresponse_sig_1.25)) %>%
+  left_join(signature_overview %>% select(Signature, Signature_abbreviation)) %>%
+  ggplot(aes(x = reorder(Signature_abbreviation, pancancer_nonresponse_sig_1.25),
+                         y = pancancer_nonresponse_sig_1.25)) +
+  geom_col() + theme_Publication() + coord_flip() +
+  labs(x = "",
+       y = "Correlations Negative Response component",
+       title = "Neoadjuvant Cohort")
+```
+
+### Hypoxia and TIL score
+
+```{r}
+
+TIL_score_positive_response_component_plot <- rna_features_df_plus_wes_pre %>%
+  left_join(pancan_response_ssgsea_results_df) %>%
+  ggplot(aes(x = TIL_score, y = pancancer_response_sig_1.25)) +
+  geom_point(aes(col = Trial)) + stat_cor(method = "spearman") +
+  theme_Publication() +
+  scale_color_manual(values = trial_colors) +
+  labs(x = "TIL score ssGSEA",
+       y = "Pancancer Positive Response\ncomponent ssGSEA score")
+       
+TIL_score_positive_response_component_plot
+graph2pdf(x = TIL_score_positive_response_component_plot,
+          file = here(output_dir, 
+                    "_TIL_score_positive_response_component_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 5,
+          width = 5.5)
+
+hypoxia_negative_response_component_plot <- rna_features_df_plus_wes_pre %>%
+  left_join(pancan_response_ssgsea_results_df) %>%
+  ggplot(aes(x = H_Hypoxia, y = pancancer_nonresponse_sig_1.25)) +
+  geom_point(aes(col = Trial)) + stat_cor(method = "spearman") +
+  theme_Publication() +
+  scale_color_manual(values = trial_colors) +
+  labs(x = "H_Hypoxia ssGSEA",
+       y = "Pancancer Negative Response\ncomponent ssGSEA score")
+
+hypoxia_negative_response_component_plot
+
+graph2pdf(x = hypoxia_negative_response_component_plot,
+          file = here(output_dir,
+                      "_hypoxia_negative_response_component_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 5,
+          width = 5.5)
+
+```
+
+## Extended Data Fig. 7c
+
+```{r, fig.height = 10, fig.width = 8}
+metastatic_ssgsea_correlations <- metastatic_wes_rna_features_df_pre %>%
+  select(c(signature_variable_order,
+           "pancan_nonresponse_signature_1.25",
+           "pancancer_response_sig_1.25",
+           "pancancer_response_score")
+         ) %>%
+  cor(method = "spearman")
+```
+
+### Positive correlation components metastatic
+
+```{r, fig.height = 10, fig.width = 8}
+metastatic_positive_component_correlation_plot <- metastatic_ssgsea_correlations %>%
+  as.data.frame() %>%
+  select(pancancer_response_sig_1.25) %>%
+  setNames(c("pancan_response_sig_corr")) %>%
+  rownames_to_column("Signature") %>%
+  filter(!Signature %in% c("pancancer_response_sig_1.25",
+                           "pancan_nonresponse_signature_1.25",
+                           "pancancer_response_score")) %>%
+  filter(!is.na(pancan_response_sig_corr)) %>%
+  left_join(signature_overview %>% select(Signature, Signature_abbreviation)) %>%
+  ggplot(aes(x = reorder(Signature_abbreviation, pancan_response_sig_corr),
+                         y = pancan_response_sig_corr)) +
+  geom_col() + theme_Publication() + coord_flip() +
+  labs(x = "",
+       y = "Correlations Positive Response component",
+       title = "iATLAS metastatic Pancancer")
+
+metastatic_positive_component_correlation_plot
+graph2pdf(x = metastatic_positive_component_correlation_plot,
+          file = here(output_dir, "_metastatic_positive_component_correlation_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 8,
+          width = 5)
+```
+
+## Extended Data Fig. 7d
+### Negative correlation components metastatic
+
+```{r, fig.height = 10, fig.width = 8}
+metastatic_negative_component_correlation_plot <- metastatic_ssgsea_correlations %>%
+  as.data.frame() %>%
+  select(pancan_nonresponse_signature_1.25) %>%
+  setNames(c("pancan_nonresponse_signature_1.25")) %>%
+  rownames_to_column("Signature") %>%
+  filter(!Signature %in% c("pancan_nonresponse_signature_1.25",
+                           "pancancer_response_sig_1.25",
+                           "pancancer_response_score")) %>%
+  filter(!is.na(pancan_nonresponse_signature_1.25)) %>%
+  left_join(signature_overview %>% select(Signature, Signature_abbreviation)) %>%
+  ggplot(aes(x = reorder(Signature_abbreviation, pancan_nonresponse_signature_1.25),
+                         y = pancan_nonresponse_signature_1.25)) +
+  geom_col() + theme_Publication() + coord_flip() +
+  labs(x = "",
+       y = "Correlations Negative Response component",
+       title = "iATLAS metastatic Pancancer")
+
+metastatic_negative_component_correlation_plot
+graph2pdf(x = metastatic_negative_component_correlation_plot,
+          file = here(output_dir, "_metastatic_negative_component_correlation_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 8,
+          width = 5)
+
+metastatic_ssgsea_correlations %>%
+  as.data.frame() %>%
+  select(pancancer_response_score) %>%
+  setNames(c("pancancer_response_score")) %>%
+  rownames_to_column("Signature") %>%
+  filter(!is.na(pancancer_response_score))%>%
+  filter(!Signature %in% c("pancan_nonresponse_signature_1.25",
+                           "pancancer_response_sig_1.25",
+                           "pancancer_response_score")) %>%
+  ggplot(aes(x = reorder(Signature, pancancer_response_score),
+                         y = pancancer_response_score)) +
+  geom_col() + theme_Publication() + coord_flip() +
+  labs(x = "",
+       y = "Signature Correlations Pancancer Response score",
+       title = "iATLAS metastatic Pancancer")
+```
+
+
+## Fig.7g
+###  Novel signature score ABACUS
+
+```{r}
+table(neoadjuvant_ssgsea_c$Trial)
+
+n_labels <- neoadjuvant_ssgsea_c  %>%
+  filter(Trial == "ABACUS") %>%
+  group_by(Response) %>%
+  summarise(n = n()) %>%
+mutate(
+  label = paste0(Response, "\n(n = ", n, ")"))
+label_map <- setNames(n_labels$label, n_labels$Response)
+
+ABACUS_pancan_response_score_plot <- neoadjuvant_ssgsea_c %>%
+  filter(Trial == "ABACUS") %>%
+  ggplot(aes(x = Response, y = pancancer_response_score, fill = Response)) +
+  geom_boxplot() +
+  stat_compare_means(method = "wilcox") +
+  theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(x = "", y = "NKI pancancer signature\nssGSEA score delta",
+       title = "ABACUS (nICB bladder)") +
+  scale_x_discrete(labels = label_map) +
+  guides(fill = FALSE)
+
+ABACUS_pancan_response_score_plot
+
+graph2pdf(x = ABACUS_pancan_response_score_plot,
+          file = here(output_dir,
+                      "_ABACUS_pancan_response_score_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 4.5,
+          width = 4.5)
+```
+
+
+## Fig.7h
+###  Novel signature score I-SPY2
+
+```{r}
+
+n_labels <- neoadjuvant_ssgsea_c  %>%
+  filter(Study == "ISPY2") %>%
+  group_by(Response) %>%
+  summarise(n = n()) %>%
+mutate(
+  label = paste0(Response, "\n(n = ", n, ")"))
+
+label_map <- setNames(n_labels$label, n_labels$Response)
+
+ISPY2_pancan_response_score_plot <- neoadjuvant_ssgsea_c %>%
+  filter(Study == "ISPY2") %>%
+  ggplot(aes(x = Response, y = pancancer_response_score, fill = Response)) +
+  geom_boxplot() +
+  stat_compare_means(method = "wilcox") +
+  theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(x = "", y = "NKI pancancer signature\nssGSEA score delta",
+       title = "I-SPY2 (nICB+chemo breast)") +
+  scale_x_discrete(labels = label_map) +
+  guides(fill = FALSE)
+
+ISPY2_pancan_response_score_plot
+
+graph2pdf(x = ISPY2_pancan_response_score_plot,
+          file = here(output_dir,
+                      "_ISPY2_pancan_response_score_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 4.5,
+          width = 4.5)
+```
+
+
+
+## Fig.7i
+###  Novel signature score PANDA
+
+```{r}
+
+n_labels <- neoadjuvant_ssgsea_c  %>%
+  filter(Study == "PANDA") %>%
+  group_by(Response) %>%
+  summarise(n = n()) %>%
+mutate(
+  label = paste0(Response, "\n(n = ", n, ")"))
+
+label_map <- setNames(n_labels$label, n_labels$Response)
+
+PANDA_pancan_response_score_plot <- neoadjuvant_ssgsea_c %>%
+  filter(Study == "PANDA") %>%
+  ggplot(aes(x = Response, y = pancancer_response_score, fill = Response)) +
+  geom_boxplot() +
+  stat_compare_means(method = "wilcox") +
+  theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(x = "", y = "NKI pancancer signature\nssGSEA score delta",
+       title = "PANDA (nICB+chemo G/GEJ)") +
+  scale_x_discrete(labels = label_map) +
+  guides(fill = FALSE)
+
+PANDA_pancan_response_score_plot
+
+graph2pdf(x = PANDA_pancan_response_score_plot,
+          file = here(output_dir,
+                      "_PANDA_pancan_response_score_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 4.5,
+          width = 4.5)
+
+
+n_labels <- neoadjuvant_ssgsea_c  %>%
+  filter(Study == "PANDA") %>%
+  group_by(Response) %>%
+  summarise(n = n()) %>%
+mutate(
+  label = paste0(Response, "\n(n = ", n, ")"))
+
+label_map <- setNames(n_labels$label, n_labels$Response)
+
+adapted_PANDA_pancan_response_score_plot <- neoadjuvant_ssgsea_c %>%
+  filter(Study == "PANDA") %>%
+  ggplot(aes(x = Response, y = pancancer_response_score, fill = Response)) +
+  geom_boxplot() +
+  stat_compare_means(method = "wilcox") +
+  theme_Publication() +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(x = "", y = "NKI pancancer signature\nssGSEA score delta",
+       title = "PANDA (nICB+chemo G/GEJ)") +
+  scale_x_discrete(labels = label_map) +
+  guides(fill = FALSE)
+
+adapted_PANDA_pancan_response_score_plot
+
+graph2pdf(x = adapted_PANDA_pancan_response_score_plot,
+          file = here(output_dir,
+                      "_adapted_PANDA_pancan_response_score_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 4.5,
+          width = 4.5)
+```
+
+# ----------
+
+# Supporting figures revision
+## Signature AUC
+```{r, fig.height = 8, fig.width = 7}
+
+signature_prediction_data <- read_csv2(
+  here(source_data_dir, "signature_prediction_data_with_msi.csv"))
+
+signature_prediction_data %>%
+  mutate(AUC = as.numeric(AUC)) %>%
+  ggplot(aes(x = reorder(Signature, AUC), y = AUC)) +
+  geom_col() +
+  expand_limits(y = 0) +
+  theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  geom_hline(yintercept = 0.5, col = "red", linetype = "dashed") +
+  labs(x = "") +
+  coord_flip() +
+  scale_y_continuous(breaks = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7))
+
+
+signature_prediction_data  %>%
+  filter(!Signature %in% c("pancancer_response_sig_1.25",
+                           "pancancer_nonresponse_sig_1.25")) %>%
+  mutate(Signature = ifelse(Signature == "pancancer_response_score",
+                            "NKI pan-cancer signature", Signature)) %>%
+  mutate(AUC = as.numeric(AUC))  %>%
+  ggplot(aes(x = reorder(Signature, AUC), y = AUC)) +
+  geom_col() +
+  expand_limits(y = 0) +
+  theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  geom_hline(yintercept = 0.5, col = "orange", linetype = "longdash", width = 2) +
+  labs(x = "") +
+  coord_flip() +
+  scale_y_continuous(breaks = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9))
+
+signature_mixed_effects_covariate_prediction_data  %>%
+  filter(!Signature %in% c("pancancer_response_sig_1.25",
+                           "pancancer_nonresponse_sig_1.25")) %>%
+  mutate(Signature = ifelse(Signature == "pancancer_response_score",
+                            "NKI pan-cancer signature", Signature)) %>%
+  mutate(AUC = as.numeric(AUC))  %>%
+  ggplot(aes(x = reorder(Signature, AUC), y = AUC)) +
+  geom_col() +
+  expand_limits(y = 0) +
+  theme_Publication() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  geom_hline(yintercept = 0.5, col = "orange", linetype = "longdash", width = 2) +
+  labs(x = "") +
+  coord_flip() +
+  scale_y_continuous(breaks = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9))
+
+```
+
+## HLA alteration vs TMB and response
+```{r, fig.width = 5, fig.height = 4}
+wes_features_df %>%
+  mutate(HLA_Intact = ifelse(
+    HLA_Intact == "HLA-Altered", "HLA del/LOH", HLA_Intact)) %>%
+  ggplot(aes(x = HLA_Intact, y = TMB, fill = HLA_Intact)) +
+  geom_boxplot() + theme_Publication() + stat_compare_means(method = "wilcox") +
+  geom_hline(yintercept = 10, linetype = "dashed") +
+  guides(fill = FALSE) +
+  scale_fill_manual(values = c("darkorange", "lightblue")) +
+  labs(x = "", y = "TMB (Mutations/Mb)")
+
+wes_features_df %>%
+  filter(!Trial %in% "NICHE-MSI") %>%
+  mutate(HLA_Intact = ifelse(
+    HLA_Intact == "HLA-Altered", "HLA del/LOH", HLA_Intact)) %>%
+  ggplot(aes(x = HLA_Intact, y = TMB, fill = HLA_Intact)) +
+  geom_boxplot() + theme_Publication() + stat_compare_means(method = "wilcox") +
+  geom_hline(yintercept = 10, linetype = "dashed") +
+  guides(fill = FALSE) +
+  scale_fill_manual(values = c("darkorange", "lightblue")) +
+  labs(x = "", y = "TMB (Mutations/Mb)")
+```
+
+```{r}
+wes_features_df  %>%
+  mutate(HLA_Intact = ifelse(
+    HLA_Intact == "HLA-Altered", "HLA del/LOH", HLA_Intact))%>%
+  ggplot(aes(x = HLA_Intact, y = TMB)) + facet_wrap(~Response) +
+  geom_boxplot() + theme_Publication() + stat_compare_means(method = "wilcox") +
+  geom_hline(yintercept = 10, linetype = "dashed")
+
+wes_features_df %>%
+  mutate(HLA_Intact = ifelse(
+    HLA_Intact == "HLA-Altered", "HLA del/LOH", HLA_Intact)) %>%
+  group_by(HLA_Intact, Response) %>%
+  add_count() %>%
+  mutate(Label = sprintf("%s\n(n = %s)", Response, n)) %>%
+  ggplot(aes(x = Label, y = TMB, fill = Response)) +
+  facet_wrap(~HLA_Intact, scales = "free_x") +
+  geom_boxplot() + theme_Publication() + stat_compare_means(method = "wilcox") +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  geom_hline(yintercept = 10, linetype = "dashed") +
+  labs(x = "", y = "TMB (Mutations/Mb)") + guides(fill = FALSE)
+
+wes_features_df %>%
+  mutate(HLA_Intact = ifelse(
+    HLA_Intact == "HLA-Altered", "HLA del/LOH", HLA_Intact)) %>%
+  group_by(HLA_Intact, Response) %>%
+  add_count() %>%
+  mutate(Label = sprintf("%s\n(n = %s)", Response, n)) %>%
+  ggplot(aes(x = Response, y = TMB, fill = Response)) +
+  facet_wrap(~HLA_Intact, scales = "free_x") +
+  geom_boxplot() + theme_Publication() +
+  stat_compare_means(method = "wilcox") +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  geom_hline(yintercept = 10, linetype = "dashed") +
+  labs(x = "", y = "TMB (Mutations/Mb)") + guides(fill = FALSE)
+
+```
+
+
+## Median TMB vs. Alteration frequency
+```{r, fig.width = 5, fig.height = 5}
+immune_hits_ap_freq <- table(wes_features_df$Trial,
+                             wes_features_df$immune_hits_ap > 0) %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "immune_hits_ap", "Freq")) %>%
+  mutate(immune_hits_ap = ifelse(
+    as.logical(immune_hits_ap), "AP_mut", "AP_wt")) %>%
+  pivot_wider(names_from = immune_hits_ap, values_from = Freq) %>%
+  mutate(Total = AP_wt + AP_mut,
+         AP_mut_perc = AP_mut / Total * 100) %>%
+  left_join(tmb_response_rate)
+
+immune_hits_ap_freq
+
+immune_hits_ap_freq %>%
+  ggplot(aes(x = median_TMB, y = AP_mut_perc, col = Histology_MSI_MSS)) +
+  geom_point(size = 3) +
+  labs(x = "median TMB (mutations/Mb)",
+       y = "Antigen presentation mut (%)",  col = "") +
+  scale_x_continuous(trans = "log", breaks = c(1, 10, 20, 30, 40, 50)) +
+  theme_Publication() +
+  scale_color_manual(values = histology_msi_mss_colors) +
+  expand_limits(y = 0)+
+  geom_vline(xintercept = 10, linetype = "dashed") +
+  guides(size = "none")
+
+immune_hits_ifny_freq <- table(
+  wes_features_df$Trial,
+  wes_features_df$immune_hits_ifny > 0) %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "immune_hits_ifny", "Freq")) %>%
+  mutate(immune_hits_ifny = ifelse(
+    as.logical(immune_hits_ifny), "pIFNy_mut", "pIFNy_wt")) %>%
+  pivot_wider(names_from = immune_hits_ifny, values_from = Freq) %>%
+  mutate(Total = pIFNy_mut + pIFNy_wt,
+         pIFNy_mut_perc = pIFNy_mut / Total * 100) %>%
+  left_join(tmb_response_rate)
+
+immune_hits_ifny_freq
+
+immune_hits_ifny_freq %>%
+  ggplot(aes(x = median_TMB, y = pIFNy_mut_perc, col = Histology_MSI_MSS)) +
+  geom_point(size = 3) +
+  labs(x = "median TMB (mutations/Mb)",
+       y = "IFNy pathway mut (%)",  col = "") +
+  theme_Publication() +
+  scale_x_continuous(trans = "log", breaks = c(1, 10, 20, 30, 40, 50)) +
+  scale_color_manual(values = histology_msi_mss_colors) +
+  expand_limits(y = 0) +
+  geom_vline(xintercept = 10, linetype = "dashed") +
+  guides(size = "none")
+
+
+immune_hits_hla_alteration_freq <- table(
+  wes_features_df$Trial,
+  wes_features_df$HLA_alteration > 0) %>%
+  as.data.frame() %>%
+  setNames(c("Trial", "HLA_alteration", "Freq")) %>%
+  mutate(HLA_alteration = ifelse(as.logical(HLA_alteration),
+                                 "HLA_altered", "HLA_intact")) %>%
+  pivot_wider(names_from = HLA_alteration, values_from = Freq) %>%
+  mutate(Total = HLA_altered + HLA_intact,
+         HLA_altered_perc = HLA_altered / Total * 100) %>%
+  left_join(tmb_response_rate)
+
+immune_hits_hla_alteration_freq
+
+immune_hits_hla_alteration_freq %>%
+  ggplot(aes(x = median_TMB, y = HLA_altered_perc, col = Histology_MSI_MSS)) +
+  geom_point(size = 3) +
+  labs(x = "median TMB (mutations/Mb)", y = "HLA del/LOH (%)",  col = "") +
+  theme_Publication(base_size = 14) +
+  scale_x_continuous(trans = "log", breaks = c(1, 10, 20, 30, 40, 50)) +
+  scale_color_manual(values = histology_msi_mss_colors) +
+  expand_limits(y = 0) +
+  geom_vline(xintercept = 10, linetype = "dashed") +
+  guides(size = "none")
+```
+
+## Neoantigen vs TMB TMB groups
+```{r}
+wes_features_df %>%
+  ggplot(aes(x = Response, y = pvactools_filtered_neoantigen_load)) +
+  facet_wrap(~ifelse(TMB >= 10, "TMB-high", "TMB-low"), scales = "free") +
+  geom_boxplot() +
+  theme_Publication() + stat_compare_means()
+
+wes_features_df %>%
+  ggplot(aes(x = Response, y = TMB)) + facet_wrap(~ifelse(TMB >= 10, "TMB-high", "TMB-low"), scales = "free") +
+  geom_boxplot() + theme_Publication() + stat_compare_means()
+
+wes_features_df %>% ggplot(aes(x = TMB, y = pvactools_filtered_neoantigen_load, col = Trial)) + geom_point() + theme_Publication() +
+  scale_color_manual(values = trial_colors)
+
+TMB_high_low_neoantigen_tmb_correlation_plot <-  wes_features_df %>%
+  ggplot(aes(x = TMB, y = pvactools_filtered_neoantigen_load, col = Trial)) +
+  geom_point() + theme_Publication() +
+  facet_wrap(~ifelse(TMB >= 10, "TMB-high", "TMB-low"), scales = "free") +
+  scale_color_manual(values = trial_colors) + labs(x = "TMB (Mutations/Mb)",
+                                                   y = "Predicted Neoantigen load")
+
+TMB_high_low_neoantigen_tmb_correlation_plot
+
+graph2pdf(x = TMB_high_low_neoantigen_tmb_correlation_plot,
+          file = here(output_dir,
+                      "_TMB_high_low_neoantigen_tmb_correlation_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 4.5,
+          width = 7)
+
+TMB_low_response_neoantigen_tmb_correlation_plot <-  wes_features_df %>%
+  filter(TMB < 10) %>%
+  ggplot(aes(x = TMB, y = pvactools_filtered_neoantigen_load, col = Trial)) +
+  geom_point() + theme_Publication() +
+  facet_wrap(~Response) +
+  scale_color_manual(values = trial_colors) +
+  labs(x = "TMB (Mutations/Mb)", y = "Predicted Neoantigen load", title = "TMB-low")
+TMB_low_response_neoantigen_tmb_correlation_plot
+
+graph2pdf(x = TMB_low_response_neoantigen_tmb_correlation_plot,
+          file = here(output_dir,
+                      "_TMB_low_response_neoantigen_tmb_correlation_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 4.5,
+          width = 7)
+
+
+TMB_high_response_neoantigen_tmb_correlation_plot <-  wes_features_df %>%
+  filter(TMB >= 10) %>%
+  ggplot(aes(x = TMB, y = pvactools_filtered_neoantigen_load, col = Trial)) +
+  geom_point() + theme_Publication() +
+  facet_wrap(~Response) +
+  scale_color_manual(values = trial_colors) +
+  labs(x = "TMB (Mutations/Mb)", y = "Predicted Neoantigen load", title = "TMB-high")
+TMB_high_response_neoantigen_tmb_correlation_plot
+
+graph2pdf(x = TMB_high_response_neoantigen_tmb_correlation_plot,
+          file = here(output_dir,
+                      "_TMB_high_response_neoantigen_tmb_correlation_plot.pdf"),
+          colormodel = "rgb",
+          # font = "Arial",
+          height = 4.5,
+          width = 7)
+```
+
+
+```{r, fig.height = 10, fig.width = 10}
+wes_features_df %>%
+  filter(TMB < 10) %>%
+  ggplot(aes(x = Response, y = TMB)) +
+  facet_wrap(~Trial, scales = "free") +
+  geom_boxplot(outlier.shape = NA) + geom_point() +
+  theme_Publication() + stat_compare_means()
+
+wes_features_df %>%
+  filter(TMB < 10) %>%
+  ggplot(aes(x = Response, y = pvactools_filtered_neoantigen_load)) +
+  facet_wrap(~Trial, scales = "free") +
+  geom_boxplot(outlier.shape = NA) + geom_point() +
+  theme_Publication() + stat_compare_means()
+
+```
+
+## MATISSE proliferation subset combination vs monotherapy
+
+```{r}
+wes_rna_features_df_pre %>%
+  filter(Histology == "CSCC")%>%
+  group_by(Cohort, Response) %>%
+  ggplot(aes(x = Response, y = Tumor_proliferation_rate)) +
+  geom_boxplot(outlier.shape = NA) + geom_point() +
+  facet_wrap(~Cohort, scales = "free_x") +
+  stat_compare_means(method = "wilcox") +
+  theme_Publication() +
+  labs(title = "MATISSE cSCC", y = "Proliferation ssGSEA", x = "") +
+  geom_hline(yintercept = median_Tumor_proliferation_rate_pre,
+             linetype = "dashed")
+
+wes_rna_features_df_pre %>%
+  filter(Histology == "CSCC")%>%
+  group_by(Cohort, Response) %>%
+  select(Histology, Trial, Response, Cohort, Tumor_proliferation_rate) %>%
+  add_count() %>%
+  mutate(Label = sprintf("%s\n(n = %s)", Response, n)) %>%
+  ggplot(aes(x = Label, y = Tumor_proliferation_rate, fill = Response)) +
+  geom_boxplot(outlier.shape = NA) + geom_point() +
+  facet_wrap(~Cohort, scales = "free_x") +
+  stat_compare_means(method = "wilcox") +
+  theme_Publication() +
+  labs(title = "MATISSE cSCC", y = "Proliferation ssGSEA", x = "") +
+  geom_hline(yintercept = median_Tumor_proliferation_rate_pre,
+             linetype = "dashed") +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  guides(fill = FALSE)
+
+wes_rna_features_df_pre %>%
+  filter(Histology == "CSCC") %>%
+  group_by(Response) %>%
+  select(Histology, Trial, Response, Cohort, Tumor_proliferation_rate) %>%
+  add_count() %>%
+  mutate(Label = sprintf("%s\n(n = %s)", Response, n)) %>%
+  ggplot(aes(x = Label, y = Tumor_proliferation_rate)) +
+  geom_boxplot(outlier.shape = NA) + geom_point()  + 
+  stat_compare_means(method = "wilcox") +
+  theme_Publication() +
+  labs(title = "MATISSE cSCC", y = "Proliferation ssGSEA", x = "") +
+  geom_hline(yintercept = median_Tumor_proliferation_rate_pre,
+             linetype = "dashed")
+```
+
+
+```{r}
+wes_features_df_dmmr <- wes_features_df %>% filter(Trial == "NICHE-MSI")
+wes_features_df_nabucco <- wes_features_df %>% filter(Trial == "NABUCCO")
+
+table(wes_features_df_dmmr$BRCA1_2,
+      wes_features_df_dmmr$Response_pCR,
+      wes_features_df_dmmr$Trial)
+
+
+fisher.test(wes_features_df_dmmr$BRCA1_2,
+      wes_features_df_dmmr$Response_pCR)
+
+table(wes_features_df_dmmr$BRCA1_2,
+      wes_features_df_dmmr$Response_pCR,
+      wes_features_df_dmmr$Trial) %>%
+  as.data.frame() %>%
+  setNames(c("BRCA1_2", "Response", "Trial", "Freq")) %>%
+  pivot_wider(values_from = Freq, names_from = Response) %>%
+  mutate(Total = non_pCR + pCR, pCR_response_rate = pCR / Total) %>%
+  ggplot(aes(BRCA1_2, y = pCR_response_rate)) + geom_col() +
+  theme_Publication() + facet_wrap(~Trial, scales = "free")
+
+table(wes_features_df_nabucco$Response,
+      wes_features_df_nabucco$Response_pCR)
+
+table(wes_features_df_nabucco$BRCA1_2,
+      wes_features_df_nabucco$Response_pCR,
+      wes_features_df_nabucco$Trial)
+
+fisher.test(wes_features_df_nabucco$BRCA1_2,
+      wes_features_df_nabucco$Response_pCR)
+
+table(wes_features_df_nabucco$BRCA1_2,
+      wes_features_df_nabucco$Response_pCR,
+      wes_features_df_nabucco$Trial) %>%
+  as.data.frame() %>%
+  setNames(c("BRCA1_2", "Response", "Trial", "Freq")) %>%
+  pivot_wider(values_from = Freq, names_from = Response) %>%
+  mutate(Total = non_pCR + pCR, pCR_response_rate = pCR / Total) %>%
+  ggplot(aes(BRCA1_2, y = pCR_response_rate)) + geom_col() +
+  theme_Publication() + facet_wrap(~Trial, scales = "free")
+
+```
+
+
+## MIXCR
+```{r, fig.height = 8.5, fig.width = 12}
+all_cohort_metrics_p <- read_csv2(here(
+ source_data_dir, "all_cohort_mixcr_metrics_p.csv"))
+
+all_cohort_metrics_pre <- all_cohort_metrics_p %>%
+  filter(Treatment == "Pre")
+
+all_cohort_metrics_pre %>%
+  ggplot(aes(x = Response, y = total_clones, fill = Response)) +
+  geom_boxplot() +
+  facet_wrap(~chain, scales = "free") +
+  theme_Publication()  +
+  stat_compare_means(method = "wilcox") +
+  scale_fill_manual(values = c(Color_NR, Color_R)) +
+  labs(x = "", y = "Total number of reconstructed clones") +
+  guides(fill = FALSE)
+```
+
+
+```{r, fig.height = 4, fig.width = 5}
+all_cohort_metrics_pre_IGH <- all_cohort_metrics_pre %>%
+  filter(chain == "IGH")  
+
+all_cohort_metrics_pre_IGH_f <- all_cohort_metrics_pre_IGH %>%
+  filter(total_clones > 50)
+
+table(all_cohort_metrics_pre_IGH_f$Trial)
+table(all_cohort_metrics_pre_IGH_f$Trial,
+      all_cohort_metrics_pre_IGH_f$Response)
+
+all_cohort_metrics_pre_IGH_f %>%
+  ggplot(aes(x = Response, y = clonality, fill = Response)) +
+  geom_boxplot() +
+  theme_Publication()   +
+  stat_compare_means(method = "wilcox") +
+  scale_fill_manual(values = c(Color_NR, Color_R))+
+  labs(title = "MIXCR IGH chains") +
+  expand_limits(y = 0) +
+  labs(x = "") + guides(fill = FALSE)
+```
+
+
+### UV and APOBEC vs TMB or neoantigens
+```{r, fig.height = 8, fig.width = 8}
+
+wes_features_df %>%
+  ggplot(aes(x = UV_abs, y = pvactools_filtered_neoantigen_load)) +
+  geom_point(aes(col = Trial)) +
+  stat_cor(method = "spearman") + theme_Publication() +
+  scale_color_manual(values = trial_colors) +
+  facet_wrap(~Trial, scales = "free")
+
+wes_features_df %>%
+  ggplot(aes(x = APOBEC_abs, y = pvactools_filtered_neoantigen_load)) +
+  geom_point(aes(col = Trial)) +
+  stat_cor(method = "spearman") + theme_Publication() +
+  scale_color_manual(values = trial_colors) +
+  facet_wrap(~Trial, scales = "free")
+
+wes_features_df %>%
+  ggplot(aes(x = UV_abs, y = TMB)) +
+  geom_point(aes(col = Trial)) +
+  stat_cor(method = "spearman") + theme_Publication() +
+  scale_color_manual(values = trial_colors) +
+  facet_wrap(~Trial, scales = "free")
+
+wes_features_df %>%
+  ggplot(aes(x = APOBEC_abs, y = TMB)) +
+  geom_point(aes(col = Trial)) +
+  stat_cor(method = "spearman") + theme_Publication() +
+  scale_color_manual(values = trial_colors) +
+  facet_wrap(~Trial, scales = "free")
+```
+
 # ----------
 # Lint script
 ```{r}

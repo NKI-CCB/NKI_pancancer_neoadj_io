@@ -32,10 +32,10 @@ source("helper_functions.R")
 source("oncomatrix.R")
 library(VariantAnnotation)
 library(ggpubr)
-library(corrplot)
 library(export)
 library(lme4)
 library(export)
+library(lintr)
 
 MakeDataFrameFromVCF <- getFromNamespace("MakeDataFrameFromVCF", "ICAMS")
 
@@ -76,15 +76,6 @@ if (!dir.exists(output_dir)) {
 ```{r Load metadata}
 dna_metadata <- read_csv2(here(metadata_dir, "combined_dna_metadata.csv"))
 
-# WES target sizes
-WES_target_sizes <- data.frame(
-  Trial = c("IMCISION", "PRADO", "OpACIN_neo", "MATISSE",
-            "NICHE-MSI", "NICHE-MSS", "NABUCCO", "BELLINI"),
-  Kit = c(rep("Twist exome Refseq", 4), rep("Exome-IDT V1", 4)),
-  WES_target_size = c(rep(36.72, 4), rep(39.02, 4)))
-
-WES_target_sizes
-
 histology_df <- data.frame(
   Trial = c("BELLINI", "IMCISION", "NABUCCO", "NICHE-MSS", "NICHE-MSI",
             "OpACIN_neo", "PRADO", "MATISSE"),
@@ -102,10 +93,7 @@ Color_R <- "#00BA38" # "#619CFF"
 Color_NA <- "#CD9600"
 Color_Pre <- "#619CFF"
 Color_Post <- "#F564E3"
-Color_Depleted <- "#7CAE00"
-Color_Fibrotic <- "#00BFC4"
-Color_Inflamed_fibrotic <- "#C77CFF"
-Color_Inflamed_non_fibrotic <- "#F8766D"
+
 Color_HNSCC <- "#009292"
 Color_CSCC <- "#CD9600"
 Color_Urothelial <- "#B66DFF"
@@ -145,9 +133,6 @@ trial_colors_combined <- c(Combined = "#999999", BELLINI = Color_BELLINI,
             MATISSE = Color_MATISSE, NABUCCO = Color_NABUCCO,
             `NICHE-MSS` = Color_Colon_MSS, `NICHE-MSI` = Color_NICHE_MSI,
             OpACIN_neo = Color_OpACIN_neo, PRADO = Color_PRADO)
-
-Bagaev_tme_colors <- c(Color_Depleted, Color_Fibrotic,
-                       Color_Inflamed_fibrotic, Color_Inflamed_non_fibrotic)
 
 histology_msi_mss_colors <- c(`Colon-MSI`= Color_Colon_MSI,
                               `Colon-MSS`= Color_Colon_MSS,
@@ -191,11 +176,15 @@ meta_studies_results_smd_all <- read_csv2(
 meta_studies_results_or_all <- read_csv2(
   here(wes_meta_dir, "meta_studies_results_or_all.csv"))
 
-```
+patient_metadata_combined <- read_csv2(
+  here("data", "processed", "metadata", "patient_metadata_combined.csv"))
 
-# ----------
+# Add patient N stage and sex information
+wes_features_df <- wes_features_df %>%
+  left_join(patient_metadata_combined %>%
+              select(Patient, Sex, Baseline_N_h)) %>%
+  mutate(Baseline_N_h = ifelse(Baseline_N_h == "Nx", "N+", Baseline_N_h))
 
-```{r}
 wes_features_df <- wes_features_df %>%
   mutate(Response_n = ifelse(
     Response == "R",
@@ -205,6 +194,12 @@ wes_features_df <- wes_features_df %>%
          UV_scaled = scale(UV_abs),
          APOBEC_scaled = scale(APOBEC_abs)) 
 
+```
+
+
+# ----------
+
+```{r}
 table(wes_features_df$Response)
 wes_features_df$Response_n %>% mean() %>% round(2)
 
@@ -219,92 +214,47 @@ wes_features_df_excl_dMMR_UV <- wes_features_df %>%
 
 ```
 
+# Sex Stage Cohort
 ```{r}
-percentage_above_TMB_10 <- wes_features_df %>%
-  group_by(Trial) %>%
-  summarise(proportion = mean(TMB > 10)) %>%
-  mutate(percentage = round(proportion * 100))
+wes_features_df 
 
-tmb_trial_plot <- wes_features_df %>%
-  ggplot(aes(x = factor(Trial,
-                        levels = c("BELLINI", "NICHE-MSS", "IMCISION",
-                                   "NABUCCO", "OpACIN_neo", "PRADO",
-                                   "MATISSE", "NICHE-MSI")),
-             y = TMB, fill = Response)) +
-  geom_boxplot() + theme_Publication() +
-  # guides(fill = FALSE) +
-  labs(x = "", y = "TMB (mutations/Mb)") +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) + 
-  geom_hline(yintercept = 10, linetype = "dashed", alpha = 0.5) +
-  scale_y_continuous(expand = expand_scale(mult = c(0, 0.1))) +
-  geom_text(data = percentage_above_TMB_10 %>%
-              mutate(Response = "NR"),
-            aes(x = Trial, y = 168, label = paste0(percentage, "%")),
-            vjust = -1.5) +
-  scale_fill_manual(values = c(Color_NR, Color_R))
+# Mixed-effects linear model, treating trial as a random effect
+patient_metadata_combined_model <- patient_metadata_combined %>%
+  mutate(Response_n = ifelse(
+    Response == "R",
+    1, ifelse(
+      Response == "NR", 0, NA)))%>%
+  mutate(Baseline_N_h = ifelse(Baseline_N_h == "Nx", "N+", Baseline_N_h))
 
-tmb_trial_plot
-graph2pdf(x = tmb_trial_plot,
-          file = here(output_dir, "_TMB_trial_response_plot.pdf"),
-          colormodel = "rgb",
-          # font = "Arial",
-          height = 5,
-          width = 5.5)
+sex_stage_treatment_mixed_effects_model <- glmer(
+  Response_n ~ Sex + Baseline_N_h + Cohort + (1 | Trial),
+  data = patient_metadata_combined_model , family = binomial)
+summary(sex_stage_treatment_mixed_effects_model)
 
-wes_features_df %>%
-  ggplot(aes(x = factor(Trial,
-                        levels = c("BELLINI", "NICHE-MSS", "IMCISION",
-                                   "NABUCCO","OpACIN_neo", "PRADO",
-                                   "MATISSE", "NICHE-MSI")),
-             y = TMB, fill = Response)) +
-  geom_boxplot() + theme_Publication() +
-  # guides(fill = FALSE) +
-  labs(x = "", y = "TMB (mutations/Mb)") +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) + 
-  geom_hline(yintercept = 10, linetype = "dashed", alpha = 0.5) +
-  scale_y_continuous(expand = expand_scale(mult = c(0, 0.1))) +
-  geom_text(data = percentage_above_TMB_10 %>% mutate(Response = "NR"),
-            aes(x = Trial, y = 168, label = paste0(percentage, "%")),
-            vjust = -1.5) +
-  scale_fill_manual(values = c(Color_NR, Color_R)) +
-  scale_y_continuous(transform = "log2", n.breaks = 6)
+table(wes_features_df$Cohort, wes_features_df$Trial)
+```
+
+# Supplementary Table 1.  GLMM analysis Nivo Ipi combination vs Nivo Monotherapy
+
+```{r}
+sex_stage_treatment_mixed_effects_model_f <- glmer(
+  Response_n ~ Sex + Baseline_N_h + Cohort + (1 | Trial),
+  data = patient_metadata_combined_model %>%
+    filter(Trial %in% c("MATISSE", "BELLINI", "IMCISION")),
+  family = binomial)
+summary(sex_stage_treatment_mixed_effects_model_f)
+
+table(patient_metadata_combined$Cohort,
+      patient_metadata_combined$Response, patient_metadata_combined$Trial) %>%
+  as.data.frame() %>%
+  setNames(c("Cohort", "Response", "Trial", "Freq")) %>%
+  filter(Trial %in% c("MATISSE", "BELLINI", "IMCISION")) %>%
+  ggplot(aes(x = Cohort, y = Freq, fill = Response)) +
+  facet_wrap(~Trial) + geom_col() + theme_Publication()
 
 ```
 
 # GLMer TMB tumour type
-
-```{r}
-tmb_trial_cor <- wes_features_df %>%
-  select(Patient, TMB_scaled, Trial) %>% mutate(dummy = 1) %>%
-  pivot_wider(names_from = "Trial", values_from = "dummy") %>%
-  select(-Patient) %>%
-  as.matrix()
-tmb_trial_cor[is.na(tmb_trial_cor)] <- 0
-tmb_trial_cor %>% cor()
-tmb_trial_cor %>% cor() %>% corrplot()
-
-tmb_trial_cor <- wes_features_df_excl_dMMR %>%
-  select(Patient, TMB_scaled, Trial) %>%
-  mutate(dummy = 1) %>%
-  pivot_wider(names_from = "Trial", values_from = "dummy") %>%
-  select(-Patient) %>%
-  as.matrix()
-tmb_trial_cor[is.na(tmb_trial_cor)] <- 0
-tmb_trial_cor %>% cor()
-tmb_trial_cor %>% cor() %>% corrplot()
-
-tmb_trial_cor <- wes_features_df_excl_dMMR %>%
-  filter(!Trial %in% c("MATISSE")) %>%
-  select(Patient, TMB_scaled, Trial) %>%
-  mutate(dummy = 1) %>%
-  pivot_wider(names_from = "Trial", values_from = "dummy") %>%
-  select(-Patient) %>% as.matrix()
-tmb_trial_cor[is.na(tmb_trial_cor)] <- 0
-tmb_trial_cor %>% cor()
-tmb_trial_cor %>% cor() %>% corrplot()
-```
-
-
 ```{r}
 # Mixed-effects linear model, treating trial as a random effect
 tmb_mixed_effects_model <- glmer(Response_n ~ TMB_scaled + (1 | Trial),
@@ -323,7 +273,7 @@ summary(tmb_mixed_effects_model_excl_dmmr)
 TMB_model <- glm(Response_n ~ TMB_scaled,
                  data = wes_features_df, family = binomial)
 summary(TMB_model)
-        
+
 Trial_model <- glmer(Response_n ~ (1 | Trial),
                      data = wes_features_df, family = binomial)
 summary(Trial_model)
@@ -332,9 +282,13 @@ TMB_trial_model <- glmer(Response_n ~ TMB_scaled + (1 | Trial),
                          data = wes_features_df, family = binomial)
 summary(TMB_trial_model)
 
-trial_predictions <- predict(Trial_model, type = "response")
-tmb_predictions <- predict(TMB_model, type = "response")
-tmb_trial_predictions <- predict(TMB_trial_model, type = "response")
+# Cohort Nivo Ipi Mono
+TMB_trial_sex_stage_treatment_model <- glmer(
+  Response_n ~ TMB_scaled + Sex + Baseline_N_h + Cohort + (1 | Trial),
+  data = wes_features_df, family = binomial)
+TMB_trial_sex_stage_treatment_model
+summary(TMB_trial_sex_stage_treatment_model)
+
 ```
 
 ## Likelihood ratio test
@@ -360,7 +314,6 @@ TMB_trial_model <- glmer(Response_n ~ TMB_scaled + (1 | Trial),
 summary(TMB_trial_model)
 
 ```
-
 
 ## Likelihood ratio test
 ```{r}
@@ -448,26 +401,30 @@ wes_features_df_sensitivity %>%
   scale_color_manual(values = trial_colors)
 ```
 
+
 ## Models
+
+### Supplementary Table 4. GLMM Sensitivity Analysis UV + TMB
+
 ```{r}
-# Mixed-effects linear model, treating trial as a random effect
-model4 <- glmer(Response_n ~ TMB_scaled + (1 | Trial),
-                data = wes_features_df, family = binomial)
-summary(model4)
+# Cohort Nivo Ipi Mono
 
-model5 <- glmer(Response_n ~ UV_scaled + (1 | Trial),
+model1 <- glmer(Response_n ~ UV_scaled  + Sex + Baseline_N_h + Cohort + (1 | Trial),
                 data = wes_features_df, family = binomial)
-summary(model5)
+summary(model1)
 
-model6 <- glmer(Response_n ~ TMB_scaled + UV_scaled + (1 | Trial),
+model2 <- glmer(Response_n ~ TMB_scaled + UV_scaled  + Sex + Baseline_N_h + Cohort + (1 | Trial),
                 data = wes_features_df, family = binomial)
-summary(model6)
+summary(model2)
 
-# Likelihood ratio test
-anova(model5, model6)
-anova(model4, model6)
+model3 <- glmer(Response_n ~ TMB_scaled  + Sex + Baseline_N_h + Cohort + (1 | Trial),
+                data = wes_features_df, family = binomial)
+summary(model12)
+
+anova(model2, model1)
+anova(model2, model3)
+
 ```
-
 
 ```{r}
 # Excluding dMMR
@@ -488,50 +445,32 @@ anova(model5, model6)
 ```
 
 ## Excl dMMR and UV
+
+### Supplementary Table 5. GLMM Sensitivity Analysis UV excluding dMMR and UV cohorts
+### Supplementary Table 6. GLMM Sensitivity Analysis UV excluding dMMR and UV cohorts,  accounting for TMB
+
 ```{r}
-model4 <- glmer(Response_n ~ TMB_scaled + (1 | Trial),
-                data = wes_features_df_excl_dMMR_UV, family = binomial)
-summary(model4)
+# Cohort Nivo Ipi Mono
+table(wes_features_df_excl_dMMR_UV$Cohort, wes_features_df_excl_dMMR_UV$Trial)
 
-model5 <- glmer(Response_n ~ UV_scaled + (1 | Trial),
+model10 <- glmer(Response_n ~ TMB_scaled + UV_scaled  + Sex + Baseline_N_h + Cohort + (1 | Trial),
                 data = wes_features_df_excl_dMMR_UV, family = binomial)
-summary(model5)
 
-model6 <- glmer(Response_n ~ TMB_scaled + UV_scaled + (1 | Trial),
+summary(model10)
+
+model11 <- glmer(Response_n ~ TMB_scaled + Sex + Baseline_N_h + Cohort  + (1 | Trial),
                 data = wes_features_df_excl_dMMR_UV, family = binomial)
-summary(model6)
+summary(model11)
 
-anova(model5, model6)
+model12 <- glmer(Response_n ~ UV_scaled + Sex + Baseline_N_h + Cohort  + (1 | Trial),
+                data = wes_features_df_excl_dMMR_UV, family = binomial)
+summary(model12)
+
+anova(model10, model11)
+anova(model10, model12)
 ```
 
 ## TMB low histologies
-```{r}
-wes_features_df_excl_dMMR %>%
-  filter(Trial %in% c("BELLINI", "IMCISION", "NICHE-MSS")) %>%
-  pull(Trial) %>%
-  table()
-
-model4 <- glmer(Response_n ~ TMB_scaled + (1 | Trial),
-                data = wes_features_df_excl_dMMR %>%
-                  filter(Trial %in% c("BELLINI", "IMCISION", "NICHE-MSS")),
-                family = binomial)
-summary(model4)
-
-model5 <- glmer(Response_n ~ UV_scaled + (1 | Trial),
-                data = wes_features_df_excl_dMMR %>%
-                  filter(Trial %in% c("BELLINI", "IMCISION", "NICHE-MSS")),
-                family = binomial)
-summary(model5)
-model6 <- glmer(Response_n ~ TMB_scaled + UV_scaled + (1 | Trial),
-                data = wes_features_df_excl_dMMR %>%
-                  filter(Trial %in% c("BELLINI", "IMCISION", "NICHE-MSS")),
-                family = binomial)
-summary(model6)
-
-# Likelihood ratio tests
-anova(model5, model6)
-anova(model4, model6)
-```
 
 # ----------
 # APOBEC vs TMB
@@ -560,98 +499,60 @@ wes_features_df %>%
   scale_fill_manual(values = c(Color_NR, Color_R))
 ```
 
-## Models
-```{r}
-# Mixed effect model with Trial as a random effect
-model4 <- glmer(Response_n ~ TMB_scaled + (1 | Trial),
-                data = wes_features_df, family = binomial)
-summary(model4)
-
-model5 <- glmer(Response_n ~ APOBEC_scaled + (1 | Trial),
-                data = wes_features_df, family = binomial)
-summary(model5)
-
-model6 <- glmer(Response_n ~ TMB_scaled + APOBEC_scaled + (1 | Trial),
-                data = wes_features_df, family = binomial)
-summary(model6)
-
-# Likelihood ratio tests
-anova(model5, model6)
-anova(model4, model6)
-```
-
+### Supplementary Table 7. GLMM Sensitivity Analysis APOBEC + TMB
 
 ```{r}
-# Excluding dMMR
-model4 <- glmer(Response_n ~ TMB_scaled + (1 | Trial),
-                data = wes_features_df_excl_dMMR, family = binomial)
-summary(model4)
-model5 <- glmer(Response_n ~ APOBEC_scaled + (1 | Trial),
-                data = wes_features_df_excl_dMMR, family = binomial)
-summary(model5)
-model6 <- glmer(Response_n ~ TMB_scaled + APOBEC_scaled + (1 | Trial),
-                data = wes_features_df_excl_dMMR, family = binomial)
-summary(model6)
+# Cohort Nivo Ipi Mono
+table(wes_features_df_excl_dMMR_UV$Cohort, wes_features_df_excl_dMMR_UV$Trial)
 
-# Likelihood ratio tests
-anova(model5, model6)
-anova(model4, model6)
-```
+model10 <- glmer(Response_n ~ TMB_scaled + APOBEC_scaled  + Sex + Baseline_N_h + Cohort + (1 | Trial),
+                data = wes_features_df, family = binomial)
 
-## Excl dMMR and UV
-```{r}
-model4 <- glmer(Response_n ~ TMB_scaled + (1 | Trial),
-                data = wes_features_df_excl_dMMR_UV, family = binomial)
-summary(model4)
-model5 <- glmer(Response_n ~ APOBEC_scaled + (1 | Trial),
-                data = wes_features_df_excl_dMMR_UV, family = binomial)
-summary(model5)
-model6 <- glmer(Response_n ~ TMB_scaled + APOBEC_scaled + (1 | Trial),
-                data = wes_features_df_excl_dMMR_UV, family = binomial)
-summary(model6)
+summary(model10)
 
-anova(model5, model6)
+model11 <- glmer(Response_n ~ TMB_scaled + Sex + Baseline_N_h + Cohort + (1 | Trial),
+                data = wes_features_df, family = binomial)
+summary(model11)
+
+model12 <- glmer(Response_n ~ APOBEC_scaled + Sex + Baseline_N_h + Cohort  + (1 | Trial),
+                data = wes_features_df, family = binomial)
+summary(model12)
+
+anova(model10, model11)
+anova(model10, model12)
 ```
 
 ## TMB low histologies
+
+### Supplementary Table 8. GLMM Sensitivity Analysis APOBEC in TMB low cohorts
+### Supplementary Table 9. GLMM Sensitivity Analysis APOBEC in TMB low cohorts,  accounting for TMB
 ```{r}
-wes_features_df_excl_dMMR %>%
-                  filter(Trial %in% c("BELLINI", "IMCISION", "NICHE-MSS")) %>%
-  pull(Trial) %>%
-  table()
 
-model4 <- glmer(Response_n ~ TMB_scaled + (1 | Trial),
+# Cohort Nivo Ipi Mono
+table(wes_features_df_excl_dMMR_UV$Cohort, wes_features_df_excl_dMMR_UV$Trial)
+
+model10 <- glmer(Response_n ~ TMB_scaled + APOBEC_scaled + Sex + Baseline_N_h + Cohort + (1 | Trial),
                 data = wes_features_df_excl_dMMR %>%
                   filter(Trial %in% c("BELLINI", "IMCISION", "NICHE-MSS")),
                 family = binomial)
-summary(model4)
-model5 <- glmer(Response_n ~ APOBEC_scaled + (1 | Trial),
+
+summary(model10)
+
+model11 <- glmer(Response_n ~ TMB_scaled + Sex + Baseline_N_h + Cohort  + (1 | Trial),
                 data = wes_features_df_excl_dMMR %>%
                   filter(Trial %in% c("BELLINI", "IMCISION", "NICHE-MSS")),
                 family = binomial)
-summary(model5)
-model6 <- glmer(Response_n ~ TMB_scaled + APOBEC_scaled + (1 | Trial),
+summary(model11)
+
+model12 <- glmer(Response_n ~ APOBEC_scaled + Sex + Baseline_N_h + Cohort  + (1 | Trial),
                 data = wes_features_df_excl_dMMR %>%
                   filter(Trial %in% c("BELLINI", "IMCISION", "NICHE-MSS")),
                 family = binomial)
-summary(model6)
+summary(model12)
 
-# Likelihood ratio tests
-anova(model5, model6)
-anova(model4, model6)
-```
+anova(model10, model11)
+anova(model11, model12)
 
-# dMMR and frameshift
-```{r}
-# dMMR and Frameshift
-model4 <- glmer(Response_n ~ TMB_frameshift_scaled + (1 | Trial), data = wes_features_df %>% mutate(TMB_frameshift_scaled = scale(TMB_frameshift)), family = binomial)
-summary(model4)
-
-model4 <- glmer(Response_n ~ TMB_frameshift_scaled + (1 | Trial), data = wes_features_df_excl_dMMR %>% mutate(TMB_frameshift_scaled = scale(TMB_frameshift)), family = binomial)
-summary(model4)
-
-model4 <- glmer(Response_n ~ dMMR_scaled + (1 | Trial), data = wes_features_df %>% mutate(dMMR_scaled = scale(dMMR_abs)), family = binomial)
-summary(model4)
 ```
 
 # ----------
@@ -670,6 +571,16 @@ wes_rna_features_df <- wes_rna_features_df %>%
          TIL_score_scaled = scale(TIL_score),
          Proliferation_scaled = scale(Tumor_proliferation_rate),
          B_cat_scaled = scale(B_catenin_signature_Luke_et_al))
+
+# Add patient N stage and sex information
+wes_rna_features_df <- wes_rna_features_df %>%
+  left_join(patient_metadata_combined %>%
+              select(Patient, Sex, Baseline_N_h)) %>%
+  mutate(Baseline_N_h = ifelse(Baseline_N_h == "Nx", "N+", Baseline_N_h)) %>%
+  mutate(Cohort = ifelse(Cohort %in% c("Nivo_ipi_A", "Nivo_ipi_B", "Nivo_ipi_C"),
+                         "Nivo_ipi", Cohort))
+
+table(wes_rna_features_df$Cohort)
 
 wes_rna_features_df_pre <- wes_rna_features_df %>%
   filter(Treatment == "Pre")
@@ -838,72 +749,68 @@ wes_rna_features_df_pre_f %>%
   stat_cor() + facet_wrap(~Trial, scales = "free")
 ```
 
-# TIL score vs other signatures corr
-```{r, fig.height = 8, fig.width = 8}
-wes_rna_features_df_pre_f %>%
-  ggplot(aes(x = Ayers_T_cell_inflamed, y = TIL_score)) +
-  geom_point() + theme_Publication() + stat_cor()
+### Supplementary Table 14. GLMM analysis TMB and TIL signature score
 
-wes_rna_features_df_pre_f %>%
-  ggplot(aes(x = Ayers_T_cell_inflamed, y = TIL_score)) +
-  geom_point() + theme_Publication() +
-  stat_cor() + facet_wrap(~Trial, scales = "free")
-
-wes_rna_features_df_pre_f %>%
-  ggplot(aes(x = CXCL9, y = TIL_score)) +
-  geom_point() + theme_Publication() + stat_cor()
-
-wes_rna_features_df_pre_f %>%
-  ggplot(aes(x = CXCL9, y = TIL_score)) +
-  geom_point() + theme_Publication() +
-  stat_cor() + facet_wrap(~Trial, scales = "free")
-
-wes_rna_features_df_pre_f %>%
-  ggplot(aes(x = Immunologic_constant_of_rejection, y = TIL_score)) +
-  geom_point() + theme_Publication() + stat_cor()
-
-wes_rna_features_df_pre_f %>%
-  ggplot(aes(x = Immunologic_constant_of_rejection, y = TIL_score)) +
-  geom_point() + theme_Publication() +
-  stat_cor() + facet_wrap(~Trial, scales = "free")
-```
-
-## Fitting trials as random effects
 ```{r}
-Trial_model <- glmer(Response_n ~ (1 | Trial),
-                     data = wes_rna_features_df_pre_f, family = binomial)
-summary(Trial_model)
+# Cohort Nivo Ipi Mono
+model11 <- glmer(Response_n ~ TMB_scaled * TIL_score_scaled  + Sex + Baseline_N_h + Cohort + (1 | Trial),
+                data = wes_rna_features_df_pre_f,
+                family = binomial)
 
-TMB_model <- glmer(Response_n ~ TMB_scaled +  (1 | Trial),
-                   data = wes_rna_features_df_pre_f, family = binomial)
-summary(TMB_model)
-        
-TIL_model <- glmer(Response_n ~ TIL_score_scaled +  (1 | Trial),
-                   data = wes_rna_features_df_pre_f, family = binomial)
-summary(TIL_model)
-TMB_TIL_score_model <- glmer(
-  Response_n ~ TMB_scaled + TIL_score_scaled + (1 | Trial),
-  data = wes_rna_features_df_pre_f, family = binomial)
-summary(TMB_TIL_score_model)
+summary(model11)
 
-TMB_TIL_int_score_model <- glmer(
-  Response_n ~ TMB_scaled * TIL_score_scaled + (1 | Trial),
-  data = wes_rna_features_df_pre_f, family = binomial)
-summary(TMB_TIL_int_score_model)
+model12 <- glmer(Response_n ~ TMB_scaled + Sex + Baseline_N_h + Cohort  + (1 | Trial),
+                data = wes_rna_features_df_pre_f,
+                family = binomial)
+summary(model12)
 
-summary(TMB_TIL_int_score_model)$coefficients %>% round(2)
-summary(TMB_TIL_int_score_model)$coefficients[, 4] %>% round(4)
-ranef(TMB_TIL_int_score_model)
+model13 <- glmer(Response_n ~ TIL_score_scaled + Sex + Baseline_N_h + Cohort + (1 | Trial),
+                data = wes_rna_features_df_pre_f,
+                family = binomial)
+summary(model13)
+
+model14 <- glmer(Response_n ~ TMB_scaled + TIL_score_scaled + Sex + Baseline_N_h + Cohort + (1 | Trial),
+                data = wes_rna_features_df_pre_f,
+                family = binomial)
+summary(model14)
+
+anova(model11, model12)
+anova(model11, model13)
+anova(model11, model14)
+anova(model11, model13, model14)
+anova(model11, model12, model14)
 
 ```
 
-# Likelihood ratio tests
+## Excluding dMMR
+
+### Supplementary Table X. GLMM analysis TMB and TIL signature score excluding dMMR
+
 ```{r}
-anova(TMB_TIL_score_model, TMB_TIL_int_score_model)
-anova(TMB_TIL_score_model, TMB_TIL_int_score_model, TMB_model)
-anova(TMB_TIL_score_model, TMB_TIL_int_score_model, TIL_model)
-```
+wes_rna_features_df_pre_excl_dMMR <- wes_rna_features_df_pre_f %>%
+  filter(! Trial %in% c("NICHE-MSI"))
 
+# Cohort Nivo Ipi Mono
+model11 <- glmer(Response_n ~ TMB_scaled * TIL_score_scaled  + Sex + Baseline_N_h + Cohort + (1 | Trial),
+                data = wes_rna_features_df_pre_excl_dMMR,
+                family = binomial)
+
+summary(model11)
+
+model12 <- glmer(Response_n ~ TMB_scaled + Sex + Baseline_N_h + Cohort  + (1 | Trial),
+                data = wes_rna_features_df_pre_excl_dMMR,
+                family = binomial)
+summary(model12)
+
+model13 <- glmer(Response_n ~ TIL_score_scaled + Sex + Baseline_N_h + Cohort  + (1 | Trial),
+                data = wes_rna_features_df_pre_excl_dMMR,
+                family = binomial)
+summary(model13)
+
+anova(model11, model12)
+anova(model11, model13)
+```
+ 
 # ----------
 # Quadrant plots Proliferation TIL score
 
@@ -1097,43 +1004,70 @@ wes_rna_features_df_pre %>%
 ```
 
 # Prolif TIL score GLMer
-## Fitting trials as random effects
+
+### Supplementary Table 15. GLMM analysis TMB and Proliferation signature score
+
 ```{r}
-Trial_model <- glmer(Response_n ~ (1 | Trial),
-                     data = wes_rna_features_df_pre, family = binomial)
-summary(Trial_model)
-ranef(Trial_model)
+# Cohort Nivo Ipi Mono
+model11 <- glmer(Response_n ~ Proliferation_scaled * TIL_score_scaled  + Sex + Baseline_N_h + Cohort + (1 | Trial),
+                data = wes_rna_features_df_pre,
+                family = binomial)
 
-Proliferation_model <- glmer(Response_n ~ Proliferation_scaled + (1 | Trial),
-                             data = wes_rna_features_df_pre, family = binomial)
-summary(Proliferation_model)
-        
-TIL_model <- glmer(Response_n ~ TIL_score_scaled + (1 | Trial),
-                   data = wes_rna_features_df_pre, family = binomial)
-summary(TIL_model)
+summary(model11)
 
-Proliferation_TIL_score_model <- glmer(
-  Response_n ~ Proliferation_scaled + TIL_score_scaled + (1 | Trial),
-  data = wes_rna_features_df_pre, family = binomial)
-summary(Proliferation_TIL_score_model)
+model12 <- glmer(Response_n ~ Proliferation_scaled + Sex + Baseline_N_h + Cohort  + (1 | Trial),
+                data = wes_rna_features_df_pre,
+                family = binomial)
+summary(model12)
 
-ranef(Proliferation_TIL_score_model)
-summary(Proliferation_TIL_score_model)$coefficients %>% round(2)
-summary(Proliferation_TIL_score_model)$coefficients[, 4] %>% round(4)
+model13 <- glmer(Response_n ~ TIL_score_scaled + Sex + Baseline_N_h + Cohort  + (1 | Trial),
+                data = wes_rna_features_df_pre,
+                family = binomial)
+summary(model13)
 
-Proliferation_TIL_int_score_model <- glmer(
-  Response_n ~ Proliferation_scaled * TIL_score_scaled + (1 | Trial),
-  data = wes_rna_features_df_pre, family = binomial)
-summary(Proliferation_TIL_int_score_model)
-ranef(Proliferation_TIL_int_score_model)
+model14 <- glmer(Response_n ~ Proliferation_scaled + TIL_score_scaled  + Sex + Baseline_N_h + Cohort + (1 | Trial),
+                data = wes_rna_features_df_pre,
+                family = binomial)
+
+summary(model14)
+
+anova(model11, model12)
+anova(model11, model13)
+anova(model11, model14)
+
+anova(model11, model12, model14)
+anova(model11, model13, model14)
+
 ```
 
-## Likelihood ratio tests - nested models
+## Excl dMMR
+### Supplementary Table X. GLMM analysis TMB and Proliferation signature score excl dMMR
+
 ```{r}
-anova(Proliferation_TIL_int_score_model, Proliferation_TIL_score_model,
-      Proliferation_model)
-anova(Proliferation_TIL_int_score_model, Proliferation_TIL_score_model,
-      TIL_model)
+wes_rna_features_df_pre_excl_dMMR <- wes_rna_features_df_pre %>%
+  filter(!Trial %in% c("NICHE-MSI"))
+
+
+# Cohort Nivo Ipi Mono
+model11 <- glmer(Response_n ~ Proliferation_scaled * TIL_score_scaled  + Sex + Baseline_N_h + Cohort + (1 | Trial),
+                data = wes_rna_features_df_pre_excl_dMMR,
+                family = binomial)
+
+summary(model11)
+
+model12 <- glmer(Response_n ~ Proliferation_scaled + Sex + Baseline_N_h + Cohort  + (1 | Trial),
+                data = wes_rna_features_df_pre_excl_dMMR,
+                family = binomial)
+summary(model12)
+
+model13 <- glmer(Response_n ~ TIL_score_scaled + Sex + Baseline_N_h + Cohort  + (1 | Trial),
+                data = wes_rna_features_df_pre_excl_dMMR,
+                family = binomial)
+summary(model13)
+
+anova(model11, model12)
+anova(model11, model13)
+
 ```
 
 # ----------
